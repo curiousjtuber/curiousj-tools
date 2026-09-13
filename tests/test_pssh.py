@@ -1,0 +1,270 @@
+import io
+import os
+import subprocess
+import tempfile
+import unittest
+from unittest import mock
+
+from curiousj_tools import hosts, pick, pssh
+
+
+class SplitArgs(unittest.TestCase):
+    def test_leading_flags_then_command(self):
+        opts, words = pssh.split_args(["-N", "-f", "F", "-i", "-n", "uptime", "-p"])
+        self.assertEqual(opts.hosts, hosts.HostOpts(no_local=True, file="F"))
+        self.assertTrue(opts.interactive)
+        self.assertTrue(opts.dry_run)
+        self.assertFalse(opts.dirs)
+        self.assertEqual(words, ["uptime", "-p"])
+
+    def test_dir_flags_imply_dirs(self):
+        opts, words = pssh.split_args(["-r", "R", "git", "status"])
+        self.assertEqual((opts.dirs, opts.dirfile, opts.pick_dirs), (True, "R", False))
+        opts, words = pssh.split_args(["-D", "x"])
+        self.assertEqual((opts.dirs, opts.dirfile, opts.pick_dirs), (True, None, True))
+        opts, words = pssh.split_args(["--dirs", "x"])
+        self.assertTrue(opts.dirs)
+        opts, words = pssh.split_args(["-c", "x"])
+        self.assertEqual((opts.dirs, opts.clone), (True, True))
+
+    def test_double_dash_starts_the_command(self):
+        opts, words = pssh.split_args(["-p", "--", "-x", "y"])
+        self.assertTrue(opts.hosts.pick)
+        self.assertEqual(words, ["-x", "y"])
+
+    def test_bad_flags(self):
+        with self.assertRaises(hosts.UsageError):
+            pssh.split_args(["-x", "uptime"])
+        with self.assertRaises(hosts.UsageError):
+            pssh.split_args(["-r"])
+
+
+class CommandLine(unittest.TestCase):
+    def test_single_word_is_a_shell_line(self):
+        self.assertEqual(pssh.command_line(["cd ~/src && git pull"]), "cd ~/src && git pull")
+
+    def test_several_words_are_quoted_argv(self):
+        self.assertEqual(pssh.command_line(["ls", "my dir"]), "ls 'my dir'")
+
+    def test_shell_command_starts_at_home_and_wraps_for_i(self):
+        self.assertEqual(pssh.shell_command("uptime"), "cd ~\nuptime")
+        cmd = pssh.shell_command("alias ec", interactive=True)
+        self.assertTrue(cmd.startswith("zsh -ic '"))
+        self.assertIn("alias ec", cmd)
+
+
+def D(path, url=None, branch=None):
+    return pssh.Dir(path, url, branch)
+
+
+def sh(script, env=None):
+    return subprocess.run(["sh", "-c", script], capture_output=True, text=True, env=env)
+
+
+class DirsScript(unittest.TestCase):
+    def test_quotes_each_call_and_embeds_the_command(self):
+        script = pssh.dirs_script([D("dotfiles"), D("my dir", "u r l"), D("it's", "u", "b")],
+                                  "git status -s", clone=True)
+        self.assertIn("\nrun dotfiles\n", script)
+        self.assertIn("\nrun 'my dir' 'u r l'\n", script)
+        self.assertIn("""\nrun 'it'"'"'s' u b\n""", script)
+        self.assertIn("git status -s", script)
+        self.assertTrue(script.endswith("exit $rc"))
+
+    def test_without_clone_urls_are_left_out(self):
+        script = pssh.dirs_script([D("a", "url", "b")], "true")
+        self.assertIn("\nrun a\n", script)
+        self.assertNotIn("url", script.split("run() {")[1].split("\n}")[1])
+
+    def test_runs_under_sh(self):
+        """Run in an existing dir, skip a missing one, fail on a failing one."""
+        with tempfile.TemporaryDirectory() as home:
+            os.mkdir(os.path.join(home, "ok"))
+            os.mkdir(os.path.join(home, "bad"))
+            env = dict(os.environ, HOME=home)
+            script = pssh.dirs_script([D("ok"), D("missing"), D("bad")],
+                                      '[ "$(basename "$PWD")" != bad ] && echo in $PWD')
+            proc = sh(script, env)
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertEqual(proc.stdout.splitlines(), [
+            f"== {home}/ok", f"in {home}/ok",
+            f"== {home}/missing: missing, skipped",
+            f"== {home}/bad", f"== {home}/bad: FAILED"])
+
+    def test_absolute_dirs_stay_absolute(self):
+        self.assertIn("== /opt/x: missing, skipped", sh(pssh.dirs_script([D("/opt/x")], "true")).stdout)
+
+    def test_clone_then_run(self):
+        """A missing dir with a url is cloned (on the branch asked for) and the
+        command runs in the fresh clone; a bad url fails that entry only."""
+        with tempfile.TemporaryDirectory() as home:
+            env = dict(os.environ, HOME=home, GIT_CONFIG_GLOBAL="/dev/null")
+            origin = os.path.join(home, "origin")
+            subprocess.run(["git", "init", "-q", "-b", "main", origin], check=True, env=env)
+            git = ["git", "-C", origin, "-c", "user.name=t", "-c", "user.email=t@t"]
+            subprocess.run(git + ["commit", "-q", "--allow-empty", "-m", "init"], check=True, env=env)
+            subprocess.run(git + ["branch", "-q", "feature"], check=True, env=env)
+            entries = [D("clone", origin, "feature"), D("nourl"), D("bad", os.path.join(home, "nope"))]
+            proc = sh(pssh.dirs_script(entries, "git branch --show-current", clone=True), env)
+            self.assertTrue(os.path.isdir(os.path.join(home, "clone", ".git")))
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        lines = proc.stdout.splitlines()
+        self.assertEqual(lines[:3], [f"== {home}/clone: cloning {origin}", f"== {home}/clone", "feature"])
+        self.assertIn(f"== {home}/nourl: missing, skipped", lines)
+        self.assertIn(f"== {home}/bad: clone FAILED", lines)
+        self.assertNotIn(f"== {home}/bad", lines)
+
+
+TOML = '''# mine
+[[dir]]
+path = "a"
+url = "git@example.com:me/a.git"
+branch = "main"
+
+[[dir]]
+path = "b"
+'''
+
+
+class Dirs(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.file = os.path.join(self.tmp.name, "ssh-dirs.toml")
+        self.write(TOML)
+
+    def write(self, text):
+        with open(self.file, "w") as f:
+            f.write(text)
+
+    def test_reads_and_picks(self):
+        self.assertEqual(pssh.dirs(self.file, False),
+                         [D("a", "git@example.com:me/a.git", "main"), D("b")])
+        with mock.patch.object(pick, "pick", return_value=["b"]) as p:
+            self.assertEqual(pssh.dirs(self.file, True), [D("b")])
+        p.assert_called_once_with(["a", "b"], "dirs")
+
+    def test_found_under_lists_dir(self):
+        env = {"HOME": "/nonexistent", "SSH_LISTS_DIR": self.tmp.name}
+        self.assertEqual(len(pssh.dirs(None, False, env)), 2)
+
+    def test_empty_and_missing(self):
+        self.write("# nothing\n")
+        with self.assertRaises(hosts.HostsError):
+            pssh.dirs(self.file, False)
+        with self.assertRaises(hosts.HostsError):
+            pssh.dirs(None, False, env={"HOME": self.tmp.name})
+
+    def test_malformed(self):
+        for text, msg in [("[[dir]]\nurl = 'x'\n", "needs a path"),
+                          ("[[dir]]\npath = 'a'\nurl = 3\n", "url must be a string"),
+                          ("dir = 'a'\n", "[[dir]] tables"),
+                          ("[[dir\n", self.file)]:
+            self.write(text)
+            with self.assertRaises(hosts.HostsError) as cm:
+                pssh.read_dirs(self.file)
+            self.assertIn(msg, str(cm.exception))
+
+
+class ParallelArgv(unittest.TestCase):
+    def test_localhost_is_colon(self):
+        argv = pssh.parallel_argv(["a", "b", "localhost"], "uptime")
+        self.assertEqual(argv, ["parallel", "--nonall", "--tag", "--linebuffer",
+                                "-S", "a,b,:", "uptime"])
+
+
+class Main(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dirfile = os.path.join(self.tmp.name, "ssh-dirs.toml")
+        with open(self.dirfile, "w") as f:
+            f.write(TOML)
+
+    def test_execs_parallel(self):
+        with mock.patch.object(hosts, "hosts", return_value=["a", "localhost"]), \
+                mock.patch("shutil.which", return_value="/usr/bin/parallel"), \
+                mock.patch("os.execvp") as ex, \
+                mock.patch.object(hosts, "confirm_new_hosts"):
+            pssh.main(["-N", "uptime"])
+        ex.assert_called_once_with("parallel", ["parallel", "--nonall", "--tag", "--linebuffer",
+                                                "-S", "a,:", "cd ~\nuptime"])
+
+    def test_dirs_mode_wraps_the_command(self):
+        with mock.patch.object(hosts, "hosts", return_value=["localhost"]), \
+                mock.patch("shutil.which", return_value="/usr/bin/parallel"), \
+                mock.patch("os.execvp") as ex, \
+                mock.patch.object(hosts, "confirm_new_hosts"):
+            pssh.main(["-r", self.dirfile, "git", "status", "-s"])
+        cmd = ex.call_args[0][1][-1]
+        self.assertTrue(cmd.startswith("cd ~\nrc=0\nrun() {"))
+        self.assertIn("\nrun a\nrun b\nexit $rc", cmd)
+        self.assertIn("git status -s", cmd)
+
+    def test_clone_flag_reaches_the_script(self):
+        with mock.patch.object(hosts, "hosts", return_value=["localhost"]), \
+                mock.patch("shutil.which", return_value="/usr/bin/parallel"), \
+                mock.patch("os.execvp") as ex, \
+                mock.patch.object(hosts, "confirm_new_hosts"):
+            pssh.main(["-c", "-r", self.dirfile, "true"])
+        self.assertIn("\nrun a git@example.com:me/a.git main\nrun b\n", ex.call_args[0][1][-1])
+
+    def test_dry_run_prints_command_and_hosts_without_parallel(self):
+        with mock.patch.object(hosts, "hosts", return_value=["h1", "localhost"]), \
+                mock.patch("shutil.which", return_value=None), \
+                mock.patch("os.execvp") as ex, \
+                mock.patch.object(hosts, "confirm_new_hosts"), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(pssh.main(["-n", "-r", self.dirfile, "uptime"]), 0)
+        ex.assert_not_called()
+        text = out.getvalue()
+        self.assertIn("\nrun a\nrun b\n", text)
+        self.assertIn("-- on:\n   h1\n   localhost\n", text)
+
+    def test_pick_dirs_before_hosts(self):
+        with mock.patch.object(pick, "pick", side_effect=pick.Abort), \
+                mock.patch.object(hosts, "hosts") as h, \
+                mock.patch("shutil.which", return_value="/usr/bin/parallel"):
+            self.assertEqual(pssh.main(["-D", "-r", self.dirfile, "uptime"]), 130)
+        h.assert_not_called()
+
+    def test_usage_errors(self):
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(pssh.main(["-N"]), 2)
+            self.assertEqual(pssh.main(["-x", "uptime"]), 2)
+        self.assertIn("usage:", err.getvalue())
+        self.assertIn("unknown option -x", err.getvalue())
+
+    def test_missing_parallel_and_dirfile(self):
+        with mock.patch("shutil.which", return_value=None), \
+                mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(pssh.main(["uptime"]), 1)
+            with mock.patch("shutil.which", return_value="/usr/bin/parallel"):
+                self.assertEqual(pssh.main(["-r", os.path.join(self.tmp.name, "none"), "x"]), 1)
+        self.assertIn("parallel not installed", err.getvalue())
+        self.assertIn("cannot read", err.getvalue())
+
+    def test_unconfirmed_host_key_aborts_before_parallel(self):
+        with mock.patch.object(hosts, "hosts", return_value=["new", "localhost"]), \
+                mock.patch("shutil.which", return_value="/usr/bin/parallel"), \
+                mock.patch.object(hosts, "confirm_new_hosts",
+                                  side_effect=hosts.HostsError("new: host key not confirmed")), \
+                mock.patch("os.execvp") as ex, \
+                mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(pssh.main(["uptime"]), 1)
+        ex.assert_not_called()
+        self.assertIn("pssh: new: host key not confirmed", err.getvalue())
+
+    def test_abort_propagates(self):
+        with mock.patch("shutil.which", return_value="/usr/bin/parallel"), \
+                mock.patch.object(hosts, "hosts", side_effect=pick.Abort):
+            self.assertEqual(pssh.main(["-p", "uptime"]), 130)
+
+    def test_help(self):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(pssh.main(["-h"]), 0)
+        self.assertIn("pssh [-h]", out.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main()

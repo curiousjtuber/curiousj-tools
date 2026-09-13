@@ -1,0 +1,5 @@
+# One [user@]host per line; blank lines and #-comments are ignored.
+# Lives at ~/.config/ssh-hosts, or in $SSH_LISTS_DIR (see README).
+alice@devbox
+build.example.com
+my-mac.local

@@ -1,0 +1,22 @@
+# Example sshtsf config. Lives at ~/.config/sshtsf/config.toml
+# ($XDG_CONFIG_HOME/sshtsf/config.toml); `sshtsf config-path` prints the path.
+# sshtsf rewrites the file, so comments outside its header are not preserved.
+
+default_host = "devbox"
+
+[last]
+host = "devbox"
+session = "web"
+
+[hosts.devbox]
+target = "devbox"       # ssh destination; defaults to the host key
+alias = "c"
+ecf = true              # forward the local Emacs socket, by default
+ecf_port = 41234        # relay via TCP port (for SELinux hosts where sshd cannot bind unix sockets)
+
+[hosts.devbox.sessions.web]
+alias = "devweb"        # host+session alias, usable as a single word
+folder = "src/webapp"
+command = "make dev"
+ecf = false             # ... except for this session
+waypipe = true          # ... and forward Wayland for this one

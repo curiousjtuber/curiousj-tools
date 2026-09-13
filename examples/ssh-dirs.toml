@@ -1,0 +1,14 @@
+# Directories `pssh -d` runs a command in, on every host. Lives at
+# ~/.config/ssh-dirs.toml, or in $SSH_LISTS_DIR (see README).
+
+[[dir]]
+path = "dotfiles"                        # relative to ~ unless absolute
+url = "git@github.com:me/dotfiles.git"   # optional: `pssh -c` clones it when missing
+
+[[dir]]
+path = "src/webapp"
+url = "git@github.com:me/webapp.git"
+branch = "main"                          # optional: -b for the clone
+
+[[dir]]
+path = "/opt/tools/mytool"               # no url: never cloned, skipped where absent

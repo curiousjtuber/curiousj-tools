@@ -1,0 +1,1627 @@
+"""sshtsf -- pick an ssh+tmux session by name, alias, or menu.
+
+ssh to a host and `tmux new-session -A` there: it remembers the
+host, session name, remote folder and command in ~/.config/sshtsf/config.toml
+so that a two-word invocation replaces a hand-written alias per session.
+
+    sshtsf                 pick a host, then a session
+    sshtsf devbox          pick a session on devbox
+    sshtsf devbox web      connect to session web on devbox
+    sshtsf devweb          the same, via a host+session alias
+    sshtsf devbox -n [NAME]  register a new session, then connect
+    sshtsf remote devbox   git remote add, for this repo on devbox
+
+Selections use fzf when it is on PATH and fall back to a numbered menu.
+
+With ecf on, the connection also reverse-forwards the local Emacs server
+socket, so emacsclient / $EDITOR / magit on the remote open in the local
+Emacs; `emacsclient-auto` (this package) does the remote-side routing when it
+is the remote's EDITOR; see README.
+It is remembered per host or per session; -e / -E override for one call.
+
+With waypipe on, the connection is wrapped in `waypipe ssh`, so applications
+started inside the remote tmux session draw on the local Wayland desktop.
+Remembered the same way; -w / -W override. Wayland clients only.
+
+Config layout (all fields but the host key are optional):
+
+    default_host = "devbox"
+
+    [last]
+    host = "devbox"
+    session = "web"
+
+    [hosts.devbox]
+    target = "devbox"       # ssh destination; defaults to the host key
+    alias = "c"
+    ecf = true              # forward the local Emacs socket, by default
+    ecf_port = 41234        # relay via TCP port (for SELinux hosts where sshd cannot bind unix sockets)
+
+    [hosts.devbox.sessions.web]
+    alias = "devweb"        # host+session alias, usable as a single word
+    folder = "src/webapp"
+    command = "make dev"
+    ecf = false             # ... except for this session
+    waypipe = true          # ... and forward Wayland for this one
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shlex
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import textwrap
+from typing import NamedTuple
+
+import tomllib
+
+CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+CONFIG_DIR = os.path.join(CONFIG_HOME, "sshtsf")
+CONFIG_PATH = os.path.join(CONFIG_DIR, "config.toml")
+
+NEW_HOST = "+ new host"
+NEW_SESSION = "+ new session"
+
+# Where an ecf forward lands on the remote. Shared with the remote side: the
+# remote's `emacsclient-auto` looks for it under EMACSCLIENT_FORWARD_SOCKET,
+# and sshtsf and emacsclient-auto agree on the default /tmp/emacs-remote-socket.
+ECF_REMOTE_SOCKET = os.environ.get("ECF_REMOTE_SOCKET") or "/tmp/emacs-remote-socket"
+
+# Extra options spliced into the waypipe argv, e.g. --compress zstd, --no-gpu,
+# --xwls, or --remote-bin for a host where waypipe is not on the PATH a
+# non-interactive ssh gets. An env knob rather than config fields, so waypipe's
+# whole option set is reachable without teaching this file any of it.
+WAYPIPE_OPTS = shlex.split(os.environ.get("SSHTSF_WAYPIPE_OPTS") or "")
+
+# The boolean fields, as opposed to the string ones. Both resolve the same way
+# (flag, then session, then host) and both are written as bare TOML literals.
+BOOL_FIELDS = ("ecf", "waypipe")
+
+# Accepted spellings for the boolean fields in the config.
+TRUE_WORDS = ("true", "yes", "on", "1")
+FALSE_WORDS = ("false", "no", "off", "0")
+
+# Machines you have actually ssh'd to, offered as candidates when a name is
+# not registered here. known_hosts rather than ~/.ssh/config because it
+# accumulates on its own, with no upkeep.
+KNOWN_HOSTS_PATH = os.path.expanduser("~/.ssh/known_hosts")
+
+# Enough to jog a memory; a long-lived known_hosts runs to hundreds.
+MAX_KNOWN_HOSTS = 24
+
+
+# --------------------------------------------------------------------------
+# tiny TOML writer
+#
+# tomllib reads but does not write, and tomli_w is not installed. The schema
+# here is small and fully known, so emit it directly rather than take on a
+# dependency. Comments in a hand-edited config are lost on rewrite; that is
+# the one cost of this approach.
+# --------------------------------------------------------------------------
+
+BARE_KEY_OK = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+
+
+def toml_key(key: str) -> str:
+    if key and all(c in BARE_KEY_OK for c in key):
+        return key
+    return toml_str(key)
+
+
+def toml_str(value: str) -> str:
+    out = value.replace("\\", "\\\\").replace('"', '\\"')
+    out = out.replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r")
+    return '"%s"' % out
+
+
+def toml_bool(value) -> str:
+    return "true" if value else "false"
+
+
+def dump_config(cfg: dict) -> str:
+    lines: list[str] = [
+        "# sshtsf config -- see `sshtsf --help`.",
+        "# Rewritten by sshtsf; comments outside this header are not preserved.",
+        "",
+    ]
+
+    if cfg.get("default_host"):
+        lines.append("default_host = %s" % toml_str(cfg["default_host"]))
+        lines.append("")
+
+    last = cfg.get("last") or {}
+    if last.get("host"):
+        lines.append("[last]")
+        lines.append("host = %s" % toml_str(last["host"]))
+        if last.get("session"):
+            lines.append("session = %s" % toml_str(last["session"]))
+        lines.append("")
+
+    # The booleans are keyed on presence, not truth, unlike the string fields:
+    # a session's `ecf = false` is what opts it out of a host default, so it
+    # has to survive a rewrite rather than be dropped as falsy.
+    for host, hcfg in sorted((cfg.get("hosts") or {}).items()):
+        lines.append("[hosts.%s]" % toml_key(host))
+        for field in ("target", "alias"):
+            if hcfg.get(field):
+                lines.append("%s = %s" % (field, toml_str(hcfg[field])))
+        if hcfg.get("ecf_port"):
+            lines.append("ecf_port = %s" % hcfg["ecf_port"])
+        for field in BOOL_FIELDS:
+            if field in hcfg:
+                lines.append("%s = %s" % (field, toml_bool(hcfg[field])))
+        lines.append("")
+
+        for sess, scfg in sorted((hcfg.get("sessions") or {}).items()):
+            lines.append("[hosts.%s.sessions.%s]" % (toml_key(host), toml_key(sess)))
+            for field in ("alias", "folder", "command"):
+                if scfg.get(field):
+                    lines.append("%s = %s" % (field, toml_str(scfg[field])))
+            if scfg.get("ecf_port"):
+                lines.append("ecf_port = %s" % scfg["ecf_port"])
+            for field in BOOL_FIELDS:
+                if field in scfg:
+                    lines.append("%s = %s" % (field, toml_bool(scfg[field])))
+            lines.append("")
+
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def load_config() -> dict:
+    if not os.path.exists(CONFIG_PATH):
+        return {"hosts": {}}
+    try:
+        with open(CONFIG_PATH, "rb") as fh:
+            cfg = tomllib.load(fh)
+    except tomllib.TOMLDecodeError as exc:
+        sys.exit("sshtsf: %s is not valid TOML: %s" % (CONFIG_PATH, exc))
+    cfg.setdefault("hosts", {})
+    return cfg
+
+
+def save_config(cfg: dict) -> None:
+    os.makedirs(CONFIG_DIR, exist_ok=True)
+    # Write via a temp file in the same dir, then rename: a crash or a full
+    # disk leaves the previous config intact rather than a truncated one.
+    fd, tmp = tempfile.mkstemp(dir=CONFIG_DIR, prefix=".config.toml.")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write(dump_config(cfg))
+        os.replace(tmp, CONFIG_PATH)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+# --------------------------------------------------------------------------
+# selection helpers
+# --------------------------------------------------------------------------
+
+
+def have_fzf() -> bool:
+    return shutil.which("fzf") is not None
+
+
+def pick(items: list[str], prompt: str, header: str = "",
+         free_text: bool = False, query: str = "") -> str | None:
+    """Choose one of items. Returns None if the user aborted.
+
+    free_text allows a value that is not in the list -- right for a remote
+    folder, wrong for a host or session, where anything off-list is a typo and
+    would only fail a lookup later. query pre-fills fzf's search box.
+    """
+    if not items:
+        return None
+    if have_fzf() and sys.stdin.isatty():
+        cmd = ["fzf", "--prompt", prompt + " ", "--height", "60%", "--reverse"]
+        if header:
+            cmd += ["--header", header]
+        if query:
+            cmd += ["--query", query]
+        if free_text:
+            # print-query puts the typed text on line 1 and any match after it,
+            # so a value with no match still comes back.
+            cmd += ["--print-query"]
+        proc = subprocess.run(cmd, input="\n".join(items), text=True,
+                              stdout=subprocess.PIPE)
+        lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+        if free_text:
+            # Prefer a real selection; fall back to the query when nothing
+            # matched. Exit 130 is abort; exit 1 with a query is "no match".
+            if proc.returncode == 130:
+                return None
+            return (lines[-1] if lines else None)
+        if proc.returncode != 0:
+            return None
+        return lines[-1] if lines else None
+    return pick_numbered(items, prompt, header, free_text)
+
+
+MENU_LIMIT = 40
+
+
+def pick_numbered(items: list[str], prompt: str, header: str = "",
+                  free_text: bool = False) -> str | None:
+    """Numbered fallback for when fzf is absent."""
+    if header:
+        print(header, file=sys.stderr)
+    shown = items[:MENU_LIMIT]
+    for i, item in enumerate(shown, 1):
+        print("  %2d) %s" % (i, item), file=sys.stderr)
+    if len(items) > len(shown):
+        note = "type a value to use it" if free_text else "install fzf to filter"
+        print("  ... %d more (%s)" % (len(items) - len(shown), note),
+              file=sys.stderr)
+
+    hint = "1-%d, a value, or q" % len(shown) if free_text \
+        else "1-%d, or q" % len(shown)
+    while True:
+        try:
+            reply = input("%s [%s]: " % (prompt, hint)).strip()
+        except (EOFError, KeyboardInterrupt):
+            print(file=sys.stderr)
+            return None
+        if reply in ("q", "Q", ""):
+            return None
+        if reply.isdigit() and 1 <= int(reply) <= len(shown):
+            return shown[int(reply) - 1]
+        if reply in items:
+            return reply
+        if free_text:
+            return reply
+        print("  not a choice: %s" % reply, file=sys.stderr)
+
+
+def ask(prompt: str, default: str = "") -> str:
+    suffix = " [%s]" % default if default else ""
+    try:
+        reply = input("%s%s: " % (prompt, suffix)).strip()
+    except (EOFError, KeyboardInterrupt):
+        print(file=sys.stderr)
+        raise SystemExit(130)
+    return reply or default
+
+
+# --------------------------------------------------------------------------
+# config lookup
+# --------------------------------------------------------------------------
+
+
+def host_names(cfg: dict) -> list[str]:
+    return sorted(cfg.get("hosts", {}))
+
+
+def resolve_host(cfg: dict, token: str) -> str | None:
+    """Host key for a token that may be the key itself or a host alias."""
+    hosts = cfg.get("hosts", {})
+    if token in hosts:
+        return token
+    for name, hcfg in hosts.items():
+        if hcfg.get("alias") == token:
+            return name
+    return None
+
+
+def resolve_session(cfg: dict, host: str, token: str) -> str | None:
+    sessions = cfg["hosts"].get(host, {}).get("sessions", {})
+    if token in sessions:
+        return token
+    for name, scfg in sessions.items():
+        if scfg.get("alias") == token:
+            return name
+    return None
+
+
+def resolve_pair_alias(cfg: dict, token: str) -> tuple[str, str] | None:
+    """(host, session) for a single-word host+session alias."""
+    for host, hcfg in cfg.get("hosts", {}).items():
+        for sess, scfg in (hcfg.get("sessions") or {}).items():
+            if scfg.get("alias") == token:
+                return host, sess
+    return None
+
+
+def ssh_target(cfg: dict, host: str) -> str:
+    return cfg["hosts"].get(host, {}).get("target") or host
+
+
+class Overrides(NamedTuple):
+    """Per-call answers to the boolean fields; None means "use the config".
+
+    Bundled rather than passed one parameter each, because they travel together
+    through connect(), every route_* and the subcommand shim, and a parameter
+    apiece would make six-argument signatures of all of them.
+    """
+    ecf: bool | None = None
+    waypipe: bool | None = None
+
+
+NO_OVERRIDES = Overrides()
+
+
+def resolve_flag(cfg: dict, host: str, session: str, field: str,
+                 override: bool | None) -> bool:
+    """Whether a boolean field is on: the flag, then session, then host."""
+    if override is not None:
+        return override
+    hcfg = cfg["hosts"].get(host, {})
+    scfg = (hcfg.get("sessions") or {}).get(session, {})
+    if field in scfg:
+        return bool(scfg[field])
+    return bool(hcfg.get(field))
+
+
+def describe_host(cfg: dict, host: str) -> str:
+    """`devbox  (alias c, -> target, ecf, default)` -- one host, with its marks."""
+    hcfg = cfg["hosts"].get(host, {})
+    marks = []
+    if hcfg.get("alias"):
+        marks.append("alias %s" % hcfg["alias"])
+    if hcfg.get("target") and hcfg["target"] != host:
+        marks.append("-> %s" % hcfg["target"])
+    marks += [field for field in BOOL_FIELDS if hcfg.get(field)]
+    if host == cfg.get("default_host"):
+        marks.append("default")
+    return "%s%s" % (host, "  (%s)" % ", ".join(marks) if marks else "")
+
+
+def ssh_known_hosts(path: str = KNOWN_HOSTS_PATH) -> list[str]:
+    """Host names from ~/.ssh/known_hosts, deduplicated and sorted.
+
+    A host appears once per key type, hence the dedupe. Hashed entries
+    (HashKnownHosts, `|1|...') cannot be reversed, so they are skipped, as are
+    wildcard and negated patterns -- none of those is a name you could type.
+    One line may list several names comma-separated, and a non-default port
+    appears as [host]:port, unwrapped here to the bare host.
+
+    Marker lines are skipped whole: @cert-authority names a CA and a pattern
+    it signs for rather than a machine, and @revoked marks a key as untrusted,
+    which is the last thing to offer as a suggestion.
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return []
+
+    names: set[str] = set()
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split()
+        if not fields or fields[0].startswith("@") or fields[0].startswith("|"):
+            continue
+        for pattern in fields[0].split(","):
+            if not pattern or pattern.startswith("!"):
+                continue
+            if "*" in pattern or "?" in pattern:
+                continue
+            if pattern.startswith("[") and "]" in pattern:
+                pattern = pattern[1:pattern.index("]")]
+            if pattern:
+                names.add(pattern)
+    return sorted(names)
+
+
+def ssh_host_candidates(cfg: dict) -> list[str]:
+    """known_hosts entries not already registered -- i.e. worth offering."""
+    taken = set()
+    for host, hcfg in (cfg.get("hosts") or {}).items():
+        taken.add(host)
+        for field in ("alias", "target"):
+            if hcfg.get(field):
+                taken.add(hcfg[field])
+    return [host for host in ssh_known_hosts() if host not in taken]
+
+
+def logical_cwd() -> str:
+    """The working directory as the shell names it, symlinks unresolved.
+
+    os.getcwd() answers with the physical path, which is the wrong one here:
+    with ~/src a symlink to /Volumes/src, the cwd comes back as
+    /Volumes/src/... and its path relative to ~ is then a useless
+    ../../Volumes/src/... -- no use at all for a mirrored remote path.
+    The shell's own idea of where it is lives in PWD, which keeps the symlink.
+
+    PWD is inherited, so it can be stale or belong to a different directory
+    entirely; the stat comparison is what makes trusting it safe. Same device
+    and inode means it really is another name for this directory.
+    """
+    pwd = os.environ.get("PWD") or ""
+    if pwd and os.path.isabs(pwd):
+        try:
+            here, there = os.stat("."), os.stat(pwd)
+            if (here.st_dev, here.st_ino) == (there.st_dev, there.st_ino):
+                return pwd
+        except OSError:
+            pass
+    return os.getcwd()
+
+
+def git_repo_root() -> str | None:
+    """The root of the git repo containing the cwd, or None if there is none.
+
+    --show-cdup rather than --show-toplevel, because toplevel is resolved and
+    would undo the care taken in logical_cwd. cdup is relative -- empty at the
+    root, ../ one level down -- so joining it onto the logical path walks up to
+    the root without resolving anything.
+
+    --is-inside-work-tree is asked in the same breath because cdup alone is not
+    enough: inside a .git directory it succeeds and prints an empty line, as if
+    this were the root, and the answer would be a confident ~/repo/.git rather
+    than an error.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree", "--show-cdup"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=10)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    lines = proc.stdout.splitlines()
+    if proc.returncode != 0 or len(lines) < 2 or lines[0].strip() != "true":
+        return None
+    # Not stripped of its meaning when empty: join(cwd, "") is the cwd, which is
+    # the right answer at the root.
+    return os.path.normpath(os.path.join(logical_cwd(), lines[1].strip()))
+
+
+def home_relative_repo() -> tuple[str | None, str]:
+    """(folder, root) for the current repo: its path relative to ~.
+
+    folder is what a mirrored remote path is built from, in the same form the
+    session `folder' fields take -- relative to $HOME, because that is the one
+    thing both machines agree on. None means there is nothing to mirror, and
+    root says why: empty for "not a repo at all", otherwise the repo root that
+    turned out to sit outside $HOME.
+    """
+    root = git_repo_root()
+    if root is None:
+        return None, ""
+    folder = os.path.relpath(root, os.path.expanduser("~"))
+    if folder.startswith(".."):
+        return None, root
+    return folder, root
+
+
+def show_home_path(folder: str) -> str:
+    """`~/src/mytool' -- a home-relative folder as something readable."""
+    return "~" if folder == "." else "~/%s" % folder
+
+
+def valid_remote_name(name: str) -> bool:
+    """Whether name is usable as a git remote, by git's own reckoning.
+
+    check-ref-format against the ref a remote would create, rather than a
+    hand-written character rule: git's spelling rules are more particular than
+    they look (no spaces, nothing ending .lock, no .. or leading -) and it is
+    the one authority on them. A git too old or too absent to ask is taken as a
+    yes, leaving the real `git remote add' to be the judge.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "check-ref-format", "refs/remotes/%s/HEAD" % name],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return True
+    return proc.returncode == 0
+
+
+def git_remote_url(name: str) -> str | None:
+    """The URL of an existing git remote, or None if there is no such remote.
+
+    get-url exits 2 for a remote that does not exist, but any non-zero is taken
+    as absent here: the only thing the caller does with the answer is choose
+    between `remote add' and `remote set-url', and git itself rejects the wrong
+    one of those.
+    """
+    try:
+        proc = subprocess.run(["git", "remote", "get-url", name], text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              timeout=10)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip() or None
+
+
+def host_hint(cfg: dict, ssh_hosts: bool = False) -> str:
+    """What is registered, for the messages that reject a host name.
+
+    A rejected host is nearly always a typo or a forgotten alias, and the
+    answer is the same list every time -- so print it rather than send the
+    reader off to `sshtsf list`. Indented to sit under the `sshtsf: ' prefix
+    of the line it follows.
+
+    ssh_hosts adds the unregistered known_hosts entries. Right where the
+    answer might be "add one of those", wrong for rm/set/default, whose
+    subject can only ever be a host already registered here.
+    """
+    hosts = host_names(cfg)
+    if hosts:
+        out = "        registered:\n" + "\n".join(
+            "          %s" % describe_host(cfg, host) for host in hosts)
+    else:
+        out = "        nothing registered yet; run `sshtsf` to add a host"
+
+    if ssh_hosts:
+        candidates = ssh_host_candidates(cfg)
+        if candidates:
+            shown = candidates[:MAX_KNOWN_HOSTS]
+            out += "\n        in ~/.ssh/known_hosts:\n" + textwrap.fill(
+                ", ".join(shown), width=76,
+                initial_indent="          ", subsequent_indent="          ")
+            if len(candidates) > len(shown):
+                out += "\n          ... and %d more" % (
+                    len(candidates) - len(shown))
+    return out
+
+
+def describe_session(cfg: dict, host: str, name: str, scfg: dict) -> str:
+    bits = [name]
+    if scfg.get("alias"):
+        bits.append("(%s)" % scfg["alias"])
+    if scfg.get("folder"):
+        bits.append("~/%s" % scfg["folder"])
+    if scfg.get("command"):
+        bits.append("-> %s" % scfg["command"])
+    bits += ["+%s" % field for field in BOOL_FIELDS
+             if resolve_flag(cfg, host, name, field, None)]
+    return "  ".join(bits)
+
+
+# --------------------------------------------------------------------------
+# remote interaction
+# --------------------------------------------------------------------------
+
+
+# Depth of the folder listing. 4 reaches src/<org>/<repo>/<pkg>, which
+# is what a folder usually points at; fuzzy matching then narrows it.
+FOLDER_DEPTH = 4
+
+# Directory names pruned from the listing. These are the ones that explode the
+# count -- a workspace's build output and dependency trees -- not paths anyone
+# selects as a working directory. Dotdirs are pruned separately.
+PRUNE_DIRS = ("build", "node_modules", "target", "env", "cdk.out",
+              "__pycache__", "dist", ".git")
+
+
+def remote_dirs(target: str, depth: int = FOLDER_DEPTH) -> list[str]:
+    """Directories under the remote $HOME, relative, for folder selection.
+
+    A flat recursive list so fuzzy matching can jump straight to a package:
+    typing "we/src/api" narrows to src/webapp/src/api.
+    Heavy trees (build output, node_modules, ...) are pruned, which is what
+    keeps a workspace listing in the hundreds rather than thousands.
+    """
+    prunes = " -o ".join("-name %s" % shlex.quote(d) for d in PRUNE_DIRS)
+    # The prune arm matches dotdirs and PRUNE_DIRS at any level; the print arm
+    # emits every other directory. sed strips the leading "./".
+    script = (
+        "cd ~ && find . -mindepth 1 -maxdepth %d "
+        "\\( -name '.*' -o %s \\) -prune "
+        "-o -type d -print 2>/dev/null | sed 's|^\\./||' | sort"
+        % (depth, prunes)
+    )
+    try:
+        proc = subprocess.run(["ssh", target, script], text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              timeout=60)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return []
+    if proc.returncode != 0:
+        return []
+    return [line for line in proc.stdout.splitlines() if line.strip()]
+
+
+def remote_is_repo(target: str, folder: str) -> bool | None:
+    """Whether folder on target is a git repo. None if it could not be told.
+
+    Three answers rather than two, because "not a repo" and "could not ask" call
+    for quite different things: the first is worth a warning, the second is an
+    unreachable host or an ssh that never came back, and warning about the path
+    then would be crying wolf.
+
+    git's exit status is echoed and read from stdout rather than taken from ssh:
+    ssh reports the remote command's status as its own, so a 255 from ssh itself
+    would otherwise be indistinguishable from a failure over there. Both streams
+    are discarded -- ssh may print banners (host keys, post-quantum warnings)
+    that have no business in the middle of this.
+    """
+    script = "git -C %s rev-parse --git-dir >/dev/null 2>&1; echo $?" \
+        % shlex.quote(folder)
+    try:
+        proc = subprocess.run(["ssh", "-o", "BatchMode=yes", target, script],
+                              text=True, stdout=subprocess.PIPE,
+                              stderr=subprocess.DEVNULL, timeout=20)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    status = proc.stdout.strip().splitlines()
+    if proc.returncode != 0 or not status or not status[-1].isdigit():
+        return None
+    return status[-1] == "0"
+
+
+def show_folder(folder: str) -> None:
+    print("  folder: %s" % ("~/" + folder if folder else "~ (none)"),
+          file=sys.stderr)
+
+
+def prompt_folder(target: str, current: str = "", label: str = "") -> str | None:
+    """Ask for a folder: type one, or press Enter to fuzzy-pick from a listing.
+
+    Returns the folder relative to ~, "" for none, or None if aborted. When
+    browsing an update, the current folder pre-fills fzf's query.
+    """
+    if current:
+        print("  current folder: ~/%s" % current, file=sys.stderr)
+    typed = ask("  folder relative to ~%s (blank to browse, - for none)"
+                % (" for %s" % label if label else ""))
+    if typed == "-":
+        return ""
+    if typed:
+        return typed.strip().rstrip("/")
+
+    print("  listing %s ..." % target, file=sys.stderr)
+    dirs = remote_dirs(target)
+    if not dirs:
+        print("  (could not list %s; type a path if you want one)" % target,
+              file=sys.stderr)
+        typed = ask("  folder relative to ~ (blank for none)")
+        return typed.strip().rstrip("/")
+
+    chosen = pick(dirs, "folder>", "remote folder (abort for none)",
+                  free_text=True, query=current)
+    if chosen is None:
+        return None
+    return chosen.strip().rstrip("/")
+
+
+def remote_tmux(target: str) -> str:
+    """Which tmux a non-interactive `ssh target tmux' resolves, as "PATH (VERSION)".
+
+    Empty when the question cannot be answered. Costs a second connection, so
+    it is asked only once list-sessions has already failed without saying why.
+    """
+    proc = subprocess.run(
+        ["ssh", "-o", "BatchMode=yes", target, "command -v tmux && tmux -V"],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    if proc.returncode != 0:
+        return ""
+    lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    if len(lines) < 2:
+        return ""
+    return "%s (%s)" % (lines[0], lines[1])
+
+
+def live_sessions(target: str) -> tuple[list[str], str]:
+    """Live remote sessions, and -- the point of the tuple -- why there are none.
+
+    tmux can exit nonzero in silence: a client too old to speak to the running
+    server does, which is what a host whose non-interactive PATH finds a
+    different tmux from its panes' has. Collapsing that to an empty list hid a
+    PATH problem behind the same line as a host with no server, so the reason is
+    carried out instead: tmux's own words when it said any, and otherwise the
+    binary an ssh command actually resolved, since that mismatch IS the failure.
+    """
+    fmt = "#{session_name}\t#{session_windows}w\t#{?session_attached,attached,detached}"
+    proc = subprocess.run(
+        ["ssh", target, "tmux", "list-sessions", "-F", shlex.quote(fmt)],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.returncode == 0:
+        return [line for line in proc.stdout.splitlines() if line.strip()], ""
+
+    err = " ".join(proc.stderr.split())
+    if err:
+        return [], err
+    which = remote_tmux(target)
+    if which:
+        return [], ("tmux exited %d without a message; `ssh %s tmux' is %s"
+                    % (proc.returncode, target, which))
+    return [], ("tmux exited %d without a message, and no tmux is on the "
+                "non-interactive PATH" % proc.returncode)
+
+
+def ecf_local_socket() -> str | None:
+    """The local Emacs server socket, or None if no server is running.
+
+    Asks emacsclient for server-socket-dir/server-name, then confirms the path
+    is really a socket -- an ungraceful Emacs exit leaves a
+    plain file behind, and forwarding that would fail at bind time.
+    """
+    try:
+        proc = subprocess.run(
+            ["emacsclient", "-e", "(expand-file-name server-name server-socket-dir)"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    if proc.returncode != 0:
+        return None
+    path = proc.stdout.strip().strip('"')
+    if not path:
+        return None
+    try:
+        if not stat.S_ISSOCK(os.stat(path).st_mode):
+            return None
+    except OSError:
+        return None
+    return path
+
+
+def waypipe_local_display() -> tuple[str | None, str]:
+    """The local compositor socket, or None and the reason there isn't one.
+
+    The parallel of ecf_local_socket, down to confirming the path is really a
+    socket. Two differences: waypipe has to exist here as well as on the remote,
+    and there is no single fix for "unavailable" -- an uninstalled waypipe, a
+    machine with no compositor, and an unset XDG_RUNTIME_DIR (macOS, always)
+    call for quite different things -- so the reason is returned to be printed.
+    """
+    if shutil.which("waypipe") is None:
+        return None, "waypipe is not on PATH"
+
+    display = os.environ.get("WAYLAND_DISPLAY") or ""
+    if not display:
+        return None, "WAYLAND_DISPLAY is unset; waypipe needs a Wayland session"
+
+    # libwayland reads an absolute WAYLAND_DISPLAY as the socket path itself,
+    # and anything else as a name under XDG_RUNTIME_DIR.
+    if os.path.isabs(display):
+        path = display
+    else:
+        runtime = os.environ.get("XDG_RUNTIME_DIR") or ""
+        if not runtime:
+            return None, ("XDG_RUNTIME_DIR is unset, so WAYLAND_DISPLAY=%s "
+                          "cannot be resolved" % display)
+        path = os.path.join(runtime, display)
+
+    try:
+        if not stat.S_ISSOCK(os.stat(path).st_mode):
+            return None, "%s is not a socket" % path
+    except OSError:
+        return None, "no compositor socket at %s" % path
+    return path, ""
+
+
+def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
+            over: Overrides = NO_OVERRIDES) -> int:
+    scfg = cfg["hosts"][host].get("sessions", {}).get(session, {})
+    target = ssh_target(cfg, host)
+    ecf = resolve_flag(cfg, host, session, "ecf", over.ecf)
+    waypipe = resolve_flag(cfg, host, session, "waypipe", over.waypipe)
+
+    if waypipe:
+        display, why = waypipe_local_display()
+        if display is None:
+            # Same policy as ecf below: a flag is honoured or fails, a config
+            # default steps aside. The reason matters here -- it is the whole
+            # difference between "install waypipe" and "you are on a Mac".
+            if over.waypipe is not None:
+                sys.exit("sshtsf: cannot forward Wayland: %s" % why)
+            print("sshtsf: no local Wayland display (%s); connecting without it"
+                  % why, file=sys.stderr)
+            waypipe = False
+
+    # -u because tmux is the ssh
+    # command, so the remote shell is non-interactive, never reads .zshrc and
+    # never sets LC_ALL -- and the client then renders every non-ASCII cell as
+    # an underscore. -u asserts UTF-8 without depending on the remote's locales.
+    #
+    # Plain -A under waypipe would attach immediately, before the display could
+    # be set; the create step is split out and guarded below instead.
+    remote = ["tmux", "-u", "new-session", "-d" if waypipe else "-A"]
+    if scfg.get("folder"):
+        remote += ["-c", scfg["folder"]]
+    remote += ["-s", session]
+    if scfg.get("command"):
+        # A configured command is a command line, not a bare argv[0]: split it
+        # the way a shell would so `emacs -nw .` works as written.
+        remote += shlex.split(scfg["command"])
+
+    if waypipe:
+        # Teach the session waypipe's display name, rather than trusting the
+        # remote's tmux to carry it: WAYLAND_DISPLAY only joined the default
+        # update-environment in tmux 3.7, and on anything older the session
+        # never learns it at all -- `tmux show-environment WAYLAND_DISPLAY'
+        # answers "unknown variable" and GUI applications quietly open on the
+        # remote's own screen instead of here.
+        #
+        # It has to be a shell that WAYPIPE started. waypipe execs the command
+        # itself (`waypipe ... server tmux ...'), and only its children have the
+        # forwarded WAYLAND_DISPLAY -- the ssh login shell that parses this line
+        # runs earlier and would expand it to the remote's own display, or to
+        # nothing. So `sh -c' here, with $WAYLAND_DISPLAY left for it to expand.
+        #
+        # Create, set, then attach, in three steps: `-A' would attach before the
+        # variable could be set, and `-e' applies only when tmux creates the
+        # session, never when it attaches to a live one.
+        #
+        # has-session rather than `new-session -Ad', because -A makes
+        # new-session behave as attach-session and -d stops meaning detached
+        # there -- so -Ad on an EXISTING session attaches anyway, and the rest
+        # of the chain never runs. (-AD would work, but it also detaches whoever
+        # else is attached, which is not ours to do.)
+        #
+        # `=name' is an exact-match target: without it a session name that
+        # prefixes another could resolve to the wrong one.
+        tgt = shlex.quote("=" + session)
+        script = (
+            "tmux has-session -t %s 2>/dev/null || %s || exit 1; "
+            'tmux set-environment -t %s WAYLAND_DISPLAY "$WAYLAND_DISPLAY"; '
+            "exec tmux -u attach-session -t %s"
+            % (tgt, " ".join(shlex.quote(word) for word in remote), tgt, tgt))
+        remote = ["sh", "-c", script]
+
+    sshopts: list[str] = []
+    cleanup: list[str] = []
+    if ecf:
+        local = ecf_local_socket()
+        if local is None:
+            # A flag is a request, so honour it or fail; a config default is a
+            # preference, and should not stand between you and the session.
+            if over.ecf is not None:
+                sys.exit("sshtsf: no local Emacs server socket found; "
+                         "start Emacs first")
+            print("sshtsf: no local Emacs socket; connecting without the forward",
+                  file=sys.stderr)
+        else:
+            ecf_port = scfg.get("ecf_port") or cfg["hosts"][host].get("ecf_port")
+            # A separate prior connection, not part of the command below: sshd
+            # does not honour StreamLocalBindUnlink, so after an ungraceful
+            # disconnect the leftover file makes the -R bind (and with
+            # ExitOnForwardFailure, the whole connection) fail -- and the bind
+            # happens at session setup, before any remote command runs. One
+            # socket per host, so a second ecf connection silently replaces the
+            # first one's forward; harmless, since both point at the same Emacs.
+            cleanup = ["ssh", target, "rm", "-f", ECF_REMOTE_SOCKET]
+            if ecf_port:
+                sshopts = ["-o", "ExitOnForwardFailure=yes",
+                           "-R", "%s:%s" % (ecf_port, local)]
+                ecf_script = (
+                    "socat UNIX-LISTEN:%s,fork TCP:127.0.0.1:%s & "
+                    "SOCAT_PID=$!; "
+                    "%%s; "
+                    "kill $SOCAT_PID 2>/dev/null" % (shlex.quote(ECF_REMOTE_SOCKET), ecf_port)
+                )
+                if remote[0] == "sh" and remote[1] == "-c":
+                    remote[2] = ecf_script % remote[2].replace("exec ", "")
+                else:
+                    remote = ["sh", "-c", ecf_script % " ".join(shlex.quote(w) for w in remote)]
+            else:
+                sshopts = ["-o", "ExitOnForwardFailure=yes",
+                           "-R", "%s:%s" % (ECF_REMOTE_SOCKET, local)]
+
+    # -t before the target, not after it. ssh itself accepts either, but
+    # waypipe takes the first non-option word as the destination and everything
+    # past it as the command to run -- so a trailing -t becomes argv[0] of that
+    # command and it dies with `Failed to run program "-t"'.
+    #
+    # Quote for the remote shell: ssh joins its command words with spaces and
+    # the far side re-parses them, so an unquoted path with a space would
+    # arrive as two arguments.
+    argv = ["ssh"] + sshopts + ["-t", target] + \
+        [shlex.quote(word) for word in remote]
+
+    if waypipe:
+        # waypipe takes its options before the mode word and passes everything
+        # after `ssh' through, so the whole command above rides along as ssh
+        # arguments -- which is what lets waypipe and ecf compose, as two
+        # independent -R forwards on one connection. waypipe adds a -t of its
+        # own; a doubled -t only means -tt, which is harmless here since there
+        # is always a terminal. No --display: waypipe's randomized
+        # per-connection name is fine, because the session is told the name
+        # above, and a prompt hook that re-reads `tmux show-environment' can
+        # carry it into the panes that predate this connection.
+        argv = ["waypipe"] + WAYPIPE_OPTS + ["ssh"] + argv[1:]
+
+    if dry_run:
+        if cleanup:
+            print(" ".join(cleanup))
+        print(" ".join(argv))
+        return 0
+
+    if cleanup:
+        subprocess.run(cleanup)
+
+    remember(cfg, host, session)
+    print("sshtsf: %s -> %s%s%s"
+          % (target, session, " +ecf" if sshopts else "",
+             " +waypipe" if waypipe else ""), file=sys.stderr)
+    try:
+        os.execvp(argv[0], argv)
+    except OSError as exc:
+        sys.exit("sshtsf: cannot exec %s: %s" % (argv[0], exc))
+
+
+def remember(cfg: dict, host: str, session: str) -> None:
+    cfg["last"] = {"host": host, "session": session}
+    try:
+        save_config(cfg)
+    except OSError as exc:
+        # Not worth aborting a connection over.
+        print("sshtsf: could not save last-used (%s)" % exc, file=sys.stderr)
+
+
+# --------------------------------------------------------------------------
+# routes
+# --------------------------------------------------------------------------
+
+
+def route_add_session(cfg: dict, host: str, name: str = "",
+                      dry_run: bool = False,
+                      over: Overrides = NO_OVERRIDES) -> int:
+    """Register a session interactively, then connect to it."""
+    print("sshtsf: new session on %s" % host, file=sys.stderr)
+
+    name = ask("  session name", name)
+    if not name:
+        sys.exit("sshtsf: a session name is required")
+
+    existing = resolve_session(cfg, host, name)
+    if existing:
+        print("sshtsf: %s already exists on %s; connecting" % (existing, host),
+              file=sys.stderr)
+        return connect(cfg, host, existing, dry_run, over)
+
+    folder = prompt_folder(ssh_target(cfg, host), label=name)
+    if folder is None:
+        print("sshtsf: aborted", file=sys.stderr)
+        return 130
+    show_folder(folder)
+
+    command = ask("  command to run (blank for a shell)")
+
+    # Only worth asking when it would change anything: with the field already
+    # true on the host, the answer is yes, and `set <host> <name> <field> false`
+    # is the rarer opt-out.
+    ecf = ""
+    if not cfg["hosts"].get(host, {}).get("ecf"):
+        ecf = ask("  forward the local Emacs socket? (y/N)")
+
+    waypipe = ""
+    if not cfg["hosts"].get(host, {}).get("waypipe"):
+        waypipe = ask("  forward Wayland, for GUI applications? (y/N)")
+
+    # Asked last, and defaulted to the session name, so the whole entry is
+    # visible by the time the shorthand for it is chosen.
+    alias = ask("  alias for %s+%s (blank for none)" % (host, name), name)
+
+    hcfg = cfg["hosts"].setdefault(host, {})
+    sessions = hcfg.setdefault("sessions", {})
+    entry: dict = {}
+    if alias:
+        entry["alias"] = alias
+    if folder:
+        entry["folder"] = folder.rstrip("/")
+    if command:
+        entry["command"] = command
+    if ecf.strip().lower() in TRUE_WORDS + ("y",):
+        entry["ecf"] = True
+    if waypipe.strip().lower() in TRUE_WORDS + ("y",):
+        entry["waypipe"] = True
+    sessions[name] = entry
+
+    save_config(cfg)
+    print("sshtsf: saved %s to %s" % (name, CONFIG_PATH), file=sys.stderr)
+    return connect(cfg, host, name, dry_run, over)
+
+
+def route_add_host(cfg: dict, name: str = "", dry_run: bool = False,
+                   over: Overrides = NO_OVERRIDES) -> int:
+    print("sshtsf: new host", file=sys.stderr)
+
+    # Nothing typed yet: offer what you have already ssh'd to, so registering a
+    # host is a selection rather than a retype. free_text keeps a name that is
+    # not in known_hosts -- a machine you have not reached yet -- available,
+    # and aborting the picker just falls through to the prompt below.
+    if not name:
+        candidates = ssh_host_candidates(cfg)
+        if candidates:
+            name = pick(candidates, "host>",
+                        "hosts in ~/.ssh/known_hosts (or type a name)",
+                        free_text=True) or ""
+
+    name = ask("  host name", name)
+    if not name:
+        sys.exit("sshtsf: a host name is required")
+    if name in cfg["hosts"]:
+        print("sshtsf: %s already registered" % name, file=sys.stderr)
+        return route_pick_session(cfg, name, dry_run, over)
+
+    target = ask("  ssh destination", name)
+    alias = ask("  alias (blank for none)")
+
+    hcfg: dict = {}
+    if target and target != name:
+        hcfg["target"] = target
+    if alias:
+        hcfg["alias"] = alias
+    hcfg["sessions"] = {}
+    cfg["hosts"][name] = hcfg
+    if not cfg.get("default_host"):
+        cfg["default_host"] = name
+    save_config(cfg)
+    print("sshtsf: saved host %s" % name, file=sys.stderr)
+
+    return route_add_session(cfg, name, dry_run=dry_run,
+                             over=over)
+
+
+def route_pick_session(cfg: dict, host: str, dry_run: bool = False,
+                       over: Overrides = NO_OVERRIDES) -> int:
+    """Show this host's sessions, plus an add-new option."""
+    sessions = cfg["hosts"].get(host, {}).get("sessions", {}) or {}
+    labels = {}
+    for name in sorted(sessions):
+        labels[describe_session(cfg, host, name, sessions[name])] = name
+
+    items = list(labels) + [NEW_SESSION]
+    choice = pick(items, "session>", "sessions on %s" % host)
+    if choice is None:
+        return 130
+    if choice == NEW_SESSION:
+        return route_add_session(cfg, host, dry_run=dry_run,
+                                 over=over)
+    return connect(cfg, host, labels[choice], dry_run, over)
+
+
+def route_pick_host(cfg: dict, dry_run: bool = False,
+                    over: Overrides = NO_OVERRIDES) -> int:
+    hosts = host_names(cfg)
+    default = cfg.get("default_host") or (cfg.get("last") or {}).get("host")
+
+    # Put the default (or last-used) first so it is one Enter away.
+    ordered = ([default] if default in hosts else []) + \
+              [h for h in hosts if h != default]
+
+    labels = {}
+    for host in ordered:
+        label = host
+        hcfg = cfg["hosts"][host]
+        extras = []
+        if hcfg.get("alias"):
+            extras.append(hcfg["alias"])
+        extras += [field for field in BOOL_FIELDS if hcfg.get(field)]
+        if host == default:
+            extras.append("default")
+        if extras:
+            label = "%s  (%s)" % (host, ", ".join(extras))
+        labels[label] = host
+
+    items = list(labels) + [NEW_HOST]
+    choice = pick(items, "host>", "hosts")
+    if choice is None:
+        return 130
+    if choice == NEW_HOST:
+        return route_add_host(cfg, dry_run=dry_run, over=over)
+    return route_pick_session(cfg, labels[choice], dry_run, over)
+
+
+# --------------------------------------------------------------------------
+# config subcommands
+# --------------------------------------------------------------------------
+
+
+def cmd_list(cfg: dict, args) -> int:
+    hosts = cfg.get("hosts", {})
+    if not hosts:
+        print("no hosts registered; run `sshtsf` to add one")
+        return 0
+    last = cfg.get("last") or {}
+    for host in sorted(hosts):
+        hcfg = hosts[host]
+        print(describe_host(cfg, host))
+        sessions = hcfg.get("sessions") or {}
+        if not sessions:
+            print("    (no sessions)")
+        for name in sorted(sessions):
+            here = " *" if (last.get("host") == host
+                            and last.get("session") == name) else ""
+            print("    %s%s" % (describe_session(cfg, host, name, sessions[name]),
+                                here))
+    return 0
+
+
+def cmd_live(cfg: dict, args) -> int:
+    if args.host:
+        host = resolve_host(cfg, args.host)
+        if not host:
+            sys.exit("sshtsf: unknown host: %s\n%s"
+                     % (args.host, host_hint(cfg)))
+        hosts = [host]
+    else:
+        hosts = host_names(cfg)
+        if not hosts:
+            sys.exit("sshtsf: no hosts registered")
+
+    for host in hosts:
+        target = ssh_target(cfg, host)
+        rows, why = live_sessions(target)
+        print("%s:" % host)
+        if not rows:
+            print("    (%s)" % (why or "no tmux server"))
+            continue
+        known = cfg["hosts"][host].get("sessions", {}) or {}
+        for row in rows:
+            name = row.split("\t")[0]
+            mark = "" if name in known else "   [unregistered]"
+            print("    %s%s" % (row.replace("\t", "  "), mark))
+    return 0
+
+
+def cmd_add(cfg: dict, args) -> int:
+    if args.session is None:
+        return route_add_host(cfg, args.host or "", dry_run=args.dry_run,
+                              over=args.over)
+    host = resolve_host(cfg, args.host) if args.host else None
+    if not host:
+        sys.exit("sshtsf: unknown host: %s (add it with `sshtsf add %s`)\n%s"
+                 % (args.host, args.host, host_hint(cfg, ssh_hosts=True)))
+    return route_add_session(cfg, host, args.session or "", dry_run=args.dry_run,
+                             over=args.over)
+
+
+def cmd_rm(cfg: dict, args) -> int:
+    host = resolve_host(cfg, args.host)
+    if not host:
+        sys.exit("sshtsf: unknown host: %s\n%s"
+                 % (args.host, host_hint(cfg)))
+
+    if args.session:
+        session = resolve_session(cfg, host, args.session)
+        if not session:
+            sys.exit("sshtsf: no session %s on %s" % (args.session, host))
+        del cfg["hosts"][host]["sessions"][session]
+        last = cfg.get("last") or {}
+        if last.get("host") == host and last.get("session") == session:
+            cfg.pop("last", None)  # else `last` points at a session that is gone
+        save_config(cfg)
+        print("sshtsf: removed %s from %s" % (session, host))
+        return 0
+
+    sessions = cfg["hosts"][host].get("sessions") or {}
+    if sessions and not args.force:
+        sys.exit("sshtsf: %s still has %d session(s); pass -f to remove anyway"
+                 % (host, len(sessions)))
+    del cfg["hosts"][host]
+    if cfg.get("default_host") == host:
+        cfg.pop("default_host", None)
+    if (cfg.get("last") or {}).get("host") == host:
+        cfg.pop("last", None)
+    save_config(cfg)
+    print("sshtsf: removed host %s" % host)
+    return 0
+
+
+def cmd_set(cfg: dict, args) -> int:
+    host = resolve_host(cfg, args.host)
+    if not host:
+        sys.exit("sshtsf: unknown host: %s\n%s"
+                 % (args.host, host_hint(cfg)))
+
+    if args.session:
+        session = resolve_session(cfg, host, args.session)
+        if not session:
+            sys.exit("sshtsf: no session %s on %s" % (args.session, host))
+        holder = cfg["hosts"][host]["sessions"][session]
+        allowed = ("alias", "folder", "command", "ecf_port") + BOOL_FIELDS
+    else:
+        holder = cfg["hosts"][host]
+        allowed = ("alias", "target", "ecf_port") + BOOL_FIELDS
+
+    if args.field not in allowed:
+        sys.exit("sshtsf: cannot set %s here; try one of: %s"
+                 % (args.field, ", ".join(allowed)))
+
+    value = args.value
+    # `set ... folder` with no value browses from the current one, so updating
+    # a folder is the same interaction as choosing it in the first place.
+    if args.field == "folder" and value is None:
+        chosen = prompt_folder(ssh_target(cfg, host), holder.get("folder", ""),
+                               label=args.session or "")
+        if chosen is None:
+            print("sshtsf: unchanged", file=sys.stderr)
+            return 130
+        value = chosen
+        show_folder(value)
+    elif value is None:
+        sys.exit("sshtsf: set %s needs a value" % args.field)
+
+    # An empty value still clears a boolean below, which for a session means
+    # falling back to the host's setting.
+    if args.field in BOOL_FIELDS and value != "":
+        word = value.strip().lower()
+        if word not in TRUE_WORDS + FALSE_WORDS:
+            sys.exit("sshtsf: %s takes %s or %s"
+                     % (args.field, "/".join(TRUE_WORDS), "/".join(FALSE_WORDS)))
+        value = word in TRUE_WORDS
+    elif args.field == "ecf_port" and value != "":
+        try:
+            value = int(value.strip())
+        except ValueError:
+            sys.exit("sshtsf: ecf_port must be an integer")
+
+    if value == "":
+        holder.pop(args.field, None)
+        print("sshtsf: cleared %s" % args.field)
+    else:
+        holder[args.field] = value
+        print("sshtsf: %s = %s"
+              % (args.field,
+                 toml_bool(value) if args.field in BOOL_FIELDS else value))
+    save_config(cfg)
+    return 0
+
+
+def cmd_default(cfg: dict, args) -> int:
+    host = resolve_host(cfg, args.host)
+    if not host:
+        sys.exit("sshtsf: unknown host: %s\n%s"
+                 % (args.host, host_hint(cfg)))
+    cfg["default_host"] = host
+    save_config(cfg)
+    print("sshtsf: default host = %s" % host)
+    return 0
+
+
+def pick_registered_host(cfg: dict) -> str | None:
+    """Choose among the registered hosts, default or last-used first.
+
+    route_pick_host's picker without the `+ new host' arm: this is for the
+    commands that act on a host you already have, where registering a new one
+    is a detour rather than the point.
+    """
+    hosts = host_names(cfg)
+    if not hosts:
+        return None
+    default = cfg.get("default_host") or (cfg.get("last") or {}).get("host")
+    ordered = ([default] if default in hosts else []) + \
+              [h for h in hosts if h != default]
+    labels = {describe_host(cfg, host): host for host in ordered}
+    choice = pick(list(labels), "host>", "hosts")
+    return labels.get(choice) if choice else None
+
+
+def cmd_remote(cfg: dict, args) -> int:
+    """Add a git remote for this repo on a remote host.
+
+    The mirror assumption this file is built around, applied to git: the same
+    package is checked out at the same path relative to $HOME on both machines,
+    so the remote's URL is derivable rather than something to type. That makes
+    the other checkout fetchable -- a branch pushed nowhere, a work in progress
+    to diff against -- without either side going through a server.
+    """
+    if shutil.which("git") is None:
+        sys.exit("sshtsf: git is not on PATH")
+
+    folder, root = home_relative_repo()
+    if folder is None:
+        if not root:
+            sys.exit("sshtsf: not in a git repository")
+        sys.exit("sshtsf: %s is not under %s, so there is no mirrored path "
+                 "to point at" % (root, os.path.expanduser("~")))
+
+    if args.host:
+        host = resolve_host(cfg, args.host)
+        if not host:
+            sys.exit("sshtsf: unknown host: %s\n%s"
+                     % (args.host, host_hint(cfg, ssh_hosts=True)))
+    else:
+        host = pick_registered_host(cfg)
+        if not host:
+            if not cfg.get("hosts"):
+                sys.exit("sshtsf: no hosts registered; run `sshtsf` to add one")
+            return 130
+
+    # The token as typed, so `sshtsf remote c' names the remote c: the name you
+    # reach for is the one you already use for the machine. A host chosen from
+    # the menu was never typed, so it falls back to the host key.
+    name = args.name or args.host or host
+    # git would reject a malformed name itself, but only once it ran: --dry-run
+    # would have already printed a command whose words no longer line up with
+    # the argv it stands for. Checked with git's own rules rather than a guess.
+    if not valid_remote_name(name):
+        sys.exit("sshtsf: %s is not a usable git remote name" % name)
+    target = ssh_target(cfg, host)
+
+    # The scp-like form, not ssh://: its path is already relative to the remote
+    # $HOME, matching `folder' exactly, and the destination goes through
+    # ~/.ssh/config the same way `ssh devbox' does -- so a Host block's User, Port
+    # or ProxyJump applies with nothing restated here.
+    url = "%s:%s" % (target, folder)
+
+    existing = git_remote_url(name)
+    if existing is not None and not args.force:
+        if existing == url:
+            print("sshtsf: remote %s already points at %s" % (name, url))
+            return 0
+        sys.exit("sshtsf: remote %s already exists\n          %s\n"
+                 "        pass -f to point it at the mirrored path"
+                 % (name, existing))
+
+    argv = ["git", "remote", "set-url" if existing is not None else "add",
+            name, url]
+
+    if args.dry_run:
+        print(" ".join(argv))
+        return 0
+
+    # Advisory only, and after the checks above: a missing checkout over there is
+    # worth saying out loud, but it is not a reason to withhold the remote --
+    # cloning into place is often the very next thing done.
+    if remote_is_repo(target, folder) is False:
+        print("sshtsf: %s has no git repo at %s\n"
+              "        adding the remote anyway"
+              % (host, show_home_path(folder)), file=sys.stderr)
+
+    proc = subprocess.run(argv)
+    if proc.returncode != 0:
+        return proc.returncode
+    print("sshtsf: %s %s -> %s"
+          % ("repointed" if existing is not None else "added", name, url))
+    return 0
+
+
+def cmd_path(cfg: dict, args) -> int:
+    print(CONFIG_PATH)
+    return 0
+
+
+# --------------------------------------------------------------------------
+# entry point
+# --------------------------------------------------------------------------
+
+SUBCOMMANDS = {"list", "live", "add", "rm", "set", "default", "remote",
+               "config-path"}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="sshtsf",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description="Pick an ssh+tmux session by name, alias, or menu.",
+        epilog="""examples:
+  sshtsf                    pick a host, then a session
+  sshtsf devbox             pick a session on devbox
+  sshtsf devbox web         connect to web on devbox
+  sshtsf devweb             the same, via a host+session alias
+  sshtsf devbox -n          register a new session on devbox
+  sshtsf devbox -n api      ...with api proposed as the name
+  sshtsf -e devbox web      ...forwarding the local Emacs socket
+  sshtsf -w devbox web      ...forwarding Wayland, for GUI applications
+
+config:
+  sshtsf list               show hosts and sessions
+  sshtsf live [HOST]        list live remote tmux sessions
+  sshtsf add HOST [NAME]    register a host, or a session on it
+  sshtsf rm HOST [NAME]     remove a session, or a host (-f)
+  sshtsf set HOST [NAME] FIELD [VALUE]
+                            set alias/target/ecf_port, or alias/folder/command/ecf_port, plus
+                            ecf/waypipe on either; omit VALUE for folder to
+                            browse the remote tree
+  sshtsf default HOST       set the host offered first
+  sshtsf remote [HOST] [NAME]
+                            git remote add, for this repo on HOST (-f to
+                            repoint an existing one)
+  sshtsf config-path        print the config file path
+
+ecf forwards the local Emacs server socket to the remote, so emacsclient,
+$EDITOR and magit there open in the local Emacs, provided the remote's EDITOR
+is `emacsclient-auto` (see README). Make it the default with `sshtsf set HOST ecf true`
+or `sshtsf set HOST SESSION ecf true`; -e / -E override for one call.
+If the remote host runs SELinux (e.g. Fedora, Bazzite) and sshd is blocked from
+creating Unix sockets, set a TCP port to relay through: `sshtsf set HOST ecf_port 41234`.
+
+waypipe wraps the whole connection in `waypipe ssh`, so applications started
+in the remote session draw on the local Wayland desktop. Set it the same way;
+-w / -W override. It needs a Wayland session here and waypipe installed at
+both ends -- on the remote, on the PATH a non-interactive ssh gets. Extra
+waypipe options (--compress, --no-gpu, --xwls, --remote-bin, ...) go in
+SSHTSF_WAYPIPE_OPTS. The two forwards are independent and compose.
+
+The session is told waypipe's display name on connect, so no tmux config is
+needed on the remote -- WAYLAND_DISPLAY only joined tmux's default
+update-environment in 3.7. Panes that predate the connection still hold the
+old value; a shell prompt hook that re-reads `tmux show-environment' keeps
+those current.
+
+Hosts you have ssh'd to before are read from ~/.ssh/known_hosts: they are
+offered to pick from when registering a host, and listed alongside the
+registered ones when a name does not resolve.
+
+`remote' applies this file's mirror assumption to git. Run it in a repo and it
+adds a git remote for the same path on the other machine -- the repo's path
+relative to $HOME, which is the form the session folders take too -- so the
+other checkout is fetchable without either side going through a server:
+
+  cd ~/src/mytool
+  sshtsf remote devbox      git remote add devbox devbox:src/mytool
+  git fetch devbox
+
+The remote is named for the host as you typed it, so `sshtsf remote c' names it
+c; pass NAME for something else. One that already exists is reported rather
+than overwritten -- `sshtsf remote devbox -f' repoints it, with the flag trailing,
+since a flag between two positionals is not something argparse will take here.
+The URL is the scp-like target:path form, so the destination resolves through
+~/.ssh/config as usual. The repo has to live under $HOME at both ends for a
+mirrored path to exist at all.
+""")
+    p.add_argument("args", nargs="*", metavar="ARG")
+    p.add_argument("-n", "--new", nargs="?", const="", default=None,
+                   metavar="NAME", help="register a new session, then connect")
+    p.add_argument("-f", "--force", action="store_true",
+                   help="with rm HOST: remove even if sessions remain; "
+                        "with remote: repoint one that already exists")
+    p.add_argument("-e", "--ecf", action="store_true",
+                   help="forward the local Emacs server socket")
+    p.add_argument("-E", "--no-ecf", action="store_true",
+                   help="do not forward, whatever the config says")
+    p.add_argument("-w", "--waypipe", action="store_true",
+                   help="forward Wayland, so GUI applications draw here")
+    p.add_argument("-W", "--no-waypipe", action="store_true",
+                   help="do not forward Wayland, whatever the config says")
+    p.add_argument("--dry-run", action="store_true",
+                   help="print the ssh command instead of running it")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Entry point; argv defaults to sys.argv[1:]. Ctrl-C exits 130."""
+    if argv is None:
+        argv = sys.argv[1:]
+    try:
+        return run(argv)
+    except KeyboardInterrupt:
+        print(file=sys.stderr)
+        return 130
+
+
+def run(argv: list[str]) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.ecf and args.no_ecf:
+        parser.error("--ecf and --no-ecf are contradictory")
+    if args.waypipe and args.no_waypipe:
+        parser.error("--waypipe and --no-waypipe are contradictory")
+    # None means "no override": fall back to the session's or host's setting.
+    args.over = Overrides(
+        ecf=True if args.ecf else (False if args.no_ecf else None),
+        waypipe=True if args.waypipe else (False if args.no_waypipe else None))
+    cfg = load_config()
+    positional = args.args
+
+    # Subcommands, when the first word is one and is not also a known host or
+    # alias -- a host called "list" keeps working.
+    if positional and positional[0] in SUBCOMMANDS:
+        verb, rest = positional[0], positional[1:]
+        shadowed = resolve_host(cfg, verb) or resolve_pair_alias(cfg, verb)
+        if not shadowed:
+            return dispatch(cfg, verb, rest, args)
+
+    if args.new is not None:
+        if not positional:
+            sys.exit("sshtsf: -n needs a host: sshtsf HOST -n [NAME]\n%s"
+                     % host_hint(cfg, ssh_hosts=True))
+        host = resolve_host(cfg, positional[0])
+        if not host:
+            sys.exit("sshtsf: unknown host: %s (add it with `sshtsf add %s`)\n%s"
+                     % (positional[0], positional[0],
+                        host_hint(cfg, ssh_hosts=True)))
+        name = args.new or (positional[1] if len(positional) > 1 else "")
+        return route_add_session(cfg, host, name, dry_run=args.dry_run,
+                                 over=args.over)
+
+    if not positional:
+        if not cfg.get("hosts"):
+            print("sshtsf: no config yet; let's make one", file=sys.stderr)
+            return route_add_host(cfg, dry_run=args.dry_run,
+                                  over=args.over)
+        return route_pick_host(cfg, dry_run=args.dry_run,
+                               over=args.over)
+
+    if len(positional) == 1:
+        token = positional[0]
+        pair = resolve_pair_alias(cfg, token)
+        if pair:
+            return connect(cfg, pair[0], pair[1], args.dry_run, args.over)
+        host = resolve_host(cfg, token)
+        if host:
+            return route_pick_session(cfg, host, args.dry_run, args.over)
+        hint = host_hint(cfg, ssh_hosts=True)
+        # With nothing registered the hint already says to run `sshtsf', so
+        # the follow-up would only offer a second, competing suggestion.
+        if host_names(cfg):
+            hint += ("\n        `sshtsf add %s` to add it; "
+                     "`sshtsf list` shows their sessions too" % token)
+        sys.exit("sshtsf: unknown host or alias: %s\n%s" % (token, hint))
+
+    if len(positional) == 2:
+        host = resolve_host(cfg, positional[0])
+        if not host:
+            sys.exit("sshtsf: unknown host: %s (add it with `sshtsf add %s`)\n%s"
+                     % (positional[0], positional[0],
+                        host_hint(cfg, ssh_hosts=True)))
+        session = resolve_session(cfg, host, positional[1])
+        if session:
+            return connect(cfg, host, session, args.dry_run, args.over)
+        # No such session -- fall into the add-new route with the name filled in.
+        print("sshtsf: no session %s on %s" % (positional[1], host),
+              file=sys.stderr)
+        return route_add_session(cfg, host, positional[1], dry_run=args.dry_run,
+                                 over=args.over)
+
+    sys.exit("sshtsf: too many arguments; see `sshtsf --help`")
+
+
+def dispatch(cfg: dict, verb: str, rest: list[str], args) -> int:
+    class Sub:
+        host = rest[0] if rest else None
+        session = rest[1] if len(rest) > 1 else None
+        force = args.force
+        dry_run = args.dry_run
+        over = args.over
+
+    if verb == "list":
+        return cmd_list(cfg, Sub)
+    if verb == "config-path":
+        return cmd_path(cfg, Sub)
+    if verb == "live":
+        return cmd_live(cfg, Sub)
+
+    if verb == "add":
+        # `add HOST` registers a host; `add HOST NAME` a session on it.
+        Sub.session = rest[1] if len(rest) > 1 else None
+        if rest and resolve_host(cfg, rest[0]) and len(rest) == 1:
+            Sub.session = ""  # existing host, no name given -> add a session
+        return cmd_add(cfg, Sub)
+
+    # Above the "needs a host" guard below: bare `remote' is legal and picks a
+    # host from a menu, the repo being the argument that actually matters.
+    if verb == "remote":
+        # remote [HOST] [NAME] -- NAME defaults to HOST as typed.
+        if len(rest) > 2:
+            sys.exit("sshtsf: remote [HOST] [NAME]")
+        Sub.name = rest[1] if len(rest) > 1 else None
+        return cmd_remote(cfg, Sub)
+
+    if not rest:
+        sys.exit("sshtsf: %s needs a host\n%s" % (verb, host_hint(cfg)))
+
+    if verb == "rm":
+        return cmd_rm(cfg, Sub)
+    if verb == "default":
+        return cmd_default(cfg, Sub)
+    if verb == "set":
+        # set HOST [SESSION] FIELD [VALUE]
+        #
+        # The value is optional only for `folder`, which browses when omitted.
+        # SESSION is told apart from FIELD by name, since both are bare words:
+        # a known session in position 2 means the 4-word form.
+        HOST_FIELDS = ("alias", "target") + BOOL_FIELDS
+        rest2 = rest[1] if len(rest) > 1 else None
+        if len(rest) == 2:
+            Sub.session, Sub.field, Sub.value = None, rest[1], None
+        elif len(rest) == 3:
+            if rest2 in HOST_FIELDS or not resolve_session(cfg, rest[0] or "", rest2 or ""):
+                Sub.session, Sub.field, Sub.value = None, rest[1], rest[2]
+            else:
+                Sub.session, Sub.field, Sub.value = rest[1], rest[2], None
+        elif len(rest) == 4:
+            Sub.session, Sub.field, Sub.value = rest[1], rest[2], rest[3]
+        else:
+            sys.exit("sshtsf: set HOST [SESSION] FIELD [VALUE]")
+        return cmd_set(cfg, Sub)
+
+    sys.exit("sshtsf: unknown subcommand: %s" % verb)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
