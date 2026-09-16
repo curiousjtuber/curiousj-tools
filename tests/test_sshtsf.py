@@ -224,7 +224,48 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
             lines[1],
             "ssh -o ExitOnForwardFailure=yes "
             "-R /tmp/emacs-remote-socket:/run/user/1000/emacs/server "
-            "-t devbox tmux -u new-session -A -c src/api -s api")
+            "-t devbox sh -c "
+            "'tmux has-session -t =api 2>/dev/null "
+            "|| tmux -u new-session -d -c src/api -s api || exit 1; "
+            "tmux set-environment -t =api EMACS_REMOTE_TARGET devbox; "
+            "exec tmux -u attach-session -t =api'")
+
+    def test_ecf_tells_session_the_target_as_dialed(self):
+        # The remote's emacs-remote builds its TRAMP prefix from this, so it
+        # has to be the name the local Emacs can reach: the configured ssh
+        # destination, user@ and all, not the host key.
+        cfg = sshtsf.load_config()
+        cfg["hosts"]["devbox"]["target"] = "me@devbox.local"
+        sshtsf.save_config(cfg)
+        with mock.patch.object(sshtsf, "ecf_local_socket", return_value="/x/server"):
+            rc, out, _ = run_capture(["devbox", "api", "--dry-run"])
+        self.assertEqual(rc, 0)
+        cmd = out.strip().splitlines()[1]
+        self.assertIn("-t me@devbox.local sh -c", cmd)
+        self.assertIn("EMACS_REMOTE_TARGET me@devbox.local;", cmd)
+
+    def test_without_ecf_the_session_is_not_told_a_target(self):
+        rc, out, _ = run_capture(["devbox", "shell", "--dry-run"])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("EMACS_REMOTE_TARGET", out)
+        self.assertNotIn("sh -c", out)
+
+    def test_waypipe_and_ecf_share_one_script(self):
+        cfg = sshtsf.load_config()
+        cfg["hosts"]["devbox"]["sessions"]["api"]["waypipe"] = True
+        sshtsf.save_config(cfg)
+        with mock.patch.object(sshtsf, "ecf_local_socket", return_value="/x/server"), \
+             mock.patch.object(sshtsf, "waypipe_local_display",
+                               return_value=("/run/user/1000/wayland-0", "")):
+            rc, out, _ = run_capture(["devbox", "api", "--dry-run"])
+        self.assertEqual(rc, 0)
+        cmd = out.strip().splitlines()[1]
+        self.assertTrue(cmd.startswith("waypipe ssh -o ExitOnForwardFailure=yes -R "))
+        self.assertIn(
+            "|| exit 1; "
+            "tmux set-environment -t =api WAYLAND_DISPLAY \"$WAYLAND_DISPLAY\"; "
+            "tmux set-environment -t =api EMACS_REMOTE_TARGET devbox; "
+            "exec tmux -u attach-session -t =api", cmd)
 
     def test_ecf_flag_without_local_server_fails(self):
         with mock.patch.object(sshtsf, "ecf_local_socket", return_value=None):
@@ -257,7 +298,10 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         cmd = out.strip().splitlines()[1]
         self.assertIn("-R 41234:/x/server", cmd)
         self.assertIn("socat UNIX-LISTEN:/tmp/emacs-remote-socket,fork TCP:127.0.0.1:41234", cmd)
-        self.assertIn("tmux -u new-session -A -s s", cmd)
+        self.assertIn("|| tmux -u new-session -d -s s || exit 1; ", cmd)
+        self.assertIn("EMACS_REMOTE_TARGET build.internal; ", cmd)
+        # No exec on the attach, or the kill after it would never run.
+        self.assertIn("; tmux -u attach-session -t =s; kill $SOCAT_PID", cmd)
 
     def test_unknown_host_lists_registered(self):
         rc, _, err = run_capture(["nowhere", "--dry-run"])

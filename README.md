@@ -58,16 +58,25 @@ Everything is remembered in `~/.config/sshtsf/config.toml`; see
 on the remote. With `emacsclient-auto` as the remote's `EDITOR`, `git commit`, `$EDITOR` and
 anything else that calls `emacsclient` there open in the local Emacs while the forward is
 live, and in the remote's own Emacs server otherwise. Files are opened through TRAMP, so the
-remote's rc file has to say how the local Emacs reaches it:
+remote's rc file has to say how the local Emacs reaches it. The remote is a poor judge of
+that on its own (`hostname` knows nothing of an mDNS `.local` suffix or an ssh_config alias),
+so `sshtsf -e` also sets `EMACS_REMOTE_TARGET` in the tmux session to the exact destination
+it dialed, and the rc file should prefer it:
 
 ```sh
 # On the remote host, in .zshrc / .bashrc:
 if command -v emacsclient-auto >/dev/null; then
     export EDITOR=emacsclient-auto
-    export EMACSCLIENT_TRAMP_PREFIX="/ssh:$USER@$(hostname -s):"
+    target="${EMACS_REMOTE_TARGET:-$(hostname -s)}"
+    [[ $target == *@* ]] || target="$USER@$target"
+    export EMACSCLIENT_TRAMP_PREFIX="/ssh:$target:"
     export BROWSER=ec-browse
 fi
 ```
+
+`EMACS_REMOTE_TARGET` is set on every ecf attach, so a shell that was already running in the
+session still holds the previous connection's name until it re-reads
+`tmux show-environment`; a precmd hook that does so keeps long-lived panes current.
 
 `emacsclient-auto` passes every argument through to the real `emacsclient`, so `-h` shows that
 program's help. Its own knobs are environment variables: `EMACSCLIENT_TRAMP_PREFIX` (empty means

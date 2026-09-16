@@ -16,7 +16,8 @@ Selections use fzf when it is on PATH and fall back to a numbered menu.
 With ecf on, the connection also reverse-forwards the local Emacs server
 socket, so emacsclient / $EDITOR / magit on the remote open in the local
 Emacs; `emacsclient-auto` (this package) does the remote-side routing when it
-is the remote's EDITOR; see README.
+is the remote's EDITOR; see README. The tmux session is also told the
+destination as dialed, as EMACS_REMOTE_TARGET, for the remote's TRAMP prefix.
 It is remembered per host or per session; -e / -E override for one call.
 
 With waypipe on, the connection is wrapped in `waypipe ssh`, so applications
@@ -810,22 +811,22 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
                   % why, file=sys.stderr)
             waypipe = False
 
-    # -u because tmux is the ssh
-    # command, so the remote shell is non-interactive, never reads .zshrc and
-    # never sets LC_ALL -- and the client then renders every non-ASCII cell as
-    # an underscore. -u asserts UTF-8 without depending on the remote's locales.
-    #
-    # Plain -A under waypipe would attach immediately, before the display could
-    # be set; the create step is split out and guarded below instead.
-    remote = ["tmux", "-u", "new-session", "-d" if waypipe else "-A"]
-    if scfg.get("folder"):
-        remote += ["-c", scfg["folder"]]
-    remote += ["-s", session]
-    if scfg.get("command"):
-        # A configured command is a command line, not a bare argv[0]: split it
-        # the way a shell would so `emacs -nw .` works as written.
-        remote += shlex.split(scfg["command"])
+    ecf_local = None
+    if ecf:
+        ecf_local = ecf_local_socket()
+        if ecf_local is None:
+            # A flag is a request, so honour it or fail; a config default is a
+            # preference, and should not stand between you and the session.
+            if over.ecf is not None:
+                sys.exit("sshtsf: no local Emacs server socket found; "
+                         "start Emacs first")
+            print("sshtsf: no local Emacs socket; connecting without the forward",
+                  file=sys.stderr)
 
+    # What the session has to be told about this connection, as (name, shell
+    # word) pairs; the word is spliced into an `sh -c' script as-is, so a
+    # literal is quoted here and a `"$VAR"' is left for the remote sh to expand.
+    session_env: list[tuple[str, str]] = []
     if waypipe:
         # Teach the session waypipe's display name, rather than trusting the
         # remote's tmux to carry it: WAYLAND_DISPLAY only joined the default
@@ -838,11 +839,41 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
         # itself (`waypipe ... server tmux ...'), and only its children have the
         # forwarded WAYLAND_DISPLAY -- the ssh login shell that parses this line
         # runs earlier and would expand it to the remote's own display, or to
-        # nothing. So `sh -c' here, with $WAYLAND_DISPLAY left for it to expand.
-        #
+        # nothing. So `sh -c' below, with $WAYLAND_DISPLAY left for it to expand.
+        session_env.append(("WAYLAND_DISPLAY", '"$WAYLAND_DISPLAY"'))
+    if ecf_local:
+        # Tell the session the name this end dialed, so the remote's
+        # emacs-remote can build a TRAMP prefix the local Emacs can actually
+        # connect back through. The remote cannot work that out itself: its
+        # `hostname' knows nothing of an mDNS `.local' suffix or an ssh_config
+        # alias, and a name that resolves from the remote need not resolve from
+        # here. The destination as dialed, user@ and all, since TRAMP resolves
+        # it through the same ssh_config; emacs-remote prepends the login user
+        # when there is none.
+        session_env.append(("EMACS_REMOTE_TARGET", shlex.quote(target)))
+
+    # -u because tmux is the ssh
+    # command, so the remote shell is non-interactive, never reads .zshrc and
+    # never sets LC_ALL -- and the client then renders every non-ASCII cell as
+    # an underscore. -u asserts UTF-8 without depending on the remote's locales.
+    #
+    # Plain -A with a session_env would attach immediately, before the
+    # variables could be set; the create step is split out and guarded below
+    # instead.
+    remote = ["tmux", "-u", "new-session", "-d" if session_env else "-A"]
+    if scfg.get("folder"):
+        remote += ["-c", scfg["folder"]]
+    remote += ["-s", session]
+    if scfg.get("command"):
+        # A configured command is a command line, not a bare argv[0]: split it
+        # the way a shell would so `emacs -nw .` works as written.
+        remote += shlex.split(scfg["command"])
+
+    if session_env:
         # Create, set, then attach, in three steps: `-A' would attach before the
-        # variable could be set, and `-e' applies only when tmux creates the
-        # session, never when it attaches to a live one.
+        # variables could be set, and `-e' applies only when tmux creates the
+        # session, never when it attaches to a live one -- and a live session
+        # is exactly the one holding values from a connection that is gone.
         #
         # has-session rather than `new-session -Ad', because -A makes
         # new-session behave as attach-session and -d stops meaning detached
@@ -855,49 +886,40 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
         tgt = shlex.quote("=" + session)
         script = (
             "tmux has-session -t %s 2>/dev/null || %s || exit 1; "
-            'tmux set-environment -t %s WAYLAND_DISPLAY "$WAYLAND_DISPLAY"; '
-            "exec tmux -u attach-session -t %s"
-            % (tgt, " ".join(shlex.quote(word) for word in remote), tgt, tgt))
+            % (tgt, " ".join(shlex.quote(word) for word in remote))
+            + "".join("tmux set-environment -t %s %s %s; " % (tgt, name, word)
+                      for name, word in session_env)
+            + "exec tmux -u attach-session -t %s" % tgt)
         remote = ["sh", "-c", script]
 
     sshopts: list[str] = []
     cleanup: list[str] = []
-    if ecf:
-        local = ecf_local_socket()
-        if local is None:
-            # A flag is a request, so honour it or fail; a config default is a
-            # preference, and should not stand between you and the session.
-            if over.ecf is not None:
-                sys.exit("sshtsf: no local Emacs server socket found; "
-                         "start Emacs first")
-            print("sshtsf: no local Emacs socket; connecting without the forward",
-                  file=sys.stderr)
+    if ecf_local:
+        local = ecf_local
+        ecf_port = scfg.get("ecf_port") or cfg["hosts"][host].get("ecf_port")
+        # A separate prior connection, not part of the command below: sshd
+        # does not honour StreamLocalBindUnlink, so after an ungraceful
+        # disconnect the leftover file makes the -R bind (and with
+        # ExitOnForwardFailure, the whole connection) fail -- and the bind
+        # happens at session setup, before any remote command runs. One
+        # socket per host, so a second ecf connection silently replaces the
+        # first one's forward; harmless, since both point at the same Emacs.
+        cleanup = ["ssh", target, "rm", "-f", ECF_REMOTE_SOCKET]
+        if ecf_port:
+            sshopts = ["-o", "ExitOnForwardFailure=yes",
+                       "-R", "%s:%s" % (ecf_port, local)]
+            ecf_script = (
+                "socat UNIX-LISTEN:%s,fork TCP:127.0.0.1:%s & "
+                "SOCAT_PID=$!; "
+                "%%s; "
+                "kill $SOCAT_PID 2>/dev/null" % (shlex.quote(ECF_REMOTE_SOCKET), ecf_port)
+            )
+            # Always the sh -c script by now, since ecf puts a session_env
+            # entry in. The attach loses its `exec' so the kill after it runs.
+            remote[2] = ecf_script % remote[2].replace("exec ", "")
         else:
-            ecf_port = scfg.get("ecf_port") or cfg["hosts"][host].get("ecf_port")
-            # A separate prior connection, not part of the command below: sshd
-            # does not honour StreamLocalBindUnlink, so after an ungraceful
-            # disconnect the leftover file makes the -R bind (and with
-            # ExitOnForwardFailure, the whole connection) fail -- and the bind
-            # happens at session setup, before any remote command runs. One
-            # socket per host, so a second ecf connection silently replaces the
-            # first one's forward; harmless, since both point at the same Emacs.
-            cleanup = ["ssh", target, "rm", "-f", ECF_REMOTE_SOCKET]
-            if ecf_port:
-                sshopts = ["-o", "ExitOnForwardFailure=yes",
-                           "-R", "%s:%s" % (ecf_port, local)]
-                ecf_script = (
-                    "socat UNIX-LISTEN:%s,fork TCP:127.0.0.1:%s & "
-                    "SOCAT_PID=$!; "
-                    "%%s; "
-                    "kill $SOCAT_PID 2>/dev/null" % (shlex.quote(ECF_REMOTE_SOCKET), ecf_port)
-                )
-                if remote[0] == "sh" and remote[1] == "-c":
-                    remote[2] = ecf_script % remote[2].replace("exec ", "")
-                else:
-                    remote = ["sh", "-c", ecf_script % " ".join(shlex.quote(w) for w in remote)]
-            else:
-                sshopts = ["-o", "ExitOnForwardFailure=yes",
-                           "-R", "%s:%s" % (ECF_REMOTE_SOCKET, local)]
+            sshopts = ["-o", "ExitOnForwardFailure=yes",
+                       "-R", "%s:%s" % (ECF_REMOTE_SOCKET, local)]
 
     # -t before the target, not after it. ssh itself accepts either, but
     # waypipe takes the first non-option word as the destination and everything
