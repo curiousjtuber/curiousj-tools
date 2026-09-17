@@ -39,6 +39,11 @@ a missing `socat` on the remote or no running Emacs server is a warning on stder
 connection goes ahead without that forward, `-e`/`-w` or not. A remote without `tmux` gets a
 plain login shell in the session's folder, with the same warning.
 
+On the remote, `sshtsf` looks in the Homebrew, Linuxbrew and `~/.local/bin` directories
+before the rest of `PATH`, because a non-interactive ssh never reads the `.zprofile` that
+adds them: a `brew install tmux` on a Mac needs no rc-file change. `SSHTSF_REMOTE_PATH`
+(colon-separated) replaces that list.
+
 ## sshtsf
 
 ```

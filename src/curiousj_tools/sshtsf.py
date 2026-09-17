@@ -84,6 +84,18 @@ ECF_REMOTE_SOCKET = os.environ.get("ECF_REMOTE_SOCKET") or "/tmp/emacs-remote-so
 # whole option set is reachable without teaching this file any of it.
 WAYPIPE_OPTS = shlex.split(os.environ.get("SSHTSF_WAYPIPE_OPTS") or "")
 
+# Put ahead of PATH on the remote before anything is run there. A
+# non-interactive `ssh host cmd' gets the login shell's bare PATH -- zsh reads
+# only .zshenv for it, and Homebrew's shellenv line lives in .zprofile -- so
+# a brew-installed tmux on a Mac is invisible to it. These are where package
+# managers put what the panes' interactive shell finds, and they go first so
+# the tmux the ssh command runs is the one the panes use (see live_sessions).
+# $HOME is left for the remote sh to expand. A colon-separated
+# SSHTSF_REMOTE_PATH replaces the list.
+REMOTE_PATH = os.environ.get("SSHTSF_REMOTE_PATH") or ":".join([
+    "/opt/homebrew/bin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin",
+    "$HOME/.local/bin"])
+
 # The boolean fields, as opposed to the string ones. Both resolve the same way
 # (flag, then session, then host) and both are written as bare TOML literals.
 BOOL_FIELDS = ("ecf", "waypipe")
@@ -691,6 +703,18 @@ def prompt_folder(target: str, current: str = "", label: str = "") -> str | None
     return chosen.strip().rstrip("/")
 
 
+def remote_sh(script: str) -> list[str]:
+    """`sh -c SCRIPT' as ssh command words, with REMOTE_PATH ahead of the PATH.
+
+    Every command sshtsf runs on a remote goes through this, so the probes
+    resolve the same tmux the connection will. sh rather than the login shell
+    for the script itself: the script is POSIX sh and the login shell need
+    not be (fish has no `VAR=value; cmd'). Unquoted, for the caller to quote
+    once along with its other words.
+    """
+    return ["sh", "-c", 'PATH="%s:$PATH"; %s' % (REMOTE_PATH, script)]
+
+
 def remote_tmux(target: str) -> str:
     """Which tmux a non-interactive `ssh target tmux' resolves, as "PATH (VERSION)".
 
@@ -698,7 +722,8 @@ def remote_tmux(target: str) -> str:
     it is asked only once list-sessions has already failed without saying why.
     """
     proc = subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", target, "command -v tmux && tmux -V"],
+        ["ssh", "-o", "BatchMode=yes", target]
+        + [shlex.quote(word) for word in remote_sh("command -v tmux && tmux -V")],
         text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     if proc.returncode != 0:
         return ""
@@ -720,7 +745,8 @@ def live_sessions(target: str) -> tuple[list[str], str]:
     """
     fmt = "#{session_name}\t#{session_windows}w\t#{?session_attached,attached,detached}"
     proc = subprocess.run(
-        ["ssh", target, "tmux", "list-sessions", "-F", shlex.quote(fmt)],
+        ["ssh", target] + [shlex.quote(word) for word in
+                           remote_sh("tmux list-sessions -F %s" % shlex.quote(fmt))],
         text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if proc.returncode == 0:
         return [line for line in proc.stdout.splitlines() if line.strip()], ""
@@ -1002,7 +1028,7 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
         body = remote[2]
     else:
         body = "exec " + " ".join(shlex.quote(word) for word in remote)
-    remote = ["sh", "-c", fallback + body]
+    remote = remote_sh(fallback + body)
 
     # -t before the target, not after it. ssh itself accepts either, but
     # waypipe takes the first non-option word as the destination and everything
@@ -1531,6 +1557,11 @@ in the remote session draw on the local Wayland desktop. Set it the same way;
 both ends -- on the remote, on the PATH a non-interactive ssh gets. Extra
 waypipe options (--compress, --no-gpu, --xwls, --remote-bin, ...) go in
 SSHTSF_WAYPIPE_OPTS. The two forwards are independent and compose.
+
+Everything sshtsf runs on the remote (tmux, socat) is looked for in the
+Homebrew, Linuxbrew and ~/.local/bin directories first, since a non-
+interactive ssh does not read the rc file that adds them. SSHTSF_REMOTE_PATH,
+colon-separated, replaces that list.
 
 The session is told waypipe's display name on connect, so no tmux config is
 needed on the remote -- WAYLAND_DISPLAY only joined tmux's default

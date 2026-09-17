@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import shlex
 import tempfile
 import unittest
 from unittest import mock
@@ -38,9 +39,13 @@ SAMPLE = {
 }
 
 
+REMOTE_PATH_LINE = ('PATH="/opt/homebrew/bin:/usr/local/bin:'
+                    '/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:$PATH"; ')
+
+
 def no_tmux(folder: str = "", env: tuple[tuple[str, str], ...] = ()) -> str:
-    """The remote script's opening: what happens on a host without tmux."""
-    return ('command -v tmux >/dev/null || { '
+    """The remote script's opening: the PATH, then what happens without tmux."""
+    return (REMOTE_PATH_LINE + 'command -v tmux >/dev/null || { '
             'echo "sshtsf: no tmux on the remote; a plain shell instead" >&2; '
             + ("cd %s 2>/dev/null; " % folder if folder else "")
             + "".join("export %s=%s; " % pair for pair in env)
@@ -372,6 +377,36 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         self.assertIn("web  (devweb)  ~/src/webapp  -> make dev *", out)
         self.assertIn("api  ~/src/api  +ecf", out)
         self.assertIn("build  (-> build.internal)\n    (no sessions)", out)
+
+
+class TestRemoteSh(unittest.TestCase):
+    def test_path_goes_first(self):
+        self.assertEqual(sshtsf.remote_sh("tmux -V"),
+                         ["sh", "-c", REMOTE_PATH_LINE + "tmux -V"])
+
+    def test_env_knob_replaces_the_list(self):
+        with mock.patch.object(sshtsf, "REMOTE_PATH", "/opt/tmux/bin"):
+            self.assertEqual(sshtsf.remote_sh("tmux -V")[2],
+                             'PATH="/opt/tmux/bin:$PATH"; tmux -V')
+
+    def test_live_sessions_probe_uses_it(self):
+        proc = mock.Mock(returncode=0, stdout="web\t2w\tdetached\n", stderr="")
+        with mock.patch.object(sshtsf.subprocess, "run", return_value=proc) as run:
+            sessions, why = sshtsf.live_sessions("devbox")
+        self.assertEqual((sessions, why), (["web\t2w\tdetached"], ""))
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[:4], ["ssh", "devbox", "sh", "-c"])
+        # Quoted once for the remote login shell; sh then sees the script.
+        script = shlex.split(argv[4])[0]
+        self.assertTrue(script.startswith(REMOTE_PATH_LINE + "tmux list-sessions -F "))
+
+    def test_remote_tmux_probe_uses_it(self):
+        proc = mock.Mock(returncode=0, stdout="/opt/homebrew/bin/tmux\ntmux 3.5a\n")
+        with mock.patch.object(sshtsf.subprocess, "run", return_value=proc) as run:
+            self.assertEqual(sshtsf.remote_tmux("mac"), "/opt/homebrew/bin/tmux (tmux 3.5a)")
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[:6], ["ssh", "-o", "BatchMode=yes", "mac", "sh", "-c"])
+        self.assertIn("command -v tmux && tmux -V", argv[6])
 
 
 class TestWaypipeRemoteProbe(unittest.TestCase):
