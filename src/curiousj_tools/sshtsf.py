@@ -24,6 +24,11 @@ With waypipe on, the connection is wrapped in `waypipe ssh`, so applications
 started inside the remote tmux session draw on the local Wayland desktop.
 Remembered the same way; -w / -W override. Wayland clients only.
 
+A missing tool is a warning, never a refusal. A forward whose tool is absent
+at either end (no Emacs server, no waypipe, no socat on the remote) is left
+out and said so on stderr; a remote without tmux gets a plain login shell in
+the session's folder instead of the session.
+
 Config layout (all fields but the host key are optional):
 
     default_host = "devbox"
@@ -792,6 +797,54 @@ def waypipe_local_display() -> tuple[str | None, str]:
     return path, ""
 
 
+def waypipe_remote_bin() -> str:
+    """The waypipe the remote will be asked to run: --remote-bin's value, or "".
+
+    waypipe reads its options with getopt_long, so both `--remote-bin PATH'
+    and `--remote-bin=PATH' spell it.
+    """
+    for i, word in enumerate(WAYPIPE_OPTS):
+        if word == "--remote-bin" and i + 1 < len(WAYPIPE_OPTS):
+            return WAYPIPE_OPTS[i + 1]
+        if word.startswith("--remote-bin="):
+            return word[len("--remote-bin="):]
+    return ""
+
+
+def waypipe_remote_missing(target: str) -> str:
+    """Why `waypipe ssh' would die on the far side, or "" when it should not.
+
+    waypipe_local_display, one hop further out: waypipe has to exist at both
+    ends, and a remote without it fails after the handshake with waypipe's own
+    words, past the point where anything can be done about it. Asking first
+    costs a BatchMode round trip, paid only when waypipe is on, and buys the
+    choice between a plain connection and none.
+
+    Honours --remote-bin in SSHTSF_WAYPIPE_OPTS, the knob for exactly the host
+    whose non-interactive PATH lacks waypipe. A probe that cannot answer -- a
+    host that only takes a password, a timeout -- is taken as a yes, leaving
+    the real connection to be the judge, as valid_remote_name does with git.
+    """
+    remote_bin = waypipe_remote_bin()
+    if remote_bin:
+        check = "test -x %s" % shlex.quote(remote_bin)
+        what = "%s is not executable on %s" % (remote_bin, target)
+    else:
+        check = "command -v waypipe"
+        what = "no waypipe on the non-interactive PATH of %s" % target
+    try:
+        proc = subprocess.run(
+            ["ssh", "-o", "BatchMode=yes", target, check],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return ""
+    # 255 is ssh itself failing to connect; anything else is the remote
+    # shell's verdict.
+    if proc.returncode in (0, 255):
+        return ""
+    return what
+
+
 def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
             over: Overrides = NO_OVERRIDES) -> int:
     scfg = cfg["hosts"][host].get("sessions", {}).get(session, {})
@@ -799,29 +852,30 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
     ecf = resolve_flag(cfg, host, session, "ecf", over.ecf)
     waypipe = resolve_flag(cfg, host, session, "waypipe", over.waypipe)
 
+    # A forward that cannot be set up is a warning, never a refusal, whether
+    # it was asked for by flag or by config: the session is the point, and a
+    # forward is a convenience on top of it. Failing here would only send you
+    # back to retype the command without the flag. The reason is printed
+    # because it is the whole difference between "install waypipe" and "you
+    # are on a Mac".
     if waypipe:
         display, why = waypipe_local_display()
         if display is None:
-            # Same policy as ecf below: a flag is honoured or fails, a config
-            # default steps aside. The reason matters here -- it is the whole
-            # difference between "install waypipe" and "you are on a Mac".
-            if over.waypipe is not None:
-                sys.exit("sshtsf: cannot forward Wayland: %s" % why)
             print("sshtsf: no local Wayland display (%s); connecting without it"
                   % why, file=sys.stderr)
+            waypipe = False
+    if waypipe:
+        why = waypipe_remote_missing(target)
+        if why:
+            print("sshtsf: %s; connecting without Wayland" % why, file=sys.stderr)
             waypipe = False
 
     ecf_local = None
     if ecf:
         ecf_local = ecf_local_socket()
         if ecf_local is None:
-            # A flag is a request, so honour it or fail; a config default is a
-            # preference, and should not stand between you and the session.
-            if over.ecf is not None:
-                sys.exit("sshtsf: no local Emacs server socket found; "
-                         "start Emacs first")
-            print("sshtsf: no local Emacs socket; connecting without the forward",
-                  file=sys.stderr)
+            print("sshtsf: no local Emacs server socket (start Emacs first); "
+                  "connecting without the forward", file=sys.stderr)
 
     # What the session has to be told about this connection, as (name, shell
     # word) pairs; the word is spliced into an `sh -c' script as-is, so a
@@ -908,11 +962,19 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
         if ecf_port:
             sshopts = ["-o", "ExitOnForwardFailure=yes",
                        "-R", "%s:%s" % (ecf_port, local)]
+            # socat is checked for on the remote rather than assumed: without
+            # the check a missing one dies in the background with a bare
+            # `not found' and the forwarded port sits there unrelayed. With
+            # it, the session is warned once and attached anyway -- the same
+            # generosity as the local checks above, at no extra round trip.
             ecf_script = (
+                "if command -v socat >/dev/null; then "
                 "socat UNIX-LISTEN:%s,fork TCP:127.0.0.1:%s & "
                 "SOCAT_PID=$!; "
+                "else echo \"sshtsf: no socat on the remote; the Emacs relay is off\" >&2; fi; "
                 "%%s; "
-                "kill $SOCAT_PID 2>/dev/null" % (shlex.quote(ECF_REMOTE_SOCKET), ecf_port)
+                "[ -z \"$SOCAT_PID\" ] || kill $SOCAT_PID 2>/dev/null"
+                % (shlex.quote(ECF_REMOTE_SOCKET), ecf_port)
             )
             # Always the sh -c script by now, since ecf puts a session_env
             # entry in. The attach loses its `exec' so the kill after it runs.
@@ -920,6 +982,27 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
         else:
             sshopts = ["-o", "ExitOnForwardFailure=yes",
                        "-R", "%s:%s" % (ECF_REMOTE_SOCKET, local)]
+
+    # No tmux on the remote is the last thing that could still refuse the
+    # session, and it is met the way the forwards are: a warning, then a plain
+    # login shell in the session's folder, with what the session would have
+    # been told exported into it. Checked ahead of everything else, including
+    # the socat relay above, so the exec'd shell leaves nothing running behind
+    # it. A `"$VAR"' entry is left out of the exports: it is a value the shell
+    # already holds, and the export would only restate it.
+    fallback = (
+        "command -v tmux >/dev/null || { "
+        'echo "sshtsf: no tmux on the remote; a plain shell instead" >&2; '
+        + ("cd %s 2>/dev/null; " % shlex.quote(scfg["folder"])
+           if scfg.get("folder") else "")
+        + "".join("export %s=%s; " % (name, word)
+                  for name, word in session_env if not word.startswith('"$'))
+        + 'exec "${SHELL:-sh}" -l; }; ')
+    if remote[:2] == ["sh", "-c"]:
+        body = remote[2]
+    else:
+        body = "exec " + " ".join(shlex.quote(word) for word in remote)
+    remote = ["sh", "-c", fallback + body]
 
     # -t before the target, not after it. ssh itself accepts either, but
     # waypipe takes the first non-option word as the destination and everything

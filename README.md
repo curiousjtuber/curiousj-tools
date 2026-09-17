@@ -34,6 +34,11 @@ Optional dependencies, by command:
 | `waypipe`, `socat` | `sshtsf -w` (Wayland forwarding) and `sshtsf` `ecf_port` relays |
 | `emacsclient` | `emacsclient-auto`, `ec-browse`, `sshtsf -e` |
 
+`sshtsf` treats every tool but `ssh` as optional: a missing `waypipe` (here or on the remote),
+a missing `socat` on the remote or no running Emacs server is a warning on stderr, and the
+connection goes ahead without that forward, `-e`/`-w` or not. A remote without `tmux` gets a
+plain login shell in the session's folder, with the same warning.
+
 ## sshtsf
 
 ```

@@ -38,6 +38,15 @@ SAMPLE = {
 }
 
 
+def no_tmux(folder: str = "", env: tuple[tuple[str, str], ...] = ()) -> str:
+    """The remote script's opening: what happens on a host without tmux."""
+    return ('command -v tmux >/dev/null || { '
+            'echo "sshtsf: no tmux on the remote; a plain shell instead" >&2; '
+            + ("cd %s 2>/dev/null; " % folder if folder else "")
+            + "".join("export %s=%s; " % pair for pair in env)
+            + 'exec "${SHELL:-sh}" -l; }; ')
+
+
 def run_capture(argv: list[str]) -> tuple[int, str, str]:
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -198,7 +207,8 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(
             out.strip(),
-            "ssh -t devbox tmux -u new-session -A -c src/webapp -s web make dev")
+            "ssh -t devbox sh -c '" + no_tmux("src/webapp")
+            + "exec tmux -u new-session -A -c src/webapp -s web make dev'")
 
     def test_pair_alias_and_host_alias(self):
         rc, out, _ = run_capture(["devweb", "--dry-run"])
@@ -206,7 +216,8 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         self.assertIn("-s web make dev", out)
         rc, out, _ = run_capture(["c", "shell", "--dry-run"])
         self.assertEqual(rc, 0)
-        self.assertEqual(out.strip(), "ssh -t devbox tmux -u new-session -A -s shell")
+        self.assertEqual(out.strip(), "ssh -t devbox sh -c '" + no_tmux()
+                         + "exec tmux -u new-session -A -s shell'")
 
     def test_dry_run_does_not_touch_last_used(self):
         run_capture(["devbox", "shell", "--dry-run"])
@@ -224,8 +235,9 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
             lines[1],
             "ssh -o ExitOnForwardFailure=yes "
             "-R /tmp/emacs-remote-socket:/run/user/1000/emacs/server "
-            "-t devbox sh -c "
-            "'tmux has-session -t =api 2>/dev/null "
+            "-t devbox sh -c '"
+            + no_tmux("src/api", (("EMACS_REMOTE_TARGET", "devbox"),))
+            + "tmux has-session -t =api 2>/dev/null "
             "|| tmux -u new-session -d -c src/api -s api || exit 1; "
             "tmux set-environment -t =api EMACS_REMOTE_TARGET devbox; "
             "exec tmux -u attach-session -t =api'")
@@ -248,7 +260,9 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         rc, out, _ = run_capture(["devbox", "shell", "--dry-run"])
         self.assertEqual(rc, 0)
         self.assertNotIn("EMACS_REMOTE_TARGET", out)
-        self.assertNotIn("sh -c", out)
+        # Nothing to tell the session, so no create-set-attach dance: one -A.
+        self.assertNotIn("has-session", out)
+        self.assertIn("exec tmux -u new-session -A -s shell'", out)
 
     def test_waypipe_and_ecf_share_one_script(self):
         cfg = sshtsf.load_config()
@@ -256,22 +270,55 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         sshtsf.save_config(cfg)
         with mock.patch.object(sshtsf, "ecf_local_socket", return_value="/x/server"), \
              mock.patch.object(sshtsf, "waypipe_local_display",
-                               return_value=("/run/user/1000/wayland-0", "")):
+                               return_value=("/run/user/1000/wayland-0", "")), \
+             mock.patch.object(sshtsf, "waypipe_remote_missing", return_value=""):
             rc, out, _ = run_capture(["devbox", "api", "--dry-run"])
         self.assertEqual(rc, 0)
         cmd = out.strip().splitlines()[1]
         self.assertTrue(cmd.startswith("waypipe ssh -o ExitOnForwardFailure=yes -R "))
+        # The shell already holds waypipe's WAYLAND_DISPLAY; only the target
+        # needs exporting into a fallback shell.
+        self.assertIn(no_tmux("src/api", (("EMACS_REMOTE_TARGET", "devbox"),)), cmd)
+        self.assertNotIn("export WAYLAND_DISPLAY", cmd)
         self.assertIn(
             "|| exit 1; "
             "tmux set-environment -t =api WAYLAND_DISPLAY \"$WAYLAND_DISPLAY\"; "
             "tmux set-environment -t =api EMACS_REMOTE_TARGET devbox; "
             "exec tmux -u attach-session -t =api", cmd)
 
-    def test_ecf_flag_without_local_server_fails(self):
+    def test_ecf_flag_without_local_server_warns_and_connects(self):
         with mock.patch.object(sshtsf, "ecf_local_socket", return_value=None):
-            rc, _, err = run_capture(["-e", "devbox", "web", "--dry-run"])
-        self.assertEqual(rc, 1)
-        self.assertIn("no local Emacs server socket", err)
+            rc, out, err = run_capture(["-e", "devbox", "web", "--dry-run"])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("-R", out)
+        self.assertIn("no local Emacs server socket (start Emacs first)", err)
+        self.assertIn("connecting without the forward", err)
+
+    def test_waypipe_flag_without_local_display_warns_and_connects(self):
+        with mock.patch.object(sshtsf, "waypipe_local_display",
+                               return_value=(None, "waypipe is not on PATH")), \
+             mock.patch.object(sshtsf, "waypipe_remote_missing") as probe:
+            rc, out, err = run_capture(["-w", "devbox", "web", "--dry-run"])
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.strip().startswith("ssh "))
+        self.assertIn("no local Wayland display (waypipe is not on PATH)", err)
+        self.assertIn("connecting without it", err)
+        # No point asking the remote once this end cannot do it.
+        probe.assert_not_called()
+
+    def test_waypipe_flag_missing_on_remote_warns_and_connects(self):
+        with mock.patch.object(sshtsf, "waypipe_local_display",
+                               return_value=("/run/user/1000/wayland-0", "")), \
+             mock.patch.object(sshtsf, "waypipe_remote_missing",
+                               return_value="no waypipe on the non-interactive PATH of devbox"):
+            rc, out, err = run_capture(["-w", "devbox", "web", "--dry-run"])
+        self.assertEqual(rc, 0)
+        cmd = out.strip()
+        self.assertTrue(cmd.startswith("ssh "))
+        self.assertNotIn("waypipe", cmd)
+        self.assertNotIn("WAYLAND_DISPLAY", cmd)
+        self.assertIn("no waypipe on the non-interactive PATH of devbox; "
+                      "connecting without Wayland", err)
 
     def test_ecf_default_without_local_server_connects_plain(self):
         with mock.patch.object(sshtsf, "ecf_local_socket", return_value=None):
@@ -301,7 +348,16 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         self.assertIn("|| tmux -u new-session -d -s s || exit 1; ", cmd)
         self.assertIn("EMACS_REMOTE_TARGET build.internal; ", cmd)
         # No exec on the attach, or the kill after it would never run.
-        self.assertIn("; tmux -u attach-session -t =s; kill $SOCAT_PID", cmd)
+        self.assertIn("; tmux -u attach-session -t =s; "
+                      "[ -z \"$SOCAT_PID\" ] || kill $SOCAT_PID", cmd)
+        # A remote without socat is warned, not refused: the relay is skipped
+        # and the attach still happens.
+        self.assertIn("if command -v socat >/dev/null; then socat ", cmd)
+        # The tmux check comes first, so a fallback shell never leaves a relay
+        # running behind it.
+        self.assertLess(cmd.index("command -v tmux"), cmd.index("command -v socat"))
+        self.assertIn("else echo \"sshtsf: no socat on the remote; "
+                      "the Emacs relay is off\" >&2; fi; ", cmd)
 
     def test_unknown_host_lists_registered(self):
         rc, _, err = run_capture(["nowhere", "--dry-run"])
@@ -316,6 +372,42 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         self.assertIn("web  (devweb)  ~/src/webapp  -> make dev *", out)
         self.assertIn("api  ~/src/api  +ecf", out)
         self.assertIn("build  (-> build.internal)\n    (no sessions)", out)
+
+
+class TestWaypipeRemoteProbe(unittest.TestCase):
+    def probe(self, returncode, opts=()):
+        proc = mock.Mock(returncode=returncode)
+        with mock.patch.object(sshtsf, "WAYPIPE_OPTS", list(opts)), \
+             mock.patch.object(sshtsf.subprocess, "run", return_value=proc) as run:
+            why = sshtsf.waypipe_remote_missing("devbox")
+        return why, run.call_args.args[0]
+
+    def test_present(self):
+        why, argv = self.probe(0)
+        self.assertEqual(why, "")
+        self.assertEqual(argv, ["ssh", "-o", "BatchMode=yes", "devbox", "command -v waypipe"])
+
+    def test_missing(self):
+        why, _ = self.probe(1)
+        self.assertEqual(why, "no waypipe on the non-interactive PATH of devbox")
+
+    def test_ssh_failure_is_not_an_answer(self):
+        why, _ = self.probe(255)
+        self.assertEqual(why, "")
+
+    def test_timeout_is_not_an_answer(self):
+        with mock.patch.object(sshtsf.subprocess, "run",
+                               side_effect=sshtsf.subprocess.TimeoutExpired("ssh", 20)):
+            self.assertEqual(sshtsf.waypipe_remote_missing("devbox"), "")
+
+    def test_remote_bin_is_probed_instead_of_path(self):
+        why, argv = self.probe(1, ["--compress", "zstd", "--remote-bin", "/opt/wp/bin/waypipe"])
+        self.assertEqual(argv[-1], "test -x /opt/wp/bin/waypipe")
+        self.assertEqual(why, "/opt/wp/bin/waypipe is not executable on devbox")
+
+    def test_remote_bin_with_equals(self):
+        _, argv = self.probe(0, ["--remote-bin=/opt/wp/bin/waypipe"])
+        self.assertEqual(argv[-1], "test -x /opt/wp/bin/waypipe")
 
 
 class TestSubcommands(ConfigDirMixin, unittest.TestCase):
