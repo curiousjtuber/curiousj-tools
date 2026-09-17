@@ -39,7 +39,7 @@ Config layout (all fields but the host key are optional):
     session = "web"
 
     [hosts.devbox]
-    target = "devbox"       # ssh destination; defaults to the host key
+    target = "devbox"       # ssh destination, [user@]host; defaults to the host key
     alias = "c"
     ecf = true              # forward the local Emacs socket, by default
     ecf_port = 41234        # relay via TCP port (for SELinux hosts where sshd cannot bind unix sockets)
@@ -309,6 +309,11 @@ def pick_numbered(items: list[str], prompt: str, header: str = "",
         print("  not a choice: %s" % reply, file=sys.stderr)
 
 
+def said_yes(reply: str) -> bool:
+    """Whether a (y/N) answer was a yes; blank is the default no."""
+    return reply.strip().lower() in TRUE_WORDS + ("y",)
+
+
 def ask(prompt: str, default: str = "") -> str:
     suffix = " [%s]" % default if default else ""
     try:
@@ -441,15 +446,26 @@ def ssh_known_hosts(path: str = KNOWN_HOSTS_PATH) -> list[str]:
     return sorted(names)
 
 
-def ssh_host_candidates(cfg: dict) -> list[str]:
-    """known_hosts entries not already registered -- i.e. worth offering."""
-    taken = set()
-    for host, hcfg in (cfg.get("hosts") or {}).items():
-        taken.add(host)
-        for field in ("alias", "target"):
-            if hcfg.get(field):
-                taken.add(hcfg[field])
-    return [host for host in ssh_known_hosts() if host not in taken]
+def ssh_host_candidates(cfg: dict) -> list[tuple[str, str]]:
+    """known_hosts entries as (host, note), the ones no entry dials yet first.
+
+    A machine some entry already reaches is kept, after the fresh ones and
+    noted with the entry's name, rather than hidden: it is a different
+    destination for every user, so registering it again as root@ is a real
+    thing to want. Matched by entry name, alias, or the host part of the
+    target, so me@mac.local counts for mac.local.
+    """
+    dialed: dict[str, list[str]] = {}
+    for host, hcfg in sorted((cfg.get("hosts") or {}).items()):
+        names = {host, hcfg.get("alias") or host,
+                 (hcfg.get("target") or host).rpartition("@")[2]}
+        for name in names:
+            dialed.setdefault(name, []).append(host)
+    known = ssh_known_hosts()
+    fresh = [(host, "") for host in known if host not in dialed]
+    taken = [(host, "registered as %s" % ", ".join(sorted(set(dialed[host]))))
+             for host in known if host in dialed]
+    return fresh + taken
 
 
 def logical_cwd() -> str:
@@ -584,7 +600,8 @@ def host_hint(cfg: dict, ssh_hosts: bool = False) -> str:
         out = "        nothing registered yet; run `sshtsf` to add a host"
 
     if ssh_hosts:
-        candidates = ssh_host_candidates(cfg)
+        # Only the fresh ones: the registered ones are in the list above.
+        candidates = [host for host, note in ssh_host_candidates(cfg) if not note]
         if candidates:
             shown = candidates[:MAX_KNOWN_HOSTS]
             out += "\n        in ~/.ssh/known_hosts:\n" + textwrap.fill(
@@ -687,18 +704,21 @@ def show_folder(folder: str) -> None:
 
 
 def prompt_folder(target: str, current: str = "", label: str = "") -> str | None:
-    """Ask for a folder: type one, or press Enter to fuzzy-pick from a listing.
+    """Ask for a folder: type one, `?' to fuzzy-pick from a listing, blank for none.
 
-    Returns the folder relative to ~, "" for none, or None if aborted. When
-    browsing an update, the current folder pre-fills fzf's query.
+    Returns the folder relative to ~, "" for none, or None if aborted. Updating
+    an existing folder, blank keeps it and `-' clears it, so the current one is
+    the prompt's default and pre-fills fzf's query.
     """
+    where = " for %s" % label if label else ""
     if current:
-        print("  current folder: ~/%s" % current, file=sys.stderr)
-    typed = ask("  folder relative to ~%s (blank to browse, - for none)"
-                % (" for %s" % label if label else ""))
+        typed = ask("  folder relative to ~%s (? to browse, - for none)" % where,
+                    current)
+    else:
+        typed = ask("  folder relative to ~%s (blank for none, ? to browse)" % where)
     if typed == "-":
         return ""
-    if typed:
+    if typed != "?":
         return typed.strip().rstrip("/")
 
     print("  listing %s ..." % target, file=sys.stderr)
@@ -1147,9 +1167,9 @@ def route_add_session(cfg: dict, host: str, name: str = "",
         entry["folder"] = folder.rstrip("/")
     if command:
         entry["command"] = command
-    if ecf.strip().lower() in TRUE_WORDS + ("y",):
+    if said_yes(ecf):
         entry["ecf"] = True
-    if waypipe.strip().lower() in TRUE_WORDS + ("y",):
+    if said_yes(waypipe):
         entry["waypipe"] = True
     sessions[name] = entry
 
@@ -1167,27 +1187,48 @@ def route_add_host(cfg: dict, name: str = "", dry_run: bool = False,
     # not in known_hosts -- a machine you have not reached yet -- available,
     # and aborting the picker just falls through to the prompt below.
     if not name:
-        candidates = ssh_host_candidates(cfg)
-        if candidates:
-            name = pick(candidates, "host>",
-                        "hosts in ~/.ssh/known_hosts (or type a name)",
-                        free_text=True) or ""
+        labels = {"%s  (%s)" % (host, note) if note else host: host
+                  for host, note in ssh_host_candidates(cfg)}
+        if labels:
+            choice = pick(list(labels), "host>",
+                          "hosts in ~/.ssh/known_hosts (or type a name)",
+                          free_text=True) or ""
+            name = labels.get(choice, choice)
 
-    name = ask("  host name", name)
+    # What was picked or typed is a machine; the name may well be shortened
+    # from it, so it is the destination's default, not the name.
+    host = name
+    name = ask("  name for this [user@]host (what you will type)", host)
     if not name:
-        sys.exit("sshtsf: a host name is required")
+        sys.exit("sshtsf: a name for the [user@]host is required")
     if name in cfg["hosts"]:
         print("sshtsf: %s already registered" % name, file=sys.stderr)
         return route_pick_session(cfg, name, dry_run, over)
 
-    target = ask("  ssh destination", name)
+    # The destination is what ssh dials, user and all; there is no user field
+    # of its own. Asked for separately only when the destination names none,
+    # and a blank leaves it to ssh (~/.ssh/config, or your own name).
+    target = ask("  ssh destination ([user@]host)", host or name)
+    if "@" not in target:
+        user = ask("  user on it (blank for ssh's default)")
+        if user:
+            target = "%s@%s" % (user, target)
     alias = ask("  alias (blank for none)")
+    # The host-wide defaults, before the first session: a yes here is
+    # inherited by every session on the host, and route_add_session then
+    # skips the same question rather than ask it again per session.
+    ecf = ask("  forward the local Emacs socket, for every session? (y/N)")
+    waypipe = ask("  forward Wayland, for every session? (y/N)")
 
     hcfg: dict = {}
     if target and target != name:
         hcfg["target"] = target
     if alias:
         hcfg["alias"] = alias
+    if said_yes(ecf):
+        hcfg["ecf"] = True
+    if said_yes(waypipe):
+        hcfg["waypipe"] = True
     hcfg["sessions"] = {}
     cfg["hosts"][name] = hcfg
     if not cfg.get("default_host"):
@@ -1226,19 +1267,9 @@ def route_pick_host(cfg: dict, dry_run: bool = False,
     ordered = ([default] if default in hosts else []) + \
               [h for h in hosts if h != default]
 
-    labels = {}
-    for host in ordered:
-        label = host
-        hcfg = cfg["hosts"][host]
-        extras = []
-        if hcfg.get("alias"):
-            extras.append(hcfg["alias"])
-        extras += [field for field in BOOL_FIELDS if hcfg.get(field)]
-        if host == default:
-            extras.append("default")
-        if extras:
-            label = "%s  (%s)" % (host, ", ".join(extras))
-        labels[label] = host
+    # The same line `sshtsf list' prints, so a target that differs from the
+    # name (user@, a .local suffix) shows here too, where the choice is made.
+    labels = {describe_host(cfg, host): host for host in ordered}
 
     items = list(labels) + [NEW_HOST]
     choice = pick(items, "host>", "hosts")
@@ -1289,7 +1320,7 @@ def cmd_live(cfg: dict, args) -> int:
     for host in hosts:
         target = ssh_target(cfg, host)
         rows, why = live_sessions(target)
-        print("%s:" % host)
+        print("%s:" % (host if target == host else "%s  (-> %s)" % (host, target)))
         if not rows:
             print("    (%s)" % (why or "no tmux server"))
             continue
@@ -1590,8 +1621,8 @@ config:
   sshtsf rm HOST [NAME]     remove a session, or a host (-f)
   sshtsf set HOST [NAME] FIELD [VALUE]
                             set alias/target/ecf_port, or alias/folder/command/ecf_port, plus
-                            ecf/waypipe on either; omit VALUE for folder to
-                            browse the remote tree
+                            ecf/waypipe on either; omit VALUE for folder to be
+                            asked (? browses the remote tree)
   sshtsf default HOST       set the host offered first
   sshtsf remote [HOST] [NAME]
                             git remote add, for this repo on HOST (-f to
@@ -1804,7 +1835,8 @@ def dispatch(cfg: dict, verb: str, rest: list[str], args) -> int:
     if verb == "set":
         # set HOST [SESSION] FIELD [VALUE]
         #
-        # The value is optional only for `folder`, which browses when omitted.
+        # The value is optional only for `folder`, which is asked for when
+        # omitted, with `?' browsing the remote tree.
         # SESSION is told apart from FIELD by name, since both are bare words:
         # a known session in position 2 means the 4-word form.
         HOST_FIELDS = ("alias", "target") + BOOL_FIELDS

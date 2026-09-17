@@ -62,6 +62,10 @@ sshtsf --dry-run devbox web
 
 Everything is remembered in `~/.config/sshtsf/config.toml`; see
 [examples/sshtsf-config.toml](examples/sshtsf-config.toml) and `sshtsf -h` for the fields.
+A host's `target` is the ssh destination, `[user@]host`, and is what every connection, probe
+and `sshtsf remote` URL dials; there is no separate user field. `sshtsf add` asks for the user
+when the destination names none, and a blank leaves it to ssh (`~/.ssh/config`, or your own
+name). Two users on one machine are two host entries.
 
 ### Emacs routing (ecf)
 

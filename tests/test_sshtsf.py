@@ -144,6 +144,169 @@ class TestConfigRoundTrip(ConfigDirMixin, unittest.TestCase):
         self.assertEqual(out.strip(), self.cfg_path)
 
 
+def scripted(answers: dict[str, str]):
+    """An `ask' that answers by prompt prefix, and fails on a prompt it lacks."""
+    def fake_ask(prompt, default=""):
+        for prefix, reply in answers.items():
+            if prompt.strip().startswith(prefix):
+                return reply or default
+        raise AssertionError("unexpected prompt: %r" % prompt)
+    return fake_ask
+
+
+class TestHostCandidates(unittest.TestCase):
+    def test_fresh_first_then_registered_with_their_names(self):
+        cfg = {"hosts": {
+            "devbox": {"alias": "c"},
+            "build": {"target": "build.internal"},
+            "mac": {"target": "me@mac.local"},
+            "mac-root": {"target": "root@mac.local"},
+        }}
+        known = ["build.internal", "c", "devbox", "mac.local", "other"]
+        with mock.patch.object(sshtsf, "ssh_known_hosts", return_value=known):
+            got = sshtsf.ssh_host_candidates(cfg)
+        self.assertEqual(got, [
+            ("other", ""),
+            ("build.internal", "registered as build"),
+            ("c", "registered as devbox"),
+            ("devbox", "registered as devbox"),
+            ("mac.local", "registered as mac, mac-root"),
+        ])
+
+
+class TestAddHost(ConfigDirMixin, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        sshtsf.save_config(SAMPLE)
+
+    def test_picker_offers_registered_machines_last_and_maps_them_back(self):
+        cfg = sshtsf.load_config()
+        cfg["hosts"]["devbox"]["target"] = "me@devbox.local"
+        sshtsf.save_config(cfg)
+        answers = {"name for this [user@]host": "devbox-root", "ssh destination": "",
+                   "user on it": "root", "alias": "",
+                   "forward the local Emacs socket": "", "forward Wayland": ""}
+        with mock.patch.object(sshtsf, "ssh_known_hosts",
+                               return_value=["devbox.local", "other"]), \
+             mock.patch.object(sshtsf, "pick",
+                               return_value="devbox.local  (registered as devbox)") as pick, \
+             mock.patch.object(sshtsf, "ask", side_effect=scripted(answers)), \
+             mock.patch.object(sshtsf, "route_add_session", return_value=0):
+            rc = sshtsf.route_add_host(sshtsf.load_config())
+        self.assertEqual(rc, 0)
+        self.assertEqual(pick.call_args.args[0],
+                         ["other", "devbox.local  (registered as devbox)"])
+        self.assertEqual(sshtsf.load_config()["hosts"]["devbox-root"],
+                         {"target": "root@devbox.local"})
+
+    def test_unknown_host_hint_lists_only_fresh_machines(self):
+        with mock.patch.object(sshtsf, "ssh_known_hosts", return_value=["devbox", "other"]):
+            rc, _, err = run_capture(["nowhere", "--dry-run"])
+        self.assertEqual(rc, 1)
+        self.assertIn("in ~/.ssh/known_hosts:\n          other\n", err)
+
+    def add_host(self, answers, typed=""):
+        with mock.patch.object(sshtsf, "ask", side_effect=scripted(answers)), \
+             mock.patch.object(sshtsf, "ssh_host_candidates", return_value=[]), \
+             mock.patch.object(sshtsf, "route_add_session", return_value=0) as nxt:
+            rc = sshtsf.route_add_host(sshtsf.load_config(), typed)
+        self.assertEqual(rc, 0)
+        nxt.assert_called_once()
+        return sshtsf.load_config()["hosts"][answers["name for this [user@]host"]]
+
+    def test_destination_defaults_to_the_machine_typed_not_the_name(self):
+        # `sshtsf add mac.local`, then shortened to "mac" at the name prompt:
+        # a blank destination still dials mac.local.
+        hcfg = self.add_host({"name for this [user@]host": "mac", "ssh destination": "",
+                              "user on it": "", "alias": "",
+                              "forward the local Emacs socket": "",
+                              "forward Wayland": ""}, typed="mac.local")
+        self.assertEqual(hcfg, {"target": "mac.local"})
+
+    def test_asks_the_host_defaults_before_the_first_session(self):
+        hcfg = self.add_host({"name for this [user@]host": "mac", "ssh destination": "me@mac.local",
+                              "alias": "m", "forward the local Emacs socket": "y",
+                              "forward Wayland": ""})
+        self.assertEqual(hcfg, {"target": "me@mac.local", "alias": "m", "ecf": True})
+
+    def test_a_no_leaves_the_fields_out(self):
+        hcfg = self.add_host({"name for this [user@]host": "mac", "ssh destination": "",
+                              "user on it": "", "alias": "",
+                              "forward the local Emacs socket": "n",
+                              "forward Wayland": "no"})
+        self.assertEqual(hcfg, {})
+
+    def test_user_is_asked_only_when_the_destination_names_none(self):
+        # "me@mac.local" above went straight to the alias: no user prompt.
+        hcfg = self.add_host({"name for this [user@]host": "mac", "ssh destination": "mac.local",
+                              "user on it": "me", "alias": "",
+                              "forward the local Emacs socket": "",
+                              "forward Wayland": ""})
+        self.assertEqual(hcfg, {"target": "me@mac.local"})
+
+    def test_blank_user_leaves_the_destination_alone(self):
+        hcfg = self.add_host({"name for this [user@]host": "mac", "ssh destination": "mac.local",
+                              "user on it": "", "alias": "",
+                              "forward the local Emacs socket": "",
+                              "forward Wayland": ""})
+        self.assertEqual(hcfg, {"target": "mac.local"})
+
+    def test_session_on_such_a_host_is_not_asked_again(self):
+        cfg = sshtsf.load_config()
+        cfg["hosts"]["mac"] = {"ecf": True, "waypipe": True, "sessions": {}}
+        sshtsf.save_config(cfg)
+        # No "forward ..." entries: the scripted ask fails if either is asked.
+        answers = {"session name": "s", "command to run": "", "alias for": ""}
+        with mock.patch.object(sshtsf, "ask", side_effect=scripted(answers)), \
+             mock.patch.object(sshtsf, "prompt_folder", return_value=""), \
+             mock.patch.object(sshtsf, "connect", return_value=0):
+            rc = sshtsf.route_add_session(cfg, "mac")
+        self.assertEqual(rc, 0)
+        self.assertEqual(sshtsf.load_config()["hosts"]["mac"]["sessions"]["s"],
+                         {"alias": "s"})
+
+
+class TestPromptFolder(unittest.TestCase):
+    def prompt(self, typed, current="", dirs=("src/a", "src/b"), picked="src/b"):
+        with mock.patch.object(sshtsf, "ask", side_effect=scripted({"folder": typed})) as ask, \
+             mock.patch.object(sshtsf, "remote_dirs", return_value=list(dirs)) as ls, \
+             mock.patch.object(sshtsf, "pick", return_value=picked) as pick:
+            got = sshtsf.prompt_folder("devbox", current, label="web")
+        return got, ask.call_args, ls.called, pick
+
+    def test_blank_is_none(self):
+        got, call, listed, _ = self.prompt("")
+        self.assertEqual(got, "")
+        self.assertFalse(listed)
+        self.assertIn("(blank for none, ? to browse)", call.args[0])
+
+    def test_typed_path_is_taken_as_is(self):
+        got, _, listed, _ = self.prompt("src/webapp/")
+        self.assertEqual((got, listed), ("src/webapp", False))
+
+    def test_question_mark_browses(self):
+        got, _, listed, pick = self.prompt("?")
+        self.assertEqual((got, listed), ("src/b", True))
+        self.assertEqual(pick.call_args.kwargs["query"], "")
+
+    def test_updating_blank_keeps_and_dash_clears(self):
+        got, call, _, _ = self.prompt("", current="src/old")
+        self.assertEqual(got, "src/old")
+        self.assertEqual(call.args[1], "src/old")
+        self.assertIn("(? to browse, - for none)", call.args[0])
+        got, _, _, _ = self.prompt("-", current="src/old")
+        self.assertEqual(got, "")
+
+    def test_updating_browse_starts_from_the_current(self):
+        got, _, _, pick = self.prompt("?", current="src/old")
+        self.assertEqual(got, "src/b")
+        self.assertEqual(pick.call_args.kwargs["query"], "src/old")
+
+    def test_aborted_browse_is_none(self):
+        got, _, _, _ = self.prompt("?", picked=None)
+        self.assertIsNone(got)
+
+
 class TestEdit(ConfigDirMixin, unittest.TestCase):
     def setUp(self):
         super().setUp()
@@ -438,6 +601,23 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("unknown host or alias: nowhere", err)
         self.assertIn("devbox  (alias c, default)", err)
+
+    def test_host_picker_shows_the_target(self):
+        cfg = sshtsf.load_config()
+        cfg["hosts"]["devbox"]["target"] = "me@devbox.local"
+        sshtsf.save_config(cfg)
+        with mock.patch.object(sshtsf, "pick", return_value=None) as pick:
+            run_capture(["--dry-run"])
+        items = pick.call_args.args[0]
+        self.assertEqual(items[0], "devbox  (alias c, -> me@devbox.local, default)")
+        self.assertEqual(items[-1], sshtsf.NEW_HOST)
+
+    def test_live_header_shows_the_target(self):
+        with mock.patch.object(sshtsf, "live_sessions", return_value=([], "")):
+            rc, out, _ = run_capture(["live"])
+        self.assertEqual(rc, 0)
+        self.assertIn("build  (-> build.internal):\n", out)
+        self.assertIn("devbox:\n", out)
 
     def test_list_marks_last_used(self):
         rc, out, _ = run_capture(["list"])

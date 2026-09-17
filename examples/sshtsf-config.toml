@@ -9,7 +9,7 @@ host = "devbox"
 session = "web"
 
 [hosts.devbox]
-target = "devbox"       # ssh destination; defaults to the host key
+target = "devbox"       # ssh destination, [user@]host; defaults to the host key
 alias = "c"
 ecf = true              # forward the local Emacs socket, by default
 ecf_port = 41234        # relay via TCP port (for SELinux hosts where sshd cannot bind unix sockets)
