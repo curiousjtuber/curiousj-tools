@@ -43,13 +43,39 @@ REMOTE_PATH_LINE = ('PATH="/opt/homebrew/bin:/usr/local/bin:'
                     '/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:$PATH"; ')
 
 
-def no_tmux(folder: str = "", env: tuple[tuple[str, str], ...] = ()) -> str:
-    """The remote script's opening: the PATH, then what happens without tmux."""
-    return (REMOTE_PATH_LINE + 'command -v tmux >/dev/null || { '
-            'echo "sshtsf: no tmux on the remote; a plain shell instead" >&2; '
+def shell_instead(reason: str, folder: str = "",
+                  env: tuple[tuple[str, str], ...] = (), relay: bool = False) -> str:
+    """The block that gives up on tmux and gives a login shell instead."""
+    return ('{ echo "sshtsf: %s; a plain shell instead" >&2; ' % reason
+            + ('[ -z "$SOCAT_PID" ] || kill $SOCAT_PID 2>/dev/null; ' if relay else "")
             + ("cd %s 2>/dev/null; " % folder if folder else "")
             + "".join("export %s=%s; " % pair for pair in env)
-            + 'exec "${SHELL:-sh}" -l; }; ')
+            + 'exec "${SHELL:-sh}" -l; }')
+
+
+def attach(session: str, folder: str = "", env: tuple[tuple[str, str], ...] = (),
+           relay: bool = False) -> str:
+    return "tmux -u attach-session -t =%s || %s" % (
+        session, shell_instead("could not attach to the session", folder, env, relay))
+
+
+def no_tmux(folder: str = "", env: tuple[tuple[str, str], ...] = ()) -> str:
+    """The remote script's opening: the PATH, then what happens without tmux."""
+    return (REMOTE_PATH_LINE + "command -v tmux >/dev/null || "
+            + shell_instead("no tmux on the remote", folder, env) + "; ")
+
+
+def create(session: str, folder: str = "", env: tuple[tuple[str, str], ...] = (),
+           command: str = "", relay: bool = False) -> str:
+    """The create step: has-session, else new-session, else a shell."""
+    plain = "tmux -u new-session -d %s-s %s" % ("-c %s " % folder if folder else "", session)
+    make = plain
+    if command:
+        make = ('%s %s || { echo "sshtsf: the session command failed to start; '
+                'a session without it instead" >&2; %s; }' % (plain, command, plain))
+    return ("tmux has-session -t =%s 2>/dev/null || %s || %s; "
+            % (session, make,
+               shell_instead("could not create the session", folder, env, relay)))
 
 
 def run_capture(argv: list[str]) -> tuple[int, str, str]:
@@ -445,7 +471,8 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         self.assertEqual(
             out.strip(),
             "ssh -t devbox sh -c '" + no_tmux("src/webapp")
-            + "exec tmux -u new-session -A -c src/webapp -s web make dev'")
+            + create("web", "src/webapp", command="make dev")
+            + attach("web", "src/webapp") + "'")
 
     def test_pair_alias_and_host_alias(self):
         rc, out, _ = run_capture(["devweb", "--dry-run"])
@@ -454,7 +481,7 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         rc, out, _ = run_capture(["c", "shell", "--dry-run"])
         self.assertEqual(rc, 0)
         self.assertEqual(out.strip(), "ssh -t devbox sh -c '" + no_tmux()
-                         + "exec tmux -u new-session -A -s shell'")
+                         + create("shell") + attach("shell") + "'")
 
     def test_dry_run_does_not_touch_last_used(self):
         run_capture(["devbox", "shell", "--dry-run"])
@@ -470,14 +497,12 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         self.assertEqual(lines[0], "ssh devbox rm -f /tmp/emacs-remote-socket")
         self.assertEqual(
             lines[1],
-            "ssh -o ExitOnForwardFailure=yes "
-            "-R /tmp/emacs-remote-socket:/run/user/1000/emacs/server "
+            "ssh -R /tmp/emacs-remote-socket:/run/user/1000/emacs/server "
             "-t devbox sh -c '"
             + no_tmux("src/api", (("EMACS_REMOTE_TARGET", "devbox"),))
-            + "tmux has-session -t =api 2>/dev/null "
-            "|| tmux -u new-session -d -c src/api -s api || exit 1; "
-            "tmux set-environment -t =api EMACS_REMOTE_TARGET devbox; "
-            "exec tmux -u attach-session -t =api'")
+            + create("api", "src/api", (("EMACS_REMOTE_TARGET", "devbox"),))
+            +             "tmux set-environment -t =api EMACS_REMOTE_TARGET devbox; "
+            + attach("api", "src/api", (("EMACS_REMOTE_TARGET", "devbox"),)) + "'")
 
     def test_ecf_tells_session_the_target_as_dialed(self):
         # The remote's emacs-remote builds its TRAMP prefix from this, so it
@@ -497,9 +522,8 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         rc, out, _ = run_capture(["devbox", "shell", "--dry-run"])
         self.assertEqual(rc, 0)
         self.assertNotIn("EMACS_REMOTE_TARGET", out)
-        # Nothing to tell the session, so no create-set-attach dance: one -A.
-        self.assertNotIn("has-session", out)
-        self.assertIn("exec tmux -u new-session -A -s shell'", out)
+        self.assertNotIn("set-environment", out)
+        self.assertIn("; tmux -u attach-session -t =shell || ", out)
 
     def test_waypipe_and_ecf_share_one_script(self):
         cfg = sshtsf.load_config()
@@ -512,16 +536,44 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
             rc, out, _ = run_capture(["devbox", "api", "--dry-run"])
         self.assertEqual(rc, 0)
         cmd = out.strip().splitlines()[1]
-        self.assertTrue(cmd.startswith("waypipe ssh -o ExitOnForwardFailure=yes -R "))
+        self.assertTrue(cmd.startswith("waypipe ssh -R "))
         # The shell already holds waypipe's WAYLAND_DISPLAY; only the target
         # needs exporting into a fallback shell.
         self.assertIn(no_tmux("src/api", (("EMACS_REMOTE_TARGET", "devbox"),)), cmd)
         self.assertNotIn("export WAYLAND_DISPLAY", cmd)
         self.assertIn(
-            "|| exit 1; "
-            "tmux set-environment -t =api WAYLAND_DISPLAY \"$WAYLAND_DISPLAY\"; "
+            "; tmux set-environment -t =api WAYLAND_DISPLAY \"$WAYLAND_DISPLAY\"; "
             "tmux set-environment -t =api EMACS_REMOTE_TARGET devbox; "
-            "exec tmux -u attach-session -t =api", cmd)
+            "tmux -u attach-session -t =api || ", cmd)
+
+    def test_cleanup_failure_drops_the_forward_and_connects(self):
+        # rm -f cannot remove another user's socket in a sticky /tmp, and the
+        # bind would fail on the same file: warn, and connect plain.
+        rm = mock.Mock(returncode=1, stderr="rm: cannot remove '/tmp/emacs-remote-socket': "
+                                             "Operation not permitted\n")
+        with mock.patch.object(sshtsf, "ecf_local_socket", return_value="/x/server"), \
+             mock.patch.object(sshtsf.subprocess, "run", return_value=rm) as run, \
+             mock.patch.object(sshtsf.os, "execvp") as execvp:
+            _, _, err = run_capture(["devbox", "api"])
+        self.assertEqual(run.call_args.args[0],
+                         ["ssh", "devbox", "rm", "-f", "/tmp/emacs-remote-socket"])
+        self.assertIn("could not clear /tmp/emacs-remote-socket on devbox "
+                      "(rm: cannot remove '/tmp/emacs-remote-socket': Operation not "
+                      "permitted); connecting without the Emacs forward", err)
+        argv = execvp.call_args.args[1]
+        self.assertNotIn("-R", argv)
+        self.assertNotIn("EMACS_REMOTE_TARGET", " ".join(argv))
+        self.assertIn("devbox -> api\n", err)
+
+    def test_cleanup_success_keeps_the_forward(self):
+        with mock.patch.object(sshtsf, "ecf_local_socket", return_value="/x/server"), \
+             mock.patch.object(sshtsf.subprocess, "run",
+                               return_value=mock.Mock(returncode=0, stderr="")), \
+             mock.patch.object(sshtsf.os, "execvp") as execvp:
+            _, _, err = run_capture(["devbox", "api"])
+        argv = execvp.call_args.args[1]
+        self.assertEqual(argv[:3], ["ssh", "-R", "/tmp/emacs-remote-socket:/x/server"])
+        self.assertIn("devbox -> api +ecf\n", err)
 
     def test_ecf_flag_without_local_server_warns_and_connects(self):
         with mock.patch.object(sshtsf, "ecf_local_socket", return_value=None):
@@ -582,11 +634,13 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         cmd = out.strip().splitlines()[1]
         self.assertIn("-R 41234:/x/server", cmd)
         self.assertIn("socat UNIX-LISTEN:/tmp/emacs-remote-socket,fork TCP:127.0.0.1:41234", cmd)
-        self.assertIn("|| tmux -u new-session -d -s s || exit 1; ", cmd)
+        self.assertIn(create("s", env=(("EMACS_REMOTE_TARGET", "build.internal"),),
+                             relay=True), cmd)
         self.assertIn("EMACS_REMOTE_TARGET build.internal; ", cmd)
         # No exec on the attach, or the kill after it would never run.
-        self.assertIn("; tmux -u attach-session -t =s; "
-                      "[ -z \"$SOCAT_PID\" ] || kill $SOCAT_PID", cmd)
+        self.assertIn("; " + attach("s", env=(("EMACS_REMOTE_TARGET", "build.internal"),),
+                                   relay=True)
+                      + "; [ -z \"$SOCAT_PID\" ] || kill $SOCAT_PID", cmd)
         # A remote without socat is warned, not refused: the relay is skipped
         # and the attach still happens.
         self.assertIn("if command -v socat >/dev/null; then socat ", cmd)

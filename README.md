@@ -37,7 +37,10 @@ Optional dependencies, by command:
 `sshtsf` treats every tool but `ssh` as optional: a missing `waypipe` (here or on the remote),
 a missing `socat` on the remote or no running Emacs server is a warning on stderr, and the
 connection goes ahead without that forward, `-e`/`-w` or not. A remote without `tmux` gets a
-plain login shell in the session's folder, with the same warning.
+plain login shell in the session's folder, with the same warning. So does a session that
+cannot be created or attached, or whose command will not start; a socket that cannot be
+cleared on the remote drops the Emacs forward, and a forward that still fails to bind is
+ssh's own warning, not a dead connection. The worst case is a plain ssh.
 
 On the remote, `sshtsf` looks in the Homebrew, Linuxbrew and `~/.local/bin` directories
 before the rest of `PATH`, because a non-interactive ssh never reads the `.zprofile` that

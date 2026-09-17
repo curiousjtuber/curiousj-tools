@@ -27,8 +27,9 @@ Remembered the same way; -w / -W override. Wayland clients only.
 
 A missing tool is a warning, never a refusal. A forward whose tool is absent
 at either end (no Emacs server, no waypipe, no socat on the remote) is left
-out and said so on stderr; a remote without tmux gets a plain login shell in
-the session's folder instead of the session.
+out and said so on stderr; a remote without tmux, or a session that cannot
+be created or attached, gets a plain login shell in the session's folder
+instead. The worst case is a plain ssh, not a connection that dies.
 
 Config layout (all fields but the host key are optional):
 
@@ -936,6 +937,31 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
             print("sshtsf: no local Emacs server socket (start Emacs first); "
                   "connecting without the forward", file=sys.stderr)
 
+    # A leftover socket file on the remote is cleared first, on a connection
+    # of its own: sshd does not honour StreamLocalBindUnlink, so after an
+    # ungraceful disconnect the file makes the -R bind fail, and the bind
+    # happens at session setup, before any remote command could remove it.
+    # One socket per host, so a second ecf connection replaces the first
+    # one's forward; harmless, since both point at the same Emacs. A file
+    # that cannot be removed -- another user's, in a sticky /tmp -- would
+    # fail the bind just the same, so the forward is dropped with the reason
+    # rather than attempted.
+    cleanup: list[str] = []
+    if ecf_local:
+        cleanup = ["ssh", target, "rm", "-f", ECF_REMOTE_SOCKET]
+        if not dry_run:
+            proc = subprocess.run(cleanup, text=True, stderr=subprocess.PIPE)
+            if proc.returncode != 0:
+                why = " ".join(proc.stderr.split()) or "exit %d" % proc.returncode
+                print("sshtsf: could not clear %s on %s (%s); connecting "
+                      "without the Emacs forward" % (ECF_REMOTE_SOCKET, target, why),
+                      file=sys.stderr)
+                ecf_local = None
+                cleanup = []
+    ecf_port = None
+    if ecf_local:
+        ecf_port = scfg.get("ecf_port") or cfg["hosts"][host].get("ecf_port")
+
     # What the session has to be told about this connection, as (name, shell
     # word) pairs; the word is spliced into an `sh -c' script as-is, so a
     # literal is quoted here and a `"$VAR"' is left for the remote sh to expand.
@@ -965,103 +991,98 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
         # when there is none.
         session_env.append(("EMACS_REMOTE_TARGET", shlex.quote(target)))
 
-    # -u because tmux is the ssh
-    # command, so the remote shell is non-interactive, never reads .zshrc and
-    # never sets LC_ALL -- and the client then renders every non-ASCII cell as
-    # an underscore. -u asserts UTF-8 without depending on the remote's locales.
+    folder = scfg.get("folder") or ""
+
+    def shell_instead(reason: str) -> str:
+        """A `{ ...; }' that gives up on tmux: warn, then the login shell.
+
+        The worst case is a plain ssh, not a dead connection. The shell starts
+        in the session's folder with what the session would have been told
+        exported into it -- except a `"$VAR"' entry, a value the shell already
+        holds. A relay started above is stopped, so the exec'd shell leaves
+        nothing behind.
+        """
+        return ('{ echo "sshtsf: %s; a plain shell instead" >&2; ' % reason
+                + ('[ -z "$SOCAT_PID" ] || kill $SOCAT_PID 2>/dev/null; '
+                   if ecf_port else "")
+                + ("cd %s 2>/dev/null; " % shlex.quote(folder) if folder else "")
+                + "".join("export %s=%s; " % (name, word)
+                          for name, word in session_env if not word.startswith('"$'))
+                + 'exec "${SHELL:-sh}" -l; }')
+
+    # -u because tmux is the ssh command, so the remote shell is
+    # non-interactive, never reads .zshrc and never sets LC_ALL -- and the
+    # client then renders every non-ASCII cell as an underscore. -u asserts
+    # UTF-8 without depending on the remote's locales.
     #
-    # Plain -A with a session_env would attach immediately, before the
-    # variables could be set; the create step is split out and guarded below
-    # instead.
-    remote = ["tmux", "-u", "new-session", "-d" if session_env else "-A"]
-    if scfg.get("folder"):
-        remote += ["-c", scfg["folder"]]
-    remote += ["-s", session]
+    # Create, set, then attach, in three steps rather than one `-A': -A would
+    # attach before the variables could be set, `-e' applies only when tmux
+    # creates the session, never when it attaches to a live one -- and a live
+    # session is exactly the one holding values from a connection that is
+    # gone -- and a create that fails can only fall back when it is a step of
+    # its own.
+    #
+    # has-session rather than `new-session -Ad', because -A makes new-session
+    # behave as attach-session and -d stops meaning detached there -- so -Ad
+    # on an EXISTING session attaches anyway, and the rest of the chain never
+    # runs. (-AD would work, but it also detaches whoever else is attached,
+    # which is not ours to do.)
+    #
+    # `=name' is an exact-match target: without it a session name that
+    # prefixes another could resolve to the wrong one.
+    tgt = shlex.quote("=" + session)
+    create_words = ["tmux", "-u", "new-session", "-d"]
+    if folder:
+        create_words += ["-c", folder]
+    create_words += ["-s", session]
+    create = " ".join(shlex.quote(word) for word in create_words)
     if scfg.get("command"):
         # A configured command is a command line, not a bare argv[0]: split it
-        # the way a shell would so `emacs -nw .` works as written.
-        remote += shlex.split(scfg["command"])
+        # the way a shell would so `emacs -nw .` works as written. One that
+        # will not start (not installed there, a typo) takes the server down
+        # with it on a fresh host; the session is then made without it.
+        with_command = create + " " + " ".join(
+            shlex.quote(word) for word in shlex.split(scfg["command"]))
+        create = ('%s || { echo "sshtsf: the session command failed to start; '
+                  'a session without it instead" >&2; %s; }' % (with_command, create))
 
-    if session_env:
-        # Create, set, then attach, in three steps: `-A' would attach before the
-        # variables could be set, and `-e' applies only when tmux creates the
-        # session, never when it attaches to a live one -- and a live session
-        # is exactly the one holding values from a connection that is gone.
-        #
-        # has-session rather than `new-session -Ad', because -A makes
-        # new-session behave as attach-session and -d stops meaning detached
-        # there -- so -Ad on an EXISTING session attaches anyway, and the rest
-        # of the chain never runs. (-AD would work, but it also detaches whoever
-        # else is attached, which is not ours to do.)
-        #
-        # `=name' is an exact-match target: without it a session name that
-        # prefixes another could resolve to the wrong one.
-        tgt = shlex.quote("=" + session)
-        script = (
-            "tmux has-session -t %s 2>/dev/null || %s || exit 1; "
-            % (tgt, " ".join(shlex.quote(word) for word in remote))
-            + "".join("tmux set-environment -t %s %s %s; " % (tgt, name, word)
-                      for name, word in session_env)
-            + "exec tmux -u attach-session -t %s" % tgt)
-        remote = ["sh", "-c", script]
+    relay = ""
+    if ecf_port:
+        # socat is checked for on the remote rather than assumed: without the
+        # check a missing one dies in the background with a bare `not found'
+        # and the forwarded port sits there unrelayed. With it, the session is
+        # warned once and attached anyway -- the same generosity as the local
+        # checks above, at no extra round trip. After the tmux check, so a
+        # host without tmux never starts a relay it would leave behind.
+        relay = (
+            "if command -v socat >/dev/null; then "
+            "socat UNIX-LISTEN:%s,fork TCP:127.0.0.1:%s & "
+            "SOCAT_PID=$!; "
+            "else echo \"sshtsf: no socat on the remote; the Emacs relay is off\" >&2; fi; "
+            % (shlex.quote(ECF_REMOTE_SOCKET), ecf_port))
+    # The attach is not exec'd either: a session whose command died between
+    # the create and the attach (tmux can report the create done first), or
+    # a server that goes away mid-session, ends the attach nonzero, and that
+    # is the last chance for a shell rather than a closed connection. A
+    # detach and a killed session both exit 0, so neither trips it.
+    attach = "tmux -u attach-session -t %s || %s" % (
+        tgt, shell_instead("could not attach to the session"))
+    script = (
+        "command -v tmux >/dev/null || %s; " % shell_instead("no tmux on the remote")
+        + relay
+        + "tmux has-session -t %s 2>/dev/null || %s || %s; "
+        % (tgt, create, shell_instead("could not create the session"))
+        + "".join("tmux set-environment -t %s %s %s; " % (tgt, name, word)
+                  for name, word in session_env)
+        + attach
+        + ("; [ -z \"$SOCAT_PID\" ] || kill $SOCAT_PID 2>/dev/null" if ecf_port else ""))
+    remote = remote_sh(script)
 
+    # No ExitOnForwardFailure: a bind that fails despite the cleanup is ssh's
+    # own warning and a session without the forward, not a dead connection.
     sshopts: list[str] = []
-    cleanup: list[str] = []
     if ecf_local:
-        local = ecf_local
-        ecf_port = scfg.get("ecf_port") or cfg["hosts"][host].get("ecf_port")
-        # A separate prior connection, not part of the command below: sshd
-        # does not honour StreamLocalBindUnlink, so after an ungraceful
-        # disconnect the leftover file makes the -R bind (and with
-        # ExitOnForwardFailure, the whole connection) fail -- and the bind
-        # happens at session setup, before any remote command runs. One
-        # socket per host, so a second ecf connection silently replaces the
-        # first one's forward; harmless, since both point at the same Emacs.
-        cleanup = ["ssh", target, "rm", "-f", ECF_REMOTE_SOCKET]
-        if ecf_port:
-            sshopts = ["-o", "ExitOnForwardFailure=yes",
-                       "-R", "%s:%s" % (ecf_port, local)]
-            # socat is checked for on the remote rather than assumed: without
-            # the check a missing one dies in the background with a bare
-            # `not found' and the forwarded port sits there unrelayed. With
-            # it, the session is warned once and attached anyway -- the same
-            # generosity as the local checks above, at no extra round trip.
-            ecf_script = (
-                "if command -v socat >/dev/null; then "
-                "socat UNIX-LISTEN:%s,fork TCP:127.0.0.1:%s & "
-                "SOCAT_PID=$!; "
-                "else echo \"sshtsf: no socat on the remote; the Emacs relay is off\" >&2; fi; "
-                "%%s; "
-                "[ -z \"$SOCAT_PID\" ] || kill $SOCAT_PID 2>/dev/null"
-                % (shlex.quote(ECF_REMOTE_SOCKET), ecf_port)
-            )
-            # Always the sh -c script by now, since ecf puts a session_env
-            # entry in. The attach loses its `exec' so the kill after it runs.
-            remote[2] = ecf_script % remote[2].replace("exec ", "")
-        else:
-            sshopts = ["-o", "ExitOnForwardFailure=yes",
-                       "-R", "%s:%s" % (ECF_REMOTE_SOCKET, local)]
-
-    # No tmux on the remote is the last thing that could still refuse the
-    # session, and it is met the way the forwards are: a warning, then a plain
-    # login shell in the session's folder, with what the session would have
-    # been told exported into it. Checked ahead of everything else, including
-    # the socat relay above, so the exec'd shell leaves nothing running behind
-    # it. A `"$VAR"' entry is left out of the exports: it is a value the shell
-    # already holds, and the export would only restate it.
-    fallback = (
-        "command -v tmux >/dev/null || { "
-        'echo "sshtsf: no tmux on the remote; a plain shell instead" >&2; '
-        + ("cd %s 2>/dev/null; " % shlex.quote(scfg["folder"])
-           if scfg.get("folder") else "")
-        + "".join("export %s=%s; " % (name, word)
-                  for name, word in session_env if not word.startswith('"$'))
-        + 'exec "${SHELL:-sh}" -l; }; ')
-    if remote[:2] == ["sh", "-c"]:
-        body = remote[2]
-    else:
-        body = "exec " + " ".join(shlex.quote(word) for word in remote)
-    remote = remote_sh(fallback + body)
+        sshopts = ["-R", "%s:%s" % (ecf_port or ECF_REMOTE_SOCKET, ecf_local)]
 
     # -t before the target, not after it. ssh itself accepts either, but
     # waypipe takes the first non-option word as the destination and everything
@@ -1091,9 +1112,6 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
             print(" ".join(cleanup))
         print(" ".join(argv))
         return 0
-
-    if cleanup:
-        subprocess.run(cleanup)
 
     remember(cfg, host, session)
     print("sshtsf: %s -> %s%s%s"
