@@ -72,8 +72,9 @@ name). Two users on one machine are two host entries.
 
 ### Emacs routing (ecf)
 
-`sshtsf -e HOST` reverse-forwards the local Emacs server socket to `/tmp/emacs-remote-socket`
-on the remote. With `emacsclient-auto` as the remote's `EDITOR`, `git commit`, `$EDITOR` and
+`sshtsf -e HOST` reverse-forwards the local Emacs server socket to
+`/tmp/emacs-remote-socket-USER` on the remote, USER being the login there, so two users on one
+host each get their own. With `emacsclient-auto` as the remote's `EDITOR`, `git commit`, `$EDITOR` and
 anything else that calls `emacsclient` there open in the local Emacs while the forward is
 live, and in the remote's own Emacs server otherwise. Files are opened through TRAMP, so the
 remote's rc file has to say how the local Emacs reaches it. The remote is a poor judge of
@@ -98,7 +99,7 @@ session still holds the previous connection's name until it re-reads
 
 `emacsclient-auto` passes every argument through to the real `emacsclient`, so `-h` shows that
 program's help. Its own knobs are environment variables: `EMACSCLIENT_TRAMP_PREFIX` (empty means
-never route remote), `EMACSCLIENT_FORWARD_SOCKET` (default `/tmp/emacs-remote-socket`),
+never route remote), `EMACSCLIENT_FORWARD_SOCKET` (default `/tmp/emacs-remote-socket-USER`),
 `EMACSCLIENT_BIN` (the real client, otherwise found on `PATH`) and `EMACSCLIENT_AUTO_DEBUG=1`
 (say which branch was taken, on stderr). `ec-browse` takes `EC_BROWSE_EMACSCLIENT` and
 `EC_BROWSE_FUNCTION` (default `browse-url`).

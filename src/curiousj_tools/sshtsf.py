@@ -56,6 +56,7 @@ Config layout (all fields but the host key are optional):
 from __future__ import annotations
 
 import argparse
+import getpass
 import os
 import shlex
 import shutil
@@ -75,9 +76,11 @@ CONFIG_PATH = os.path.join(CONFIG_DIR, "config.toml")
 NEW_HOST = "+ new host"
 NEW_SESSION = "+ new session"
 
-# Where an ecf forward lands on the remote. Shared with the remote side: the
-# remote's `emacsclient-auto` looks for it under EMACSCLIENT_FORWARD_SOCKET,
-# and sshtsf and emacsclient-auto agree on the default /tmp/emacs-remote-socket.
+# Where an ecf forward lands on the remote, less the `-USER' the remote
+# appends for the login it is made under, so two users on one host do not
+# fight over a file in a sticky /tmp. Shared with the remote side: its
+# `emacsclient-auto` looks under EMACSCLIENT_FORWARD_SOCKET, and the two agree
+# on the default /tmp/emacs-remote-socket-USER.
 ECF_REMOTE_SOCKET = os.environ.get("ECF_REMOTE_SOCKET") or "/tmp/emacs-remote-socket"
 
 # Extra options spliced into the waypipe argv, e.g. --compress zstd, --no-gpu,
@@ -905,6 +908,21 @@ def waypipe_remote_missing(target: str) -> str:
     return what
 
 
+def remote_user_guess(target: str) -> str:
+    """The login a destination most likely gives: its user@, else ours.
+
+    ssh's own default when neither the destination nor ssh_config names one;
+    a User line in ssh_config is invisible from here, which is why this is a
+    guess and a real connection asks the remote instead.
+    """
+    if "@" in target:
+        return target.rpartition("@")[0]
+    try:
+        return getpass.getuser()
+    except (KeyError, OSError):
+        return str(os.getuid())
+
+
 def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
             over: Overrides = NO_OVERRIDES) -> int:
     scfg = cfg["hosts"][host].get("sessions", {}).get(session, {})
@@ -937,24 +955,35 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
             print("sshtsf: no local Emacs server socket (start Emacs first); "
                   "connecting without the forward", file=sys.stderr)
 
-    # A leftover socket file on the remote is cleared first, on a connection
-    # of its own: sshd does not honour StreamLocalBindUnlink, so after an
+    # The remote socket path is settled on a connection of its own, ahead of
+    # the real one, which does two things at once. It names the socket after
+    # the login the remote actually gives -- `id -un' there, not the user@
+    # dialed or ssh_config's User, which is the only way the path is sure to
+    # match what that login's emacsclient-auto looks for. And it clears a
+    # leftover: sshd does not honour StreamLocalBindUnlink, so after an
     # ungraceful disconnect the file makes the -R bind fail, and the bind
     # happens at session setup, before any remote command could remove it.
-    # One socket per host, so a second ecf connection replaces the first
+    # One socket per login, so a second ecf connection replaces the first
     # one's forward; harmless, since both point at the same Emacs. A file
-    # that cannot be removed -- another user's, in a sticky /tmp -- would
-    # fail the bind just the same, so the forward is dropped with the reason
-    # rather than attempted.
+    # that cannot be removed would fail the bind just the same, so the
+    # forward is dropped with the reason rather than attempted. A dry run
+    # dials nothing, and guesses the login the way ssh would by default.
     cleanup: list[str] = []
+    ecf_remote = ""
     if ecf_local:
-        cleanup = ["ssh", target, "rm", "-f", ECF_REMOTE_SOCKET]
-        if not dry_run:
-            proc = subprocess.run(cleanup, text=True, stderr=subprocess.PIPE)
-            if proc.returncode != 0:
+        cleanup = ["ssh", target] + [shlex.quote(word) for word in remote_sh(
+            'p=%s-$(id -un); rm -f "$p" && echo "$p"' % shlex.quote(ECF_REMOTE_SOCKET))]
+        if dry_run:
+            ecf_remote = "%s-%s" % (ECF_REMOTE_SOCKET, remote_user_guess(target))
+        else:
+            proc = subprocess.run(cleanup, text=True, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE)
+            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+            ecf_remote = lines[-1] if lines else ""
+            if proc.returncode != 0 or not ecf_remote.startswith(ECF_REMOTE_SOCKET):
                 why = " ".join(proc.stderr.split()) or "exit %d" % proc.returncode
-                print("sshtsf: could not clear %s on %s (%s); connecting "
-                      "without the Emacs forward" % (ECF_REMOTE_SOCKET, target, why),
+                print("sshtsf: could not clear the Emacs socket on %s (%s); "
+                      "connecting without the forward" % (target, why),
                       file=sys.stderr)
                 ecf_local = None
                 cleanup = []
@@ -1059,7 +1088,7 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
             "socat UNIX-LISTEN:%s,fork TCP:127.0.0.1:%s & "
             "SOCAT_PID=$!; "
             "else echo \"sshtsf: no socat on the remote; the Emacs relay is off\" >&2; fi; "
-            % (shlex.quote(ECF_REMOTE_SOCKET), ecf_port))
+            % (shlex.quote(ecf_remote), ecf_port))
     # The attach is not exec'd either: a session whose command died between
     # the create and the attach (tmux can report the create done first), or
     # a server that goes away mid-session, ends the attach nonzero, and that
@@ -1082,7 +1111,7 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
     # own warning and a session without the forward, not a dead connection.
     sshopts: list[str] = []
     if ecf_local:
-        sshopts = ["-R", "%s:%s" % (ecf_port or ECF_REMOTE_SOCKET, ecf_local)]
+        sshopts = ["-R", "%s:%s" % (ecf_port or ecf_remote, ecf_local)]
 
     # -t before the target, not after it. ssh itself accepts either, but
     # waypipe takes the first non-option word as the destination and everything

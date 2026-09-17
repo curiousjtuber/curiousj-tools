@@ -22,6 +22,17 @@ def make_exe(path: str, body: str = "#!/bin/sh\nexit 0\n") -> str:
     return path
 
 
+class TestDefaultSocket(unittest.TestCase):
+    def test_named_after_the_login(self):
+        with mock.patch.object(eca.getpass, "getuser", return_value="root"):
+            self.assertEqual(eca.default_socket(), "/tmp/emacs-remote-socket-root")
+
+    def test_uid_when_the_login_cannot_be_told(self):
+        with mock.patch.object(eca.getpass, "getuser", side_effect=KeyError), \
+             mock.patch.object(eca.os, "getuid", return_value=1000):
+            self.assertEqual(eca.default_socket(), "/tmp/emacs-remote-socket-1000")
+
+
 class TestRoute(unittest.TestCase):
     def test_live_socket_with_prefix_routes_files_remote(self):
         env = {"EMACSCLIENT_TRAMP_PREFIX": PREFIX}

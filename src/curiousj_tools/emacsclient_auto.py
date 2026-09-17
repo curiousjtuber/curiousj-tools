@@ -10,7 +10,7 @@ remote, notices it and talks to that Emacs instead of a local one.
 
 Env knobs (all optional):
   EMACSCLIENT_TRAMP_PREFIX   e.g. /ssh:user@devbox:  -- empty => never route remote
-  EMACSCLIENT_FORWARD_SOCKET forwarded socket path  -- default /tmp/emacs-remote-socket
+  EMACSCLIENT_FORWARD_SOCKET forwarded socket path  -- default /tmp/emacs-remote-socket-USER
   EMACSCLIENT_BIN            explicit path to the real emacsclient
   EMACSCLIENT_AUTO_DEBUG=1   print which branch was taken, to stderr
 
@@ -21,12 +21,29 @@ arguments into TRAMP paths that the far Emacs can open back over ssh.
 
 from __future__ import annotations
 
+import getpass
 import os
 import stat
 import subprocess
 import sys
 
-DEFAULT_SOCKET = "/tmp/emacs-remote-socket"
+
+def default_socket() -> str:
+    """/tmp/emacs-remote-socket-USER: per login, as sshtsf names its forward.
+
+    The suffix is the login this process runs as, which is what sshtsf's
+    `id -un' on the remote answered when it set the forward up; two users on
+    one host thus get two sockets in the sticky /tmp instead of a fight over
+    one. A USER that cannot be told (no passwd entry) falls back to the uid.
+    """
+    try:
+        user = getpass.getuser()
+    except (KeyError, OSError):
+        user = str(os.getuid())
+    return "/tmp/emacs-remote-socket-%s" % user
+
+
+DEFAULT_SOCKET = default_socket()
 
 # Names this tool may be installed or symlinked under; a PATH entry called
 # `emacsclient` that resolves to one of these is us, not the real client.

@@ -106,6 +106,11 @@ class ConfigDirMixin:
             patcher = mock.patch.object(sshtsf, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # The login a dry run guesses for the remote socket, when the target
+        # names none: pinned, so expectations do not depend on who runs this.
+        patcher = mock.patch.object(sshtsf.getpass, "getuser", return_value="me")
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.cfg_path = cfg_path
 
 
@@ -494,10 +499,11 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
             rc, out, _ = run_capture(["devbox", "api", "--dry-run"])
         self.assertEqual(rc, 0)
         lines = out.strip().splitlines()
-        self.assertEqual(lines[0], "ssh devbox rm -f /tmp/emacs-remote-socket")
+        self.assertEqual(lines[0], "ssh devbox sh -c '" + REMOTE_PATH_LINE
+                         + "p=/tmp/emacs-remote-socket-$(id -un); rm -f \"$p\" && echo \"$p\"'")
         self.assertEqual(
             lines[1],
-            "ssh -R /tmp/emacs-remote-socket:/run/user/1000/emacs/server "
+            "ssh -R /tmp/emacs-remote-socket-me:/run/user/1000/emacs/server "
             "-t devbox sh -c '"
             + no_tmux("src/api", (("EMACS_REMOTE_TARGET", "devbox"),))
             + create("api", "src/api", (("EMACS_REMOTE_TARGET", "devbox"),))
@@ -549,17 +555,17 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
     def test_cleanup_failure_drops_the_forward_and_connects(self):
         # rm -f cannot remove another user's socket in a sticky /tmp, and the
         # bind would fail on the same file: warn, and connect plain.
-        rm = mock.Mock(returncode=1, stderr="rm: cannot remove '/tmp/emacs-remote-socket': "
-                                             "Operation not permitted\n")
+        rm = mock.Mock(returncode=1, stdout="",
+                       stderr="rm: cannot remove '/tmp/emacs-remote-socket-root': "
+                              "Operation not permitted\n")
         with mock.patch.object(sshtsf, "ecf_local_socket", return_value="/x/server"), \
              mock.patch.object(sshtsf.subprocess, "run", return_value=rm) as run, \
              mock.patch.object(sshtsf.os, "execvp") as execvp:
             _, _, err = run_capture(["devbox", "api"])
-        self.assertEqual(run.call_args.args[0],
-                         ["ssh", "devbox", "rm", "-f", "/tmp/emacs-remote-socket"])
-        self.assertIn("could not clear /tmp/emacs-remote-socket on devbox "
-                      "(rm: cannot remove '/tmp/emacs-remote-socket': Operation not "
-                      "permitted); connecting without the Emacs forward", err)
+        self.assertEqual(run.call_args.args[0][:2], ["ssh", "devbox"])
+        self.assertIn("could not clear the Emacs socket on devbox "
+                      "(rm: cannot remove '/tmp/emacs-remote-socket-root': Operation not "
+                      "permitted); connecting without the forward", err)
         argv = execvp.call_args.args[1]
         self.assertNotIn("-R", argv)
         self.assertNotIn("EMACS_REMOTE_TARGET", " ".join(argv))
@@ -568,12 +574,32 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
     def test_cleanup_success_keeps_the_forward(self):
         with mock.patch.object(sshtsf, "ecf_local_socket", return_value="/x/server"), \
              mock.patch.object(sshtsf.subprocess, "run",
-                               return_value=mock.Mock(returncode=0, stderr="")), \
+                               return_value=mock.Mock(returncode=0, stderr="",
+                                                      stdout="/tmp/emacs-remote-socket-root\n")), \
              mock.patch.object(sshtsf.os, "execvp") as execvp:
             _, _, err = run_capture(["devbox", "api"])
+        # The path the remote answered, for the login it actually gave.
         argv = execvp.call_args.args[1]
-        self.assertEqual(argv[:3], ["ssh", "-R", "/tmp/emacs-remote-socket:/x/server"])
+        self.assertEqual(argv[:3], ["ssh", "-R", "/tmp/emacs-remote-socket-root:/x/server"])
+        self.assertIn("EMACS_REMOTE_TARGET devbox", " ".join(argv))
         self.assertIn("devbox -> api +ecf\n", err)
+
+    def test_cleanup_that_answers_no_path_drops_the_forward(self):
+        with mock.patch.object(sshtsf, "ecf_local_socket", return_value="/x/server"), \
+             mock.patch.object(sshtsf.subprocess, "run",
+                               return_value=mock.Mock(returncode=0, stderr="", stdout="")), \
+             mock.patch.object(sshtsf.os, "execvp") as execvp:
+            _, _, err = run_capture(["devbox", "api"])
+        self.assertNotIn("-R", execvp.call_args.args[1])
+        self.assertIn("could not clear the Emacs socket on devbox (exit 0)", err)
+
+    def test_dry_run_guesses_the_login_from_the_target(self):
+        cfg = sshtsf.load_config()
+        cfg["hosts"]["devbox"]["target"] = "root@devbox"
+        sshtsf.save_config(cfg)
+        with mock.patch.object(sshtsf, "ecf_local_socket", return_value="/x/server"):
+            _, out, _ = run_capture(["devbox", "api", "--dry-run"])
+        self.assertIn(" -R /tmp/emacs-remote-socket-root:/x/server ", out)
 
     def test_ecf_flag_without_local_server_warns_and_connects(self):
         with mock.patch.object(sshtsf, "ecf_local_socket", return_value=None):
@@ -633,7 +659,7 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         self.assertEqual(rc, 0)
         cmd = out.strip().splitlines()[1]
         self.assertIn("-R 41234:/x/server", cmd)
-        self.assertIn("socat UNIX-LISTEN:/tmp/emacs-remote-socket,fork TCP:127.0.0.1:41234", cmd)
+        self.assertIn("socat UNIX-LISTEN:/tmp/emacs-remote-socket-me,fork TCP:127.0.0.1:41234", cmd)
         self.assertIn(create("s", env=(("EMACS_REMOTE_TARGET", "build.internal"),),
                              relay=True), cmd)
         self.assertIn("EMACS_REMOTE_TARGET build.internal; ", cmd)
