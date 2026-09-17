@@ -10,6 +10,7 @@ so that a two-word invocation replaces a hand-written alias per session.
     sshtsf devweb          the same, via a host+session alias
     sshtsf devbox -n [NAME]  register a new session, then connect
     sshtsf remote devbox   git remote add, for this repo on devbox
+    sshtsf edit            open the config in $VISUAL / $EDITOR
 
 Selections use fzf when it is on PATH and fall back to a numbered menu.
 
@@ -190,16 +191,28 @@ def dump_config(cfg: dict) -> str:
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
-def load_config() -> dict:
+class ConfigError(Exception):
+    """The config cannot be read; str() is the line to show, sans prefix."""
+
+
+def read_config() -> dict:
+    """The config as written, or ConfigError. A missing file is an empty config."""
     if not os.path.exists(CONFIG_PATH):
         return {"hosts": {}}
     try:
         with open(CONFIG_PATH, "rb") as fh:
             cfg = tomllib.load(fh)
     except tomllib.TOMLDecodeError as exc:
-        sys.exit("sshtsf: %s is not valid TOML: %s" % (CONFIG_PATH, exc))
+        raise ConfigError("%s is not valid TOML: %s" % (CONFIG_PATH, exc)) from exc
     cfg.setdefault("hosts", {})
     return cfg
+
+
+def load_config() -> dict:
+    try:
+        return read_config()
+    except ConfigError as exc:
+        sys.exit("sshtsf: %s" % exc)
 
 
 def save_config(cfg: dict) -> None:
@@ -1506,12 +1519,53 @@ def cmd_path(cfg: dict, args) -> int:
     return 0
 
 
+def editor_command() -> list[str]:
+    """$VISUAL, else $EDITOR, else vi: the convention git and crontab follow.
+
+    Split as a shell would, so `emacsclient -t' works as written.
+    """
+    for var in ("VISUAL", "EDITOR"):
+        words = shlex.split(os.environ.get(var) or "")
+        if words:
+            return words
+    return ["vi"]
+
+
+def cmd_edit(dry_run: bool = False) -> int:
+    """Open the config in the editor, then say whether it still parses.
+
+    A config that does not exist yet is written first, so the editor gets a
+    file in a directory that exists rather than a path it may refuse to save
+    to. Afterwards the file is read back: a slip in the TOML is reported now,
+    with its line, instead of on the next `sshtsf devbox'.
+    """
+    if not os.path.exists(CONFIG_PATH):
+        save_config({"hosts": {}})
+    argv = editor_command() + [CONFIG_PATH]
+    if dry_run:
+        print(" ".join(shlex.quote(word) for word in argv))
+        return 0
+    try:
+        rc = subprocess.run(argv).returncode
+    except OSError as exc:
+        sys.exit("sshtsf: cannot run %s: %s" % (argv[0], exc))
+    if rc != 0:
+        print("sshtsf: %s exited %d" % (argv[0], rc), file=sys.stderr)
+        return rc
+    try:
+        read_config()
+    except ConfigError as exc:
+        print("sshtsf: %s" % exc, file=sys.stderr)
+        return 1
+    return 0
+
+
 # --------------------------------------------------------------------------
 # entry point
 # --------------------------------------------------------------------------
 
 SUBCOMMANDS = {"list", "live", "add", "rm", "set", "default", "remote",
-               "config-path"}
+               "config-path", "edit"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1542,6 +1596,7 @@ config:
   sshtsf remote [HOST] [NAME]
                             git remote add, for this repo on HOST (-f to
                             repoint an existing one)
+  sshtsf edit               open the config in $VISUAL / $EDITOR (vi if neither)
   sshtsf config-path        print the config file path
 
 ecf forwards the local Emacs server socket to the remote, so emacsclient,
@@ -1631,8 +1686,17 @@ def run(argv: list[str]) -> int:
     args.over = Overrides(
         ecf=True if args.ecf else (False if args.no_ecf else None),
         waypipe=True if args.waypipe else (False if args.no_waypipe else None))
-    cfg = load_config()
     positional = args.args
+    try:
+        cfg = read_config()
+    except ConfigError as exc:
+        # The one verb that has to work on a config that will not parse, since
+        # opening it is how that gets fixed. Decided here rather than in
+        # dispatch because the host-shadowing rule below needs the config.
+        if positional[:1] == ["edit"]:
+            print("sshtsf: %s" % exc, file=sys.stderr)
+            return cmd_edit(dry_run=args.dry_run)
+        sys.exit("sshtsf: %s" % exc)
 
     # Subcommands, when the first word is one and is not also a known host or
     # alias -- a host called "list" keeps working.
@@ -1709,6 +1773,8 @@ def dispatch(cfg: dict, verb: str, rest: list[str], args) -> int:
         return cmd_list(cfg, Sub)
     if verb == "config-path":
         return cmd_path(cfg, Sub)
+    if verb == "edit":
+        return cmd_edit(dry_run=Sub.dry_run)
     if verb == "live":
         return cmd_live(cfg, Sub)
 

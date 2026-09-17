@@ -144,6 +144,75 @@ class TestConfigRoundTrip(ConfigDirMixin, unittest.TestCase):
         self.assertEqual(out.strip(), self.cfg_path)
 
 
+class TestEdit(ConfigDirMixin, unittest.TestCase):
+    def setUp(self):
+        super().setUp()
+        sshtsf.save_config(SAMPLE)
+
+    def test_visual_wins_and_is_split_like_a_shell(self):
+        with mock.patch.dict(os.environ, {"VISUAL": "emacsclient -t", "EDITOR": "nano"}):
+            rc, out, _ = run_capture(["edit", "--dry-run"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.strip(), "emacsclient -t " + self.cfg_path)
+
+    def test_editor_then_vi(self):
+        with mock.patch.dict(os.environ, {"VISUAL": "", "EDITOR": "nano"}):
+            _, out, _ = run_capture(["edit", "--dry-run"])
+        self.assertEqual(out.strip(), "nano " + self.cfg_path)
+        with mock.patch.dict(os.environ, {"VISUAL": "", "EDITOR": ""}):
+            _, out, _ = run_capture(["edit", "--dry-run"])
+        self.assertEqual(out.strip(), "vi " + self.cfg_path)
+
+    def test_missing_config_is_created_first(self):
+        os.remove(self.cfg_path)
+        with mock.patch.dict(os.environ, {"VISUAL": "ed"}):
+            rc, _, _ = run_capture(["edit", "--dry-run"])
+        self.assertEqual(rc, 0)
+        self.assertTrue(os.path.exists(self.cfg_path))
+        self.assertEqual(sshtsf.load_config(), {"hosts": {}})
+
+    def test_runs_editor_and_reports_a_slip(self):
+        def scribble(argv, **kw):
+            with open(argv[-1], "w") as fh:
+                fh.write("[hosts.devbox\n")
+            return mock.Mock(returncode=0)
+
+        with mock.patch.dict(os.environ, {"VISUAL": "ed"}), \
+             mock.patch.object(sshtsf.subprocess, "run", side_effect=scribble) as run:
+            rc, _, err = run_capture(["edit"])
+        self.assertEqual(rc, 1)
+        self.assertEqual(run.call_args.args[0], ["ed", self.cfg_path])
+        self.assertIn("not valid TOML", err)
+
+    def test_editor_failure_is_passed_on(self):
+        with mock.patch.dict(os.environ, {"VISUAL": "ed"}), \
+             mock.patch.object(sshtsf.subprocess, "run",
+                               return_value=mock.Mock(returncode=3)):
+            rc, _, err = run_capture(["edit"])
+        self.assertEqual(rc, 3)
+        self.assertIn("ed exited 3", err)
+
+    def test_works_on_a_config_that_will_not_parse(self):
+        with open(self.cfg_path, "w") as fh:
+            fh.write("[hosts.devbox\n")
+        # Every other verb stops at the parse error; edit is the way past it.
+        rc, _, err = run_capture(["list"])
+        self.assertEqual(rc, 1)
+        self.assertIn("not valid TOML", err)
+
+        def repair(argv, **kw):
+            sshtsf.save_config(SAMPLE)
+            return mock.Mock(returncode=0)
+
+        with mock.patch.dict(os.environ, {"VISUAL": "ed"}), \
+             mock.patch.object(sshtsf.subprocess, "run", side_effect=repair):
+            rc, _, err = run_capture(["edit"])
+        self.assertEqual(rc, 0)
+        # Told why the editor opened, before it did.
+        self.assertIn("not valid TOML", err)
+        self.assertEqual(run_capture(["list"])[0], 0)
+
+
 class TestResolution(unittest.TestCase):
     def test_host_by_key_and_alias(self):
         self.assertEqual(sshtsf.resolve_host(SAMPLE, "devbox"), "devbox")

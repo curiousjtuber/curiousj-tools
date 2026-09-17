@@ -56,6 +56,7 @@ sshtsf -e devbox web    ...forwarding the local Emacs server socket (ecf)
 sshtsf -w devbox web    ...forwarding Wayland, for GUI applications
 sshtsf remote devbox    git remote add, for the current repo's twin on devbox
 sshtsf set devbox ecf true
+sshtsf edit             open the config in $VISUAL / $EDITOR
 sshtsf --dry-run devbox web
 ```
 
