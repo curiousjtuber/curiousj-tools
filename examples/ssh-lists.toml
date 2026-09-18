@@ -8,8 +8,10 @@ logins = [
     # a table where a login needs more: commands run after login in the pane
     # xssh opens; end in something interactive, or the pane ends
     { login = "my-mac.local", commands = ["cd src", "exec zsh"] },
-    # the same login twice: one pane on the host, one inside its container
-    { login = "alice@devbox", commands = ["distrobox enter dev"] },
+    # the same login twice: one pane on the host, one inside its container;
+    # via is how pssh runs its command in there (handed `sh -c '...'`), so
+    # `pssh -P -c` keeps a container's separate home current too
+    { login = "alice@devbox", commands = ["distrobox enter dev -nw"], via = "distrobox enter dev -nw --" },
 ]
 
 [[paths]]

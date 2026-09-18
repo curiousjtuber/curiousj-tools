@@ -32,7 +32,16 @@ class Arguments(unittest.TestCase):
         # One login listed twice, for two sets of xssh commands, is one
         # machine to a batch run.
         _, out, _, _ = dry(["-n", "true"], entries=[Login("a"), "b", Login("a", ["exec zsh"])])
-        self.assertIn("-- on:\n   a\n   b\n", out)
+        self.assertEqual(out, "cd ~\ntrue\n-- on:\n   a\n   b\n")
+
+    def test_via_adds_a_run_in_that_place(self):
+        via = "distrobox enter dev --"
+        entries = [Login("a"), Login("a", ["x"], via), "b", Login("b", via=via), Login("a", via=via)]
+        _, out, _, _ = dry(["-n", "true"], entries=entries)
+        self.assertEqual(out, "cd ~\ntrue\n-- on:\n   a\n   b\n"
+                              "distrobox enter dev -- sh -c 'cd ~\ntrue'\n-- on:\n   a\n   b\n")
+        _, out, _, _ = dry(["-ni", "true"], entries=[Login("a", via=via)])
+        self.assertEqual(out, "distrobox enter dev -- zsh -ic 'cd ~\ntrue'\n-- on:\n   a\n")
 
     def test_short_flags_combine(self):
         rc, out, _, opts = dry(["-nNi", "uptime"])
@@ -182,6 +191,30 @@ class Paths(unittest.TestCase):
             pssh.paths_list(None, False, env={"HOME": self.tmp.name})
 
 
+class Wrap(unittest.TestCase):
+    def test_plain_is_shell_command(self):
+        self.assertEqual(pssh.wrap("uptime", None), pssh.shell_command("uptime"))
+        self.assertEqual(pssh.wrap("uptime", None, True), pssh.shell_command("uptime", True))
+
+    def test_via_gets_a_command_line(self):
+        self.assertEqual(pssh.wrap("uptime", "distrobox enter dev --"),
+                         "distrobox enter dev -- sh -c 'cd ~\nuptime'")
+        self.assertEqual(pssh.wrap("uptime", "distrobox enter dev --", True),
+                         "distrobox enter dev -- zsh -ic 'cd ~\nuptime'")
+
+    def test_the_wrapped_script_runs(self):
+        # `env HOME=...` standing in for a container with its own home: the
+        # paths script survives the extra layer of quoting, `~` is that
+        # home, and the exit status comes back through it.
+        with tempfile.TemporaryDirectory() as home:
+            os.mkdir(os.path.join(home, "ok"))
+            line = pssh.wrap(pssh.paths_script([D("ok"), D("bad")], "echo in $PWD"), f"env HOME={home}")
+            proc = sh(line)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(proc.stdout.splitlines(),
+                         [f"== {home}/ok", f"in {home}/ok", f"== {home}/bad: missing, skipped"])
+
+
 class ParallelArgv(unittest.TestCase):
     def test_localhost_is_colon(self):
         argv = pssh.parallel_argv(["a", "b", "localhost"], "uptime")
@@ -205,6 +238,23 @@ class Main(unittest.TestCase):
             pssh.main(["-N", "uptime"])
         ex.assert_called_once_with("parallel", ["parallel", "--nonall", "--tag", "--linebuffer",
                                                 "-S", "a,:", "cd ~\nuptime"])
+
+    def test_two_places_are_two_parallels(self):
+        via = "distrobox enter dev --"
+        entries = [Login("a"), Login("a", via=via), Login("localhost")]
+        procs = [mock.Mock(wait=mock.Mock(return_value=1)), mock.Mock(wait=mock.Mock(return_value=2))]
+        with mock.patch.object(logins, "logins", return_value=entries), \
+                mock.patch("shutil.which", return_value="/usr/bin/parallel"), \
+                mock.patch("os.execvp") as ex, \
+                mock.patch.object(pssh.subprocess, "Popen", side_effect=procs) as popen, \
+                mock.patch.object(logins, "confirm_new_hosts") as confirm:
+            self.assertEqual(pssh.main(["uptime"]), 3)
+        ex.assert_not_called()
+        confirm.assert_called_once_with(["a", "localhost"], "pssh")
+        self.assertEqual([c.args[0] for c in popen.call_args_list], [
+            ["parallel", "--nonall", "--tag", "--linebuffer", "-S", "a,:", "cd ~\nuptime"],
+            ["parallel", "--nonall", "--tag", "--linebuffer", "-S", "a",
+             "distrobox enter dev -- sh -c 'cd ~\nuptime'"]])
 
     def test_dirs_mode_wraps_the_command(self):
         with mock.patch.object(logins, "logins", return_value=[Login("localhost")]), \

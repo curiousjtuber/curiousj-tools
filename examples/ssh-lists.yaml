@@ -5,7 +5,8 @@ logins:
   - login: my-mac.local                  # a mapping where a login needs more
     commands: [cd src, exec zsh]         # run after login in the pane xssh opens
   - login: alice@devbox                  # the same login twice: one pane on the
-    commands: [distrobox enter dev]      # host, one inside its container
+    commands: [distrobox enter dev -nw]      # host, one inside its container...
+    via: distrobox enter dev -nw --          # ...and pssh runs its command in there too
 paths:
   - path: dotfiles                       # relative to ~ unless absolute
     git_url: git@github.com:me/dotfiles.git   # optional: `pssh -c` clones it when missing

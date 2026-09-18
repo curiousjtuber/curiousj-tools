@@ -11,9 +11,10 @@ xpanes (`--stay`, `-l ev`, ...). pssh is the batch counterpart.
 Each pane gets a login shell, so unlike pssh the remote side reads its
 shell rc: aliases work and `cd` persists between commands. A login with
 `commands` in the lists file runs them after login instead of stopping at
-the shell -- `ssh -t LOGIN 'cd src; exec zsh'`, or `distrobox enter dev` --
+the shell -- `ssh -t LOGIN 'cd src; exec zsh'`, or `distrobox enter dev -nw` --
 so the last one should be what you want to type into: an interactive
-shell, a container entered. The pane ends when it exits.
+shell, a container entered. The pane ends when it exits. (A login's `via`
+is pssh's business; the pane types `commands` only.)
 
 A login whose host key is not in known_hosts yet is contacted once beforehand,
 so ssh's yes/no question is answered here rather than in a pane, where a

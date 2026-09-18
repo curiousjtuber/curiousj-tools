@@ -24,6 +24,7 @@ logins:
   - alice@devbox
   - login: build.example.com
     commands: [distrobox enter dev, exec zsh]
+    via: "distrobox enter dev -- "
 paths:
   - path: a
     git_url: git@example.com:me/a.git
@@ -57,8 +58,9 @@ class Formats(unittest.TestCase):
         for name in ("ssh-lists.yaml", "ssh-lists.yml"):
             found = lists.load(self.write(name, YAML))
             self.assertEqual(found.logins, [Login("alice@devbox"),
-                                           Login("build.example.com",
-                                                    ["distrobox enter dev", "exec zsh"])])
+                                            Login("build.example.com",
+                                                  ["distrobox enter dev", "exec zsh"],
+                                                  "distrobox enter dev --")])
             self.assertEqual(found.paths, EXPECTED.paths)
 
     def test_json(self):
@@ -98,7 +100,9 @@ class Parse(unittest.TestCase):
         self.bad({"logins": "a"}, "logins has to be a list")
         self.bad({"logins": [3]}, "logins entry 1: a string or a table")
         self.bad({"logins": [{"commands": ["x"]}]}, "logins entry 1: needs a login")
-        self.bad({"logins": [{"login": "a", "user": "u"}]}, "unknown key 'user'; known: login, commands")
+        self.bad({"logins": [{"login": "a", "user": "u"}]}, "unknown key 'user'; known: login, commands, via")
+        self.bad({"logins": [{"login": "a", "via": 3}]}, "logins entry 1 (a): via has to be a command line")
+        self.bad({"logins": [{"login": "a", "via": " "}]}, "via has to be")
         self.bad({"logins": [{"login": "a", "commands": "x"}]}, "logins entry 1 (a): commands")
         self.bad({"logins": [{"login": "a", "commands": [""]}]}, "commands")
         self.bad({"paths": [{"url": "u"}]}, "paths entry 1: unknown key 'url'; known: path, git_url, git_branch")
@@ -106,7 +110,7 @@ class Parse(unittest.TestCase):
         self.bad({"paths": [{"path": "p", "git_url": 3}]}, "paths entry 1 (p): git_url has to be a string")
 
     def test_bare_strings_and_null_commands(self):
-        found = lists.parse({"logins": ["a", {"login": "b", "commands": None}], "paths": ["p"]})
+        found = lists.parse({"logins": ["a", {"login": "b", "commands": None, "via": None}], "paths": ["p"]})
         self.assertEqual(found.logins, [Login("a"), Login("b")])
         self.assertEqual(found.paths, [PathInfo("p")])
 

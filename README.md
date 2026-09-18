@@ -119,14 +119,16 @@ pssh      [-n] [-N] [-p] [-f FILE] [-i] [-P] [-c] [-C] [--] COMMAND [ARG...]
 All three read one lists file, `~/.config/ssh-lists.toml` (or `.yaml`, `.yml`, `.json`; see
 [where it lives](#where-the-lists-file-lives)): the `logins` to reach and the `paths` to work
 in. A login is a `[user@]host` string, or a table when it needs `commands` run after login
-(`distrobox enter dev`, `cd src`, `exec zsh`): `xssh` runs them in that login's pane, so end
-them in something interactive, or the pane ends with them. A path is relative to `~` unless
-absolute, with an optional `git_url` and `git_branch` for `pssh -c` to clone it from.
+(`distrobox enter dev -nw`, `cd src`, `exec zsh`): `xssh` runs them in that login's pane, so end
+them in something interactive, or the pane ends with them. `via` is the batch counterpart, for
+`pssh`: a command line its command is run through there, handed `sh -c '...'`. A path is
+relative to `~` unless absolute, with an optional `git_url` and `git_branch` for `pssh -c` to
+clone it from.
 
 ```toml
 logins = [
     "alice@devbox",
-    { login = "build.example.com", commands = ["distrobox enter dev"] },
+    { login = "alice@devbox", commands = ["distrobox enter dev -nw"], via = "distrobox enter dev -nw --" },
 ]
 
 [[paths]]
@@ -140,8 +142,9 @@ The same in YAML, where strings and mappings mix freely:
 ```yaml
 logins:
   - alice@devbox
-  - login: build.example.com
-    commands: [distrobox enter dev]
+  - login: alice@devbox
+    commands: [distrobox enter dev -nw]
+    via: distrobox enter dev -nw --
 paths:
   - path: src/webapp
     git_url: git@github.com:me/webapp.git
@@ -176,8 +179,10 @@ alias pull-all="pssh -P -c 'git pull --rebase --autostash'"
 ```
 
 `pssh` runs the command in a non-interactive shell: no aliases, no shell functions, no `cd`
-carrying over between calls, and no login `commands` either; a login listed twice runs once.
-`xssh` gives each one a login shell, so all of those work there.
+carrying over between calls, and no login `commands` either. `xssh` gives each one a login
+shell, so all of those work there. A login listed plainly and again with a `via` is run in both
+places by `pssh`, and once per place: inside `distrobox enter dev -nw -- sh -c '...'` the `~` is
+the container's own home, so `pull-all` keeps its checkouts current alongside the host's.
 
 Both contact a host whose key is not in `known_hosts` yet once beforehand, in the foreground, so
 ssh's yes/no question is asked where it can be answered: inside a synchronized xpanes window the

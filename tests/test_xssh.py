@@ -23,6 +23,9 @@ class PaneCommands(unittest.TestCase):
         self.assertEqual(xssh.pane_commands([Login("a"), Login("b@c"), Login("localhost")]),
                          ["ssh a", "ssh b@c", "cd ~; exec $SHELL"])
 
+    def test_via_is_not_the_panes_business(self):
+        self.assertEqual(xssh.pane_commands([Login("a", via="distrobox enter dev --")]), ["ssh a"])
+
     def test_commands_run_after_login_on_a_terminal(self):
         self.assertEqual(xssh.pane_commands([Login("a", ["distrobox enter dev"]),
                                              Login("b", ["cd src", "exec zsh"])]),

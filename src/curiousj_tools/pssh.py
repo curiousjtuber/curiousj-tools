@@ -33,8 +33,18 @@ on every login, and `pssh -P -c 'git pull --rebase --autostash'` brings them
 all up to date.
 
 A login's `commands` in the lists file are for the shells xssh opens; pssh
-runs its command as given, on every login alike, and a login listed twice
-for two sets of commands is run once.
+runs its command as given, on every login alike. A login's `via` is pssh's:
+a command line the command is run through there, handed `sh -c '...'` (or
+`zsh -ic '...'` with -i), for a place the login shell alone does not reach:
+
+    [[logins]]
+    login = "alice@devbox"
+    commands = ["distrobox enter dev -nw"]      # xssh: the pane lands in the container
+    via = "distrobox enter dev -nw --"          # pssh: runs its command in there too
+
+Inside, `~` is that place's home, so with the same login listed plainly as
+well, `pssh -P -c ...` keeps a container's separate home current alongside
+the host's. Entries that repeat a login with the same via are run once.
 
 A login whose host key is not in known_hosts yet is contacted once beforehand,
 in the foreground, so ssh's yes/no question can be answered; parallel
@@ -56,6 +66,7 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 
 import click
@@ -122,6 +133,29 @@ def shell_command(cmd: str, interactive: bool = False) -> str:
     return cmd
 
 
+def wrap(cmd: str, via: str | None, interactive: bool = False) -> str:
+    """The string parallel hands a login's shell: shell_command, run through
+    via when the login has one -- as `zsh -ic '...'` under -i, which is
+    already a command line, else as `sh -c '...'`."""
+    cmd = shell_command(cmd, interactive)
+    if not via:
+        return cmd
+    return via + " " + (cmd if interactive else "sh -c " + shlex.quote(cmd))
+
+
+def runs(entries: list, cmd: str, interactive: bool = False) -> dict[str, list[str]]:
+    """What runs where: each distinct final command with its logins, in list
+    order. A login listed twice with the same via is one run; one listed
+    plainly and with a via is two, one for each place."""
+    out: dict[str, list[str]] = {}
+    for entry in entries:
+        line = wrap(cmd, entry.via, interactive)
+        group = out.setdefault(line, [])
+        if entry.login not in group:
+            group.append(entry.login)
+    return out
+
+
 def parallel_argv(entries: list[str], cmd: str) -> list[str]:
     logins = [":" if e == "localhost" else e for e in entries]  # `:` is parallel's "here"
     return ["parallel", "--nonall", "--tag", "--linebuffer", "-S", ",".join(logins), cmd]
@@ -147,27 +181,33 @@ def cli(opts: logins.LoginOpts, dry_run: bool, interactive: bool, paths: bool, c
         cmd = command_line(list(command))
         if paths:
             cmd = paths_script(paths_list(opts.file, pick_paths), cmd, clone)
-        cmd = shell_command(cmd, interactive)
-        # Once per login: a twin listed for other xssh commands is the same machine here.
-        entries = list(dict.fromkeys(e.login for e in logins.logins(opts)))
+        groups = runs(logins.logins(opts), cmd, interactive)
     except logins.ToolError as e:
         print(f"pssh: {e}", file=sys.stderr)
         return logins.EXIT_ERROR
     except pick.Abort:
         return pick.EXIT_ABORT
     if dry_run:
-        print(cmd)
-        print("-- on:")
-        for entry in entries:
-            print(f"   {entry}")
+        for line, entries in groups.items():
+            print(line)
+            print("-- on:")
+            for entry in entries:
+                print(f"   {entry}")
         return 0
     try:
-        logins.confirm_new_hosts(entries, "pssh")
+        logins.confirm_new_hosts(list(dict.fromkeys(e for g in groups.values() for e in g)),
+                                 "pssh")
     except logins.ToolError as e:
         print(f"pssh: {e}", file=sys.stderr)
         return logins.EXIT_ERROR
-    os.execvp("parallel", parallel_argv(entries, cmd))
-    return 0
+    if len(groups) == 1:
+        (line, entries), = groups.items()
+        os.execvp("parallel", parallel_argv(entries, line))
+        return 0
+    # One parallel per distinct command, all at once; each exits with its
+    # number of failed logins, so the sum is what one run would have given.
+    procs = [subprocess.Popen(parallel_argv(entries, line)) for line, entries in groups.items()]
+    return sum(p.wait() for p in procs)
 
 
 def main(argv: list[str] | None = None) -> int:

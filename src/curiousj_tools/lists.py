@@ -5,8 +5,10 @@ or .json. Two lists, both optional:
 
     logins = [
         "alice@devbox",                     # [user@]host, as ssh takes it
-        { login = "build.example.com", commands = ["distrobox enter dev"] },
-    ]                                       # commands: run after login, in the pane xssh opens
+        { login = "build.example.com", commands = ["distrobox enter dev -nw"],
+          via = "distrobox enter dev -nw --" },
+    ]   # commands: run after login, in the pane xssh opens
+        # via: what pssh runs its command through there, given `sh -c '...'`
 
     [[paths]]
     path = "src/webapp"                     # relative to ~ unless absolute
@@ -19,7 +21,8 @@ a bare string); so is a path. In YAML the same reads:
     logins:
       - alice@devbox
       - login: build.example.com
-        commands: [distrobox enter dev]
+        commands: [distrobox enter dev -nw]
+        via: distrobox enter dev -nw --
     paths:
       - path: src/webapp
         git_url: git@github.com:me/webapp.git
@@ -57,6 +60,7 @@ class Login:
 
     login: str
     commands: list[str] = field(default_factory=list)
+    via: str | None = None
 
 
 @dataclass
@@ -168,14 +172,18 @@ def entries(data: dict, key: str, path: str) -> list:
 
 
 def login_entry(raw: Any, n: int, path: str) -> Login:
-    fields = table(raw, "login", ("login", "commands"), f"{path}: logins entry {n}")
+    fields = table(raw, "login", ("login", "commands", "via"), f"{path}: logins entry {n}")
     commands = fields.get("commands", [])
     if commands is None:
         commands = []
     if not isinstance(commands, list) or not all(isinstance(c, str) and c for c in commands):
         raise ToolError(f"{path}: logins entry {n} ({fields['login']}): "
                         "commands has to be a list of command lines")
-    return Login(fields["login"], list(commands))
+    via = fields.get("via")
+    if via is not None and (not isinstance(via, str) or not via.strip()):
+        raise ToolError(f"{path}: logins entry {n} ({fields['login']}): "
+                        "via has to be a command line to run the command through")
+    return Login(fields["login"], list(commands), via.strip() if via else None)
 
 
 def path_entry(raw: Any, n: int, path: str) -> PathInfo:
