@@ -874,6 +874,12 @@ def waypipe_remote_bin() -> str:
     return ""
 
 
+def tab_title(title: str) -> str:
+    """The escapes that name the terminal tab: Konsole's OSC 30, then the
+    generic window title (OSC 0) for terminals whose tab shows that."""
+    return "\033]30;%s\007\033]0;%s\007" % (title, title)
+
+
 def waypipe_remote_missing(target: str) -> str:
     """Why `waypipe ssh' would die on the far side, or "" when it should not.
 
@@ -1146,6 +1152,14 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
     print("sshtsf: %s -> %s%s%s"
           % (target, session, " +ecf" if sshopts else "",
              " +waypipe" if waypipe else ""), file=sys.stderr)
+    if waypipe and sys.stdout.isatty():
+        # Konsole names a tab after its foreground process and only knows an
+        # ssh session when that process is ssh itself. Behind waypipe it sees
+        # waypipe, so name the tab here. Nothing runs after the exec, so the
+        # name stays on the tab once the session ends; a plain session is
+        # left to the terminal, which resets its own title on logout.
+        sys.stdout.write(tab_title("%s:%s" % (host, session)))
+        sys.stdout.flush()
     try:
         os.execvp(argv[0], argv)
     except OSError as exc:
@@ -1690,6 +1704,9 @@ in the remote session draw on the local Wayland desktop. Set it the same way;
 both ends -- on the remote, on the PATH a non-interactive ssh gets. Extra
 waypipe options (--compress, --no-gpu, --xwls, --remote-bin, ...) go in
 SSHTSF_WAYPIPE_OPTS. The two forwards are independent and compose.
+A waypipe session names the terminal tab HOST:SESSION itself, since the
+terminal only sees waypipe, not the ssh behind it; the name stays on the tab
+after the session ends.
 
 Everything sshtsf runs on the remote (tmux, socat) is looked for in the
 Homebrew, Linuxbrew and ~/.local/bin directories first, since a non-

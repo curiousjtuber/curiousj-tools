@@ -78,8 +78,15 @@ def create(session: str, folder: str = "", env: tuple[tuple[str, str], ...] = ()
                shell_instead("could not create the session", folder, env, relay)))
 
 
-def run_capture(argv: list[str]) -> tuple[int, str, str]:
-    out, err = io.StringIO(), io.StringIO()
+class Terminal(io.StringIO):
+    """A captured stdout that says it is a terminal."""
+
+    def isatty(self) -> bool:
+        return True
+
+
+def run_capture(argv: list[str], tty: bool = False) -> tuple[int, str, str]:
+    out, err = (Terminal() if tty else io.StringIO()), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
         try:
             rc = sshtsf.main(argv)
@@ -608,6 +615,50 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         self.assertNotIn("-R", out)
         self.assertIn("no local Emacs server socket (start Emacs first)", err)
         self.assertIn("connecting without the forward", err)
+
+    def waypipe_on(self):
+        cfg = sshtsf.load_config()
+        cfg["hosts"]["devbox"]["sessions"]["api"]["waypipe"] = True
+        sshtsf.save_config(cfg)
+
+    def connect_for_real(self, argv: list[str], tty: bool):
+        """Run up to the exec with the forwards' probes answered, and say
+        what reached stdout."""
+        with mock.patch.object(sshtsf, "ecf_local_socket", return_value=None), \
+             mock.patch.object(sshtsf, "waypipe_local_display",
+                               return_value=("/run/user/1000/wayland-0", "")), \
+             mock.patch.object(sshtsf, "waypipe_remote_missing", return_value=""), \
+             mock.patch.object(sshtsf.os, "execvp") as execvp:
+            rc, out, err = run_capture(argv, tty=tty)
+        return rc, out, err, execvp
+
+    def test_waypipe_session_names_the_tab(self):
+        # Konsole sees waypipe, not the ssh behind it, so the tab is named
+        # here: its own OSC 30, then the window title other terminals show.
+        self.waypipe_on()
+        _, out, err, execvp = self.connect_for_real(["devbox", "api"], tty=True)
+        self.assertEqual(execvp.call_args.args[0], "waypipe")
+        self.assertEqual(out, "\033]30;devbox:api\007\033]0;devbox:api\007")
+        self.assertIn("devbox -> api +waypipe\n", err)
+
+    def test_plain_session_leaves_the_tab_to_the_terminal(self):
+        _, out, _, execvp = self.connect_for_real(["devbox", "api"], tty=True)
+        self.assertEqual(execvp.call_args.args[0], "ssh")
+        self.assertEqual(out, "")
+
+    def test_tab_title_needs_a_terminal(self):
+        self.waypipe_on()
+        _, out, _, execvp = self.connect_for_real(["devbox", "api"], tty=False)
+        self.assertEqual(execvp.call_args.args[0], "waypipe")
+        self.assertEqual(out, "")
+
+    def test_dry_run_prints_the_command_and_no_title(self):
+        self.waypipe_on()
+        _, out, _, execvp = self.connect_for_real(["devbox", "api", "--dry-run"], tty=True)
+        execvp.assert_not_called()
+        self.assertEqual(len(out.splitlines()), 1)
+        self.assertTrue(out.startswith("waypipe ssh -t devbox "))
+        self.assertNotIn("\033", out)
 
     def test_waypipe_flag_without_local_display_warns_and_connects(self):
         with mock.patch.object(sshtsf, "waypipe_local_display",

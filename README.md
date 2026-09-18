@@ -70,6 +70,10 @@ and `sshtsf remote` URL dials; there is no separate user field. `sshtsf add` ask
 when the destination names none, and a blank leaves it to ssh (`~/.ssh/config`, or your own
 name). Two users on one machine are two host entries.
 
+`sshtsf -w` wraps the connection in `waypipe ssh`, and a terminal such as Konsole then sees
+`waypipe`, not the ssh it would otherwise title the tab after. So a waypipe session names the
+tab `HOST:SESSION` itself, and the name stays on the tab after the session ends.
+
 ### Emacs routing (ecf)
 
 `sshtsf -e HOST` reverse-forwards the local Emacs server socket to
