@@ -2,10 +2,10 @@
 
     pick-lines [-h] NOUN ITEM...
 
-The picker behind `ssh-hosts -p` and `pull-all -P`: fzf when it is installed
+The picker behind `ssh-logins -p` and `pssh -C`: fzf when it is installed
 and there is a terminal to draw on (TAB marks several, ENTER confirms), else
-a numbered menu on the tty. NOUN names the items in the prompts ("hosts",
-"repos"). Prints the marked items one per line; aborting (ESC, q, an empty
+a numbered menu on the tty. NOUN names the items in the prompts ("logins",
+"paths"). Prints the marked items one per line; aborting (ESC, q, an empty
 answer) exits 130 with nothing printed.
 """
 
@@ -22,6 +22,20 @@ EXIT_ABORT = 130
 
 class Abort(Exception):
     """The user left the picker without choosing anything."""
+
+
+def pick_from(items: list, noun: str, label: Callable) -> list:
+    """pick() over items shown as label(item), the chosen items back. Two
+    items with one label are told apart by a number, so choosing one does
+    not choose both."""
+    seen: dict[str, int] = {}
+    labels = []
+    for item in items:
+        text = label(item)
+        seen[text] = seen.get(text, 0) + 1
+        labels.append(text if seen[text] == 1 else f"{text} #{seen[text]}")
+    chosen = set(pick(labels, noun))
+    return [item for item, text in zip(items, labels) if text in chosen]
 
 
 def fzf_pick(items: list[str], noun: str) -> list[str]:

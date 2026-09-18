@@ -1,13 +1,15 @@
-# The hosts xssh, pssh and ssh-hosts reach, and the paths `pssh -P` works in.
+# The logins xssh, pssh and ssh-logins reach, and the paths `pssh -P` works in.
 # Lives at ~/.config/ssh-lists.toml, or on $SSH_LISTS_PATH (see README);
 # the same file can be YAML (ssh-lists.yaml) or JSON (ssh-lists.json).
 
-hosts = [
+logins = [
     "alice@devbox",                      # [user@]host, as ssh takes it
     "build.example.com",
-    # a table where a host needs more: commands run after login in the pane
+    # a table where a login needs more: commands run after login in the pane
     # xssh opens; end in something interactive, or the pane ends
-    { host = "my-mac.local", commands = ["cd src", "exec zsh"] },
+    { login = "my-mac.local", commands = ["cd src", "exec zsh"] },
+    # the same login twice: one pane on the host, one inside its container
+    { login = "alice@devbox", commands = ["distrobox enter dev"] },
 ]
 
 [[paths]]

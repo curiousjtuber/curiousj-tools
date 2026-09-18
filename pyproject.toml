@@ -1,7 +1,7 @@
 [project]
 name = "curiousj-tools"
 version = "0.1.0"
-description = "Small ssh/tmux/Emacs command-line tools: sshtsf, xssh, pssh, ssh-hosts, emacsclient-auto"
+description = "Small ssh/tmux/Emacs command-line tools: sshtsf, xssh, pssh, ssh-logins, emacsclient-auto"
 readme = "README.md"
 license = "MIT"
 authors = [{ name = "CuriousJ", email = "curious.j.tuber@gmail.com" }]
@@ -23,7 +23,7 @@ Homepage = "https://github.com/curiousjtuber/curiousj-tools"
 sshtsf = "curiousj_tools.sshtsf:main"
 xssh = "curiousj_tools.xssh:main"
 pssh = "curiousj_tools.pssh:main"
-ssh-hosts = "curiousj_tools.hosts:main"
+ssh-logins = "curiousj_tools.logins:main"
 pick-lines = "curiousj_tools.pick:main"
 emacsclient-auto = "curiousj_tools.emacsclient_auto:main"
 ec-browse = "curiousj_tools.ec_browse:main"

@@ -101,5 +101,14 @@ class Main(unittest.TestCase):
         self.assertEqual(cm.exception.code, 2)
 
 
+class PickFrom(unittest.TestCase):
+    def test_twins_numbered_and_mapped_back(self):
+        items = [("a", 1), ("b", 2), ("a", 3)]
+        with mock.patch.object(pick, "pick", return_value=["a #2", "b"]) as p:
+            chosen = pick.pick_from(items, "things", lambda t: t[0])
+        p.assert_called_once_with(["a", "b", "a #2"], "things")
+        self.assertEqual(chosen, [("b", 2), ("a", 3)])
+
+
 if __name__ == "__main__":
     unittest.main()

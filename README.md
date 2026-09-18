@@ -6,9 +6,9 @@ as the editor on all of them. Python 3.11+, standard library only.
 | Command | What it does |
 |---|---|
 | `sshtsf` | ssh to a host and `tmux new-session -A` there; remembers host, session, folder and command so a two-word invocation replaces a hand-written alias per session |
-| `xssh` | one synchronized tmux pane per host plus a local shell, so one typed line runs everywhere (interactive; needs [xpanes](https://github.com/greymd/tmux-xpanes)) |
+| `xssh` | one synchronized tmux pane per login plus a local shell, so one typed line runs everywhere (interactive; needs [xpanes](https://github.com/greymd/tmux-xpanes)) |
 | `pssh` | the batch counterpart: one command on every host at once through GNU parallel, output tagged by host; `-d` repeats it in every listed directory, `-c` cloning the ones a host lacks |
-| `ssh-hosts` | the host list behind `xssh` and `pssh`, with an fzf/menu picker |
+| `ssh-logins` | the login list behind `xssh` and `pssh`, with an fzf/menu picker |
 | `pick-lines` | the multi-select picker the others use: fzf when present, else a numbered menu |
 | `emacsclient-auto` | `emacsclient` that reaches a forwarded Emacs when its socket is live, the local server otherwise; use it as `$EDITOR` on hosts you reach with `sshtsf -e` |
 | `ec-browse` | opens URLs in whichever Emacs `emacsclient-auto` reaches; use it as `$BROWSER` |
@@ -111,22 +111,22 @@ never route remote), `EMACSCLIENT_FORWARD_SOCKET` (default `/tmp/emacs-remote-so
 ## Hosts and batch runs
 
 ```
-ssh-hosts [-N] [-p] [-f FILE]
+ssh-logins [-N] [-p] [-f FILE]
 xssh      [-N] [-p] [-f FILE] [xpanes-options...]
 pssh      [-n] [-N] [-p] [-f FILE] [-i] [-P] [-c] [-C] [--] COMMAND [ARG...]
 ```
 
 All three read one lists file, `~/.config/ssh-lists.toml` (or `.yaml`, `.yml`, `.json`; see
-[where it lives](#where-the-lists-file-lives)): the `hosts` to reach and the `paths` to work
-in. A host is a `[user@]host` string, or a table when it needs `commands` run after login
-(`distrobox enter dev`, `cd src`, `exec zsh`): `xssh` runs them in that host's pane, so end
+[where it lives](#where-the-lists-file-lives)): the `logins` to reach and the `paths` to work
+in. A login is a `[user@]host` string, or a table when it needs `commands` run after login
+(`distrobox enter dev`, `cd src`, `exec zsh`): `xssh` runs them in that login's pane, so end
 them in something interactive, or the pane ends with them. A path is relative to `~` unless
 absolute, with an optional `git_url` and `git_branch` for `pssh -c` to clone it from.
 
 ```toml
-hosts = [
+logins = [
     "alice@devbox",
-    { host = "build.example.com", commands = ["distrobox enter dev"] },
+    { login = "build.example.com", commands = ["distrobox enter dev"] },
 ]
 
 [[paths]]
@@ -138,9 +138,9 @@ git_branch = "main"
 The same in YAML, where strings and mappings mix freely:
 
 ```yaml
-hosts:
+logins:
   - alice@devbox
-  - host: build.example.com
+  - login: build.example.com
     commands: [distrobox enter dev]
 paths:
   - path: src/webapp
@@ -149,24 +149,26 @@ paths:
 ```
 
 See [examples/ssh-lists.toml](examples/ssh-lists.toml) and
-[examples/ssh-lists.yaml](examples/ssh-lists.yaml). `localhost` is appended to the hosts for
-the local side unless `-N`, and entries naming the machine you are on are dropped, so one file
-serves every host on it. `-p` picks hosts in fzf (TAB marks several) or a numbered menu.
+[examples/ssh-lists.yaml](examples/ssh-lists.yaml). `localhost` is appended to the logins for
+the local side unless `-N`, and entries naming the machine you are on, for your user, are
+dropped, so one file serves every host on it. `-p` picks logins in fzf (TAB marks several) or a
+numbered menu; a login listed twice, for two sets of `commands`, is shown with them so the two
+can be told apart.
 
 ```sh
-xssh --stay                          # a synced pane per host; type once, runs everywhere
-pssh uptime                          # tagged output, all hosts at once, exit = hosts that failed
+xssh --stay                          # a synced pane per login; type once, runs everywhere
+pssh uptime                          # tagged output, all logins at once, exit = logins that failed
 pssh 'cd ~/src/webapp && git status' # one word is a shell line; several words are one argv
 pssh -i 'alias'                      # through `zsh -ic`, so aliases and functions exist
-pssh -P git status -s                # in every listed path, on every host
+pssh -P git status -s                # in every listed path, on every login
 pssh -C 'git pull --rebase --autostash'   # ...choosing the paths first
 pssh -P -c 'git pull --rebase --autostash' # ...cloning any checkout a host lacks first
-pssh -n -P make                      # show the per-host script and the hosts, run nothing
+pssh -n -P make                      # show the per-login script and the logins, run nothing
 ```
 
 A path a host does not have is skipped, unless `-c` is given and the entry has a `git_url`,
 in which case it is cloned first and the command runs in the fresh clone. One where the command
-fails marks that host failed. A shell alias makes a routine of it, and gives a new machine its
+fails marks that login failed. A shell alias makes a routine of it, and gives a new machine its
 checkouts on the first run:
 
 ```sh
@@ -174,8 +176,8 @@ alias pull-all="pssh -P -c 'git pull --rebase --autostash'"
 ```
 
 `pssh` runs the command in a non-interactive shell: no aliases, no shell functions, no `cd`
-carrying over between calls, and no host `commands` either. `xssh` gives each host a login
-shell, so all of those work there.
+carrying over between calls, and no login `commands` either; a login listed twice runs once.
+`xssh` gives each one a login shell, so all of those work there.
 
 Both contact a host whose key is not in `known_hosts` yet once beforehand, in the foreground, so
 ssh's yes/no question is asked where it can be answered: inside a synchronized xpanes window the

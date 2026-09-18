@@ -1,9 +1,11 @@
 # The same lists as ssh-lists.toml, in YAML: ~/.config/ssh-lists.yaml (or .yml).
-hosts:
+logins:
   - alice@devbox                         # [user@]host, as ssh takes it
   - build.example.com
-  - host: my-mac.local                   # a mapping where a host needs more
+  - login: my-mac.local                  # a mapping where a login needs more
     commands: [cd src, exec zsh]         # run after login in the pane xssh opens
+  - login: alice@devbox                  # the same login twice: one pane on the
+    commands: [distrobox enter dev]      # host, one inside its container
 paths:
   - path: dotfiles                       # relative to ~ unless absolute
     git_url: git@github.com:me/dotfiles.git   # optional: `pssh -c` clones it when missing

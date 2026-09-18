@@ -1,16 +1,16 @@
-"""ssh-hosts -- print the host list xssh and pssh work from, optionally picking a subset.
+"""ssh-logins -- print the login list xssh and pssh work from, optionally picking a subset.
 
-    ssh-hosts [-h] [-N|--no-local] [-p|--pick] [-f FILE]
+    ssh-logins [-h] [-N|--no-local] [-p|--pick] [-f FILE]
 
-One entry per line: every [user@]host in the lists file, then `localhost`
-last, which consumers turn into whatever "this machine" means for them
-(xssh: a local pane, pssh: a local run); -N/--no-local leaves it out.
-Entries that name this machine are dropped, so one list can serve every
-host on it. -p/--pick shows the list in fzf (TAB marks several) and prints
-only the marked entries; without fzf, a numbered menu (see `pick-lines -h`).
-Aborting the picker exits 130 with nothing printed.
+One entry per line: every login ([user@]host) in the lists file, then
+`localhost` last, which consumers turn into whatever "this machine" means
+for them (xssh: a local pane, pssh: a local run); -N/--no-local leaves it
+out. Entries that name this machine, for this user, are dropped, so one
+list can serve every host on it. -p/--pick shows the list in fzf (TAB marks
+several) and prints only the marked entries; without fzf, a numbered menu
+(see `pick-lines -h`). Aborting the picker exits 130 with nothing printed.
 
-The hosts are the `hosts` list of the ssh-lists file, TOML, YAML or JSON
+The logins are the `logins` list of the ssh-lists file, TOML, YAML or JSON
 (see the README, or the curiousj_tools.lists docstring, for the shape).
 Without -f the first readable of these is used:
 
@@ -33,30 +33,30 @@ from dataclasses import dataclass
 import click
 
 from . import lists, pick
-from .lists import HostInfo, HostsError  # noqa: F401  (re-exported)
+from .lists import Login, ToolError  # noqa: F401  (re-exported)
 
 EXIT_ERROR = 1
 EXIT_USAGE = 2
 
 
 @dataclass
-class HostOpts:
-    """The host-selection flags xssh and pssh share with ssh-hosts."""
+class LoginOpts:
+    """The login-selection flags xssh and pssh share with ssh-logins."""
 
     no_local: bool = False
     pick: bool = False
     file: str | None = None
 
 
-def host_options(f):
-    """The -N, -p and -f every host tool takes; the callback gets them as one
-    HostOpts named opts."""
+def login_options(f):
+    """The -N, -p and -f every login tool takes; the callback gets them as
+    one LoginOpts named opts."""
     @click.option("-f", "file", metavar="FILE", help="the ssh-lists file to read")
-    @click.option("-p", "--pick", is_flag=True, help="choose hosts interactively")
+    @click.option("-p", "--pick", is_flag=True, help="choose logins interactively")
     @click.option("-N", "--no-local", is_flag=True, help="leave localhost out")
     @functools.wraps(f)
     def wrapper(no_local, pick, file, **kw):
-        return f(HostOpts(no_local, pick, file), **kw)
+        return f(LoginOpts(no_local, pick, file), **kw)
     return wrapper
 
 
@@ -107,14 +107,14 @@ def self_names() -> set[str]:
     return names
 
 
-def drop_self(entries: list[HostInfo], names: set[str], user: str) -> list[HostInfo]:
+def drop_self(entries: list[Login], names: set[str], user: str) -> list[Login]:
     """Entries minus those naming this machine: the list is shared between
     hosts, so each one's own name is in it, and `localhost` already stands
     for it. An entry for another user on this machine is kept: that is a
     different login, not this one."""
     kept = []
     for entry in entries:
-        entry_user, _, host = entry.host.rpartition("@")
+        entry_user, _, host = entry.login.rpartition("@")
         host = host.lower()
         mine = host in names or host.split(".", 1)[0] in names
         if mine and (not entry_user or entry_user == user):
@@ -156,11 +156,11 @@ def host_known(entry: str) -> bool:
 
 
 def confirm_new_hosts(entries: list[str], prog: str) -> None:
-    """ssh once, in the foreground, to each host whose key is not known yet,
+    """ssh once, in the foreground, to each login whose host key is not known yet,
     so the yes/no question is asked here. Asked from inside a synchronized
     xpanes window the answer lands in every pane, and under parallel the
     prompt cannot be answered at all: ssh runs in a background process
-    group there, and reading /dev/tty stops it. Raises HostsError when a
+    group there, and reading /dev/tty stops it. Raises ToolError when a
     host is refused or unreachable."""
     for entry in entries:
         if entry == "localhost" or host_known(entry):
@@ -168,40 +168,45 @@ def confirm_new_hosts(entries: list[str], prog: str) -> None:
         print(f"{prog}: {entry}: host key not known yet, connecting once to confirm it",
               file=sys.stderr)
         if subprocess.run(["ssh", entry, "true"]).returncode != 0:
-            raise HostsError(f"{entry}: host key not confirmed (answer yes, or drop it from the list)")
+            raise ToolError(f"{entry}: host key not confirmed (answer yes, or drop it from the list)")
 
 
-def hosts(opts: HostOpts, env=None) -> list[HostInfo]:
-    """The resolved, filtered, optionally picked list. Raises HostsError or
+def logins(opts: LoginOpts, env=None) -> list[Login]:
+    """The resolved, filtered, optionally picked list. Raises ToolError or
     pick.Abort."""
     path = lists.find_file(opts.file, env)
-    entries = drop_self(lists.load(path).hosts, self_names(), getpass.getuser())
+    entries = drop_self(lists.load(path).logins, self_names(), getpass.getuser())
     if not entries and opts.no_local:
-        raise HostsError(f"no hosts in {path} (entries naming this machine are dropped)")
+        raise ToolError(f"no logins in {path} (entries naming this machine are dropped)")
     if not opts.no_local:
-        entries.append(HostInfo("localhost"))
+        entries.append(Login("localhost"))
     if opts.pick:
-        chosen = set(pick.pick([e.host for e in entries], "hosts"))
-        entries = [e for e in entries if e.host in chosen]
+        # Shown with their commands, since one login can be listed twice for
+        # two different ones; the picker keeps such twins apart by number.
+        entries = pick.pick_from(entries, "logins", label)
     return entries
 
 
+def label(entry: Login) -> str:
+    return entry.login + ("  " + "; ".join(entry.commands) if entry.commands else "")
+
+
 @click.command(cls=Command, help=__doc__)
-@host_options
-def cli(opts: HostOpts) -> int:
+@login_options
+def cli(opts: LoginOpts) -> int:
     try:
-        entries = hosts(opts)
-    except HostsError as e:
-        print(f"ssh-hosts: {e}", file=sys.stderr)
+        entries = logins(opts)
+    except ToolError as e:
+        print(f"ssh-logins: {e}", file=sys.stderr)
         return EXIT_ERROR
     except pick.Abort:
         return pick.EXIT_ABORT
-    print("\n".join(e.host for e in entries))
+    print("\n".join(e.login for e in entries))
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
-    return run(cli, argv, "ssh-hosts")
+    return run(cli, argv, "ssh-logins")
 
 
 if __name__ == "__main__":

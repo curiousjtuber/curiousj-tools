@@ -5,13 +5,14 @@ import tempfile
 import unittest
 from unittest import mock
 
-from curiousj_tools import hosts, pick, pssh
-from curiousj_tools.lists import HostInfo, PathInfo
+from curiousj_tools import logins, pick, pssh
+from curiousj_tools.lists import Login, PathInfo
 
 
 def dry(argv, entries=("h1",), path_list=()):
-    """pssh -n with the lists mocked: (exit status, stdout, stderr, the HostOpts asked for)."""
-    with mock.patch.object(hosts, "hosts", return_value=[HostInfo(e) for e in entries]) as h, \
+    """pssh -n with the lists mocked: (exit status, stdout, stderr, the LoginOpts asked for)."""
+    entries = [Login(e) if isinstance(e, str) else e for e in entries]
+    with mock.patch.object(logins, "logins", return_value=entries) as h, \
             mock.patch.object(pssh, "paths_list", return_value=list(path_list)), \
             mock.patch("sys.stdout", new_callable=io.StringIO) as out, \
             mock.patch("sys.stderr", new_callable=io.StringIO) as err:
@@ -24,12 +25,18 @@ class Arguments(unittest.TestCase):
     def test_leading_flags_then_command(self):
         rc, out, _, opts = dry(["-N", "-f", "F", "-i", "-n", "uptime", "-p"])
         self.assertEqual(rc, 0)
-        self.assertEqual(opts, hosts.HostOpts(no_local=True, file="F"))
+        self.assertEqual(opts, logins.LoginOpts(no_local=True, file="F"))
         self.assertTrue(out.startswith("zsh -ic 'cd ~\nuptime -p'\n"), out)
+
+    def test_twin_logins_run_once(self):
+        # One login listed twice, for two sets of xssh commands, is one
+        # machine to a batch run.
+        _, out, _, _ = dry(["-n", "true"], entries=[Login("a"), "b", Login("a", ["exec zsh"])])
+        self.assertIn("-- on:\n   a\n   b\n", out)
 
     def test_short_flags_combine(self):
         rc, out, _, opts = dry(["-nNi", "uptime"])
-        self.assertEqual((rc, opts), (0, hosts.HostOpts(no_local=True)))
+        self.assertEqual((rc, opts), (0, logins.LoginOpts(no_local=True)))
         self.assertTrue(out.startswith("zsh -ic "), out)
 
     def test_path_flags_imply_paths(self):
@@ -132,7 +139,7 @@ class DirsScript(unittest.TestCase):
 
 
 TOML = '''# mine
-hosts = ["h1"]
+logins = ["h1"]
 
 [[paths]]
 path = "a"
@@ -167,11 +174,11 @@ class Paths(unittest.TestCase):
         self.assertEqual(len(pssh.paths_list(None, False, env)), 2)
 
     def test_empty_and_missing(self):
-        self.write("hosts = ['h1']\n")
-        with self.assertRaises(hosts.HostsError) as cm:
+        self.write("logins = ['h1']\n")
+        with self.assertRaises(logins.ToolError) as cm:
             pssh.paths_list(self.file, False)
         self.assertIn("no paths in", str(cm.exception))
-        with self.assertRaises(hosts.HostsError):
+        with self.assertRaises(logins.ToolError):
             pssh.paths_list(None, False, env={"HOME": self.tmp.name})
 
 
@@ -191,19 +198,19 @@ class Main(unittest.TestCase):
             f.write(TOML)
 
     def test_execs_parallel(self):
-        with mock.patch.object(hosts, "hosts", return_value=[HostInfo("a"), HostInfo("localhost")]), \
+        with mock.patch.object(logins, "logins", return_value=[Login("a"), Login("localhost")]), \
                 mock.patch("shutil.which", return_value="/usr/bin/parallel"), \
                 mock.patch("os.execvp") as ex, \
-                mock.patch.object(hosts, "confirm_new_hosts"):
+                mock.patch.object(logins, "confirm_new_hosts"):
             pssh.main(["-N", "uptime"])
         ex.assert_called_once_with("parallel", ["parallel", "--nonall", "--tag", "--linebuffer",
                                                 "-S", "a,:", "cd ~\nuptime"])
 
     def test_dirs_mode_wraps_the_command(self):
-        with mock.patch.object(hosts, "hosts", return_value=[HostInfo("localhost")]), \
+        with mock.patch.object(logins, "logins", return_value=[Login("localhost")]), \
                 mock.patch("shutil.which", return_value="/usr/bin/parallel"), \
                 mock.patch("os.execvp") as ex, \
-                mock.patch.object(hosts, "confirm_new_hosts"):
+                mock.patch.object(logins, "confirm_new_hosts"):
             pssh.main(["-P", "-f", self.file, "git", "status", "-s"])
         cmd = ex.call_args[0][1][-1]
         self.assertTrue(cmd.startswith("cd ~\nrc=0\nrun() {"))
@@ -211,18 +218,18 @@ class Main(unittest.TestCase):
         self.assertIn("git status -s", cmd)
 
     def test_clone_flag_reaches_the_script(self):
-        with mock.patch.object(hosts, "hosts", return_value=[HostInfo("localhost")]), \
+        with mock.patch.object(logins, "logins", return_value=[Login("localhost")]), \
                 mock.patch("shutil.which", return_value="/usr/bin/parallel"), \
                 mock.patch("os.execvp") as ex, \
-                mock.patch.object(hosts, "confirm_new_hosts"):
+                mock.patch.object(logins, "confirm_new_hosts"):
             pssh.main(["-c", "-f", self.file, "true"])
         self.assertIn("\nrun a git@example.com:me/a.git main\nrun b\n", ex.call_args[0][1][-1])
 
     def test_dry_run_prints_command_and_hosts_without_parallel(self):
-        with mock.patch.object(hosts, "hosts", return_value=[HostInfo("h1"), HostInfo("localhost")]), \
+        with mock.patch.object(logins, "logins", return_value=[Login("h1"), Login("localhost")]), \
                 mock.patch("shutil.which", return_value=None), \
                 mock.patch("os.execvp") as ex, \
-                mock.patch.object(hosts, "confirm_new_hosts"), \
+                mock.patch.object(logins, "confirm_new_hosts"), \
                 mock.patch("sys.stdout", new_callable=io.StringIO) as out:
             self.assertEqual(pssh.main(["-n", "-P", "-f", self.file, "uptime"]), 0)
         ex.assert_not_called()
@@ -232,7 +239,7 @@ class Main(unittest.TestCase):
 
     def test_pick_dirs_before_hosts(self):
         with mock.patch.object(pick, "pick", side_effect=pick.Abort), \
-                mock.patch.object(hosts, "hosts") as h, \
+                mock.patch.object(logins, "logins") as h, \
                 mock.patch("shutil.which", return_value="/usr/bin/parallel"):
             self.assertEqual(pssh.main(["-C", "-f", self.file, "uptime"]), 130)
         h.assert_not_called()
@@ -247,10 +254,10 @@ class Main(unittest.TestCase):
         self.assertIn("cannot read", err.getvalue())
 
     def test_unconfirmed_host_key_aborts_before_parallel(self):
-        with mock.patch.object(hosts, "hosts", return_value=[HostInfo("new"), HostInfo("localhost")]), \
+        with mock.patch.object(logins, "logins", return_value=[Login("new"), Login("localhost")]), \
                 mock.patch("shutil.which", return_value="/usr/bin/parallel"), \
-                mock.patch.object(hosts, "confirm_new_hosts",
-                                  side_effect=hosts.HostsError("new: host key not confirmed")), \
+                mock.patch.object(logins, "confirm_new_hosts",
+                                  side_effect=logins.ToolError("new: host key not confirmed")), \
                 mock.patch("os.execvp") as ex, \
                 mock.patch("sys.stderr", new_callable=io.StringIO) as err:
             self.assertEqual(pssh.main(["uptime"]), 1)
@@ -259,7 +266,7 @@ class Main(unittest.TestCase):
 
     def test_abort_propagates(self):
         with mock.patch("shutil.which", return_value="/usr/bin/parallel"), \
-                mock.patch.object(hosts, "hosts", side_effect=pick.Abort):
+                mock.patch.object(logins, "logins", side_effect=pick.Abort):
             self.assertEqual(pssh.main(["-p", "uptime"]), 130)
 
     def test_help(self):
