@@ -51,10 +51,6 @@ class HostsError(Exception):
     """A user-facing failure: the message is printed and the tool exits 1."""
 
 
-class UsageError(HostsError):
-    """A bad command line: the message is printed and the tool exits 2."""
-
-
 @dataclass
 class HostInfo:
     """One host: the ssh destination and what to run once logged in."""

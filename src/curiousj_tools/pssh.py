@@ -56,56 +56,11 @@ import os
 import shlex
 import shutil
 import sys
-from dataclasses import dataclass
+
+import click
 
 from . import hosts, lists, pick
 from .lists import PathInfo
-
-USAGE = ("usage: pssh [-n] [-N] [-p] [-f FILE] [-i] [-P] [-c] [-C] "
-         "[--] COMMAND [ARG...]")
-
-
-@dataclass
-class Opts:
-    hosts: hosts.HostOpts
-    interactive: bool = False
-    dry_run: bool = False
-    paths: bool = False
-    clone: bool = False
-    pick_paths: bool = False
-
-
-def split_args(argv: list[str]) -> tuple[Opts, list[str]]:
-    """Leading flags, then the command. Raises UsageError on a bad flag."""
-    opts = Opts(hosts.HostOpts())
-    i = 0
-    while i < len(argv):
-        j = hosts.take_host_opt(argv, i, opts.hosts, "pssh")
-        if j != i:
-            i = j
-            continue
-        arg = argv[i]
-        if arg in ("-i", "--interactive"):
-            opts.interactive = True
-        elif arg in ("-n", "--dry-run"):
-            opts.dry_run = True
-        elif arg in ("-P", "--paths"):
-            opts.paths = True
-        elif arg in ("-c", "--clone"):
-            opts.paths = True
-            opts.clone = True
-        elif arg in ("-C", "--pick-paths"):
-            opts.paths = True
-            opts.pick_paths = True
-        elif arg == "--":
-            i += 1
-            break
-        elif arg.startswith("-"):
-            raise hosts.UsageError(f"unknown option {arg}")
-        else:
-            break
-        i += 1
-    return opts, argv[i:]
 
 
 def command_line(words: list[str]) -> str:
@@ -113,7 +68,7 @@ def command_line(words: list[str]) -> str:
     return words[0] if len(words) == 1 else shlex.join(words)
 
 
-def paths(file: str | None, pick_paths: bool, env=None) -> list[PathInfo]:
+def paths_list(file: str | None, pick_paths: bool, env=None) -> list[PathInfo]:
     """The paths list of the lists file, optionally picked from. Raises
     HostsError when the file has none, or pick.Abort."""
     path = lists.find_file(file, env)
@@ -172,33 +127,34 @@ def parallel_argv(entries: list[str], cmd: str) -> list[str]:
     return ["parallel", "--nonall", "--tag", "--linebuffer", "-S", ",".join(logins), cmd]
 
 
-def main(argv: list[str] | None = None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    if argv and argv[0] in ("-h", "--help"):
-        print(__doc__.rstrip())
-        return 0
+@click.command(cls=hosts.Command, help=__doc__,
+               context_settings={"allow_interspersed_args": False})
+@click.option("-n", "--dry-run", is_flag=True, help="print the command and the hosts, run nothing")
+@hosts.host_options
+@click.option("-i", "--interactive", is_flag=True, help="run through `zsh -ic'")
+@click.option("-P", "--paths", is_flag=True, help="in every listed path on each host")
+@click.option("-c", "--clone", is_flag=True, help="clone a missing path first (implies -P)")
+@click.option("-C", "--pick-paths", is_flag=True, help="choose the paths (implies -P)")
+@click.argument("command", nargs=-1, required=True, type=click.UNPROCESSED)
+def cli(opts: hosts.HostOpts, dry_run: bool, interactive: bool, paths: bool, clone: bool,
+        pick_paths: bool, command: tuple[str, ...]) -> int:
+    """Flags first; the first word that is not one starts the command."""
+    paths = paths or clone or pick_paths
     try:
-        opts, words = split_args(argv)
-        if not words:
-            print(USAGE, file=sys.stderr)
-            return hosts.EXIT_USAGE
-        if not opts.dry_run and not shutil.which("parallel"):
+        if not dry_run and not shutil.which("parallel"):
             raise hosts.HostsError(
                 "GNU parallel not installed (brew install parallel / pacman -S parallel)")
-        cmd = command_line(words)
-        if opts.paths:
-            cmd = paths_script(paths(opts.hosts.file, opts.pick_paths), cmd, opts.clone)
-        cmd = shell_command(cmd, opts.interactive)
-        entries = [e.host for e in hosts.hosts(opts.hosts)]
-    except hosts.UsageError as e:
-        print(f"pssh: {e}", file=sys.stderr)
-        return hosts.EXIT_USAGE
+        cmd = command_line(list(command))
+        if paths:
+            cmd = paths_script(paths_list(opts.file, pick_paths), cmd, clone)
+        cmd = shell_command(cmd, interactive)
+        entries = [e.host for e in hosts.hosts(opts)]
     except hosts.HostsError as e:
         print(f"pssh: {e}", file=sys.stderr)
         return hosts.EXIT_ERROR
     except pick.Abort:
         return pick.EXIT_ABORT
-    if opts.dry_run:
+    if dry_run:
         print(cmd)
         print("-- on:")
         for entry in entries:
@@ -210,6 +166,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"pssh: {e}", file=sys.stderr)
         return hosts.EXIT_ERROR
     os.execvp("parallel", parallel_argv(entries, cmd))
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    return hosts.run(cli, argv, "pssh")
 
 
 if __name__ == "__main__":

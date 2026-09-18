@@ -76,21 +76,36 @@ class Hosts(unittest.TestCase):
             self.assertEqual(hosts.main(["-p", "-f", self.file]), 130)
 
 
-class HostOpts(unittest.TestCase):
-    def test_argv_round_trip(self):
-        self.assertEqual(hosts.HostOpts().argv(), [])
-        self.assertEqual(hosts.HostOpts(True, True, "F").argv(), ["-N", "-p", "-f", "F"])
+class CommandLine(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.file = os.path.join(self.tmp.name, "ssh-lists.toml")
+        with open(self.file, "w") as f:
+            f.write('hosts = ["a", "b"]\n')
+        p = mock.patch.object(hosts, "self_names", return_value=SELF)
+        p.start()
+        self.addCleanup(p.stop)
 
-    def test_take_host_opt(self):
-        opts = hosts.HostOpts()
-        argv = ["-N", "-f", "F", "--pick", "x"]
-        self.assertEqual(hosts.take_host_opt(argv, 0, opts, "t"), 1)
-        self.assertEqual(hosts.take_host_opt(argv, 1, opts, "t"), 3)
-        self.assertEqual(hosts.take_host_opt(argv, 3, opts, "t"), 4)
-        self.assertEqual(hosts.take_host_opt(argv, 4, opts, "t"), 4)
-        self.assertEqual(opts, hosts.HostOpts(True, True, "F"))
-        with self.assertRaises(hosts.UsageError):
-            hosts.take_host_opt(["-f"], 0, hosts.HostOpts(), "t")
+    def test_short_flags_combine(self):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(hosts.main(["-Nf", self.file]), 0)
+        self.assertEqual(out.getvalue(), "a\nb\n")
+
+    def test_help_is_the_docstring_then_the_options(self):
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(hosts.main(["-h"]), 0)
+        text = out.getvalue()
+        self.assertTrue(text.startswith("ssh-hosts -- print the host list"))
+        self.assertIn("\n    ssh-hosts [-h] [-N|--no-local]", text)
+        self.assertIn("\nOptions:\n", text)
+        self.assertIn("-N, --no-local", text)
+
+    def test_bad_option_is_a_usage_error(self):
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(hosts.main(["-x"]), 2)
+        self.assertIn("No such option '-x'", err.getvalue())
+        self.assertIn("ssh-hosts --help", err.getvalue())
 
 
 if __name__ == "__main__":

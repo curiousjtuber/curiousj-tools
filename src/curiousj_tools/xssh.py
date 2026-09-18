@@ -28,6 +28,8 @@ import shutil
 import subprocess
 import sys
 
+import click
+
 from . import hosts, pick
 from .lists import HostInfo
 
@@ -37,20 +39,6 @@ from .lists import HostInfo
 # `{}{}`. exec so it is a fresh shell at ~ like the remote ones, not the
 # shell xpanes typed the command into.
 LOCAL_PANE = "cd ~; exec $SHELL"
-
-
-def split_args(argv: list[str]) -> tuple[hosts.HostOpts, list[str]]:
-    """Host flags anywhere in argv go to ssh-hosts; the rest go to xpanes."""
-    opts = hosts.HostOpts()
-    passthrough = []
-    i = 0
-    while i < len(argv):
-        j = hosts.take_host_opt(argv, i, opts, "xssh")
-        if j == i:
-            passthrough.append(argv[i])
-            j = i + 1
-        i = j
-    return opts, passthrough
 
 
 def pane_command(entry: HostInfo) -> str:
@@ -82,31 +70,29 @@ def pane_commands(entries: list[HostInfo], ampersand: bool = False) -> list[str]
     return [for_xpanes(pane_command(e), ampersand) for e in entries]
 
 
-def main(argv: list[str] | None = None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-    if "-h" in argv or "--help" in argv:
-        print(__doc__.rstrip())
-        return 0
+@click.command(cls=hosts.Command, help=__doc__,
+               context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+@hosts.host_options
+@click.argument("xpanes_args", nargs=-1, type=click.UNPROCESSED)
+def cli(opts: hosts.HostOpts, xpanes_args: tuple[str, ...]) -> int:
+    """Host flags anywhere in argv are ours; the rest go to xpanes in order."""
     try:
-        opts, xpanes_args = split_args(argv)
         if not shutil.which("xpanes"):
             raise hosts.HostsError("xpanes not installed (https://github.com/greymd/tmux-xpanes)")
         entries = hosts.hosts(opts)
-    except hosts.UsageError as e:
-        print(f"xssh: {e}", file=sys.stderr)
-        return hosts.EXIT_USAGE
+        hosts.confirm_new_hosts([e.host for e in entries], "xssh")
     except hosts.HostsError as e:
         print(f"xssh: {e}", file=sys.stderr)
         return hosts.EXIT_ERROR
     except pick.Abort:
         return pick.EXIT_ABORT
-    try:
-        hosts.confirm_new_hosts([e.host for e in entries], "xssh")
-    except hosts.HostsError as e:
-        print(f"xssh: {e}", file=sys.stderr)
-        return hosts.EXIT_ERROR
     ampersand = any(e.commands for e in entries) and xpanes_expands_ampersand()
     os.execvp("xpanes", ["xpanes", *xpanes_args, "-e", *pane_commands(entries, ampersand)])
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    return hosts.run(cli, argv, "xssh")
 
 
 if __name__ == "__main__":

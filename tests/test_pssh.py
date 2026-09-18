@@ -9,35 +9,50 @@ from curiousj_tools import hosts, pick, pssh
 from curiousj_tools.lists import HostInfo, PathInfo
 
 
-class SplitArgs(unittest.TestCase):
+def dry(argv, entries=("h1",), path_list=()):
+    """pssh -n with the lists mocked: (exit status, stdout, stderr, the HostOpts asked for)."""
+    with mock.patch.object(hosts, "hosts", return_value=[HostInfo(e) for e in entries]) as h, \
+            mock.patch.object(pssh, "paths_list", return_value=list(path_list)), \
+            mock.patch("sys.stdout", new_callable=io.StringIO) as out, \
+            mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+        rc = pssh.main(argv)
+    opts = h.call_args[0][0] if h.called else None
+    return rc, out.getvalue(), err.getvalue(), opts
+
+
+class Arguments(unittest.TestCase):
     def test_leading_flags_then_command(self):
-        opts, words = pssh.split_args(["-N", "-f", "F", "-i", "-n", "uptime", "-p"])
-        self.assertEqual(opts.hosts, hosts.HostOpts(no_local=True, file="F"))
-        self.assertTrue(opts.interactive)
-        self.assertTrue(opts.dry_run)
-        self.assertFalse(opts.paths)
-        self.assertEqual(words, ["uptime", "-p"])
+        rc, out, _, opts = dry(["-N", "-f", "F", "-i", "-n", "uptime", "-p"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(opts, hosts.HostOpts(no_local=True, file="F"))
+        self.assertTrue(out.startswith("zsh -ic 'cd ~\nuptime -p'\n"), out)
+
+    def test_short_flags_combine(self):
+        rc, out, _, opts = dry(["-nNi", "uptime"])
+        self.assertEqual((rc, opts), (0, hosts.HostOpts(no_local=True)))
+        self.assertTrue(out.startswith("zsh -ic "), out)
 
     def test_path_flags_imply_paths(self):
-        opts, words = pssh.split_args(["-C", "x"])
-        self.assertEqual((opts.paths, opts.pick_paths), (True, True))
-        opts, words = pssh.split_args(["--paths", "x"])
-        self.assertTrue(opts.paths)
-        opts, words = pssh.split_args(["-c", "x"])
-        self.assertEqual((opts.paths, opts.clone), (True, True))
-        opts, words = pssh.split_args(["--pick-paths", "-f", "F", "x"])
-        self.assertEqual((opts.paths, opts.pick_paths, opts.hosts.file), (True, True, "F"))
+        for flags in (["-P"], ["--paths"], ["-c"], ["-C"], ["--pick-paths"], ["-cC"]):
+            rc, out, _, _ = dry(["-n", *flags, "x"], path_list=[PathInfo("a", "u")])
+            self.assertEqual(rc, 0)
+            self.assertIn("\nrun a" + (" u\n" if flags[0] in ("-c", "-cC") else "\n"), out, flags)
+        _, out, _, _ = dry(["-n", "x"], path_list=[PathInfo("a")])
+        self.assertNotIn("run a", out)
 
     def test_double_dash_starts_the_command(self):
-        opts, words = pssh.split_args(["-p", "--", "-x", "y"])
-        self.assertTrue(opts.hosts.pick)
-        self.assertEqual(words, ["-x", "y"])
+        rc, out, _, opts = dry(["-n", "-p", "--", "-x", "y"])
+        self.assertEqual((rc, opts.pick), (0, True))
+        self.assertIn("\n-x y\n", out)
 
-    def test_bad_flags(self):
-        with self.assertRaises(hosts.UsageError):
-            pssh.split_args(["-x", "uptime"])
-        with self.assertRaises(hosts.UsageError):
-            pssh.split_args(["-r", "R", "x"])
+    def test_bad_flags_and_no_command(self):
+        rc, _, err, opts = dry(["-x", "uptime"])
+        self.assertEqual((rc, opts), (2, None))
+        self.assertIn("No such option '-x'", err)
+        rc, _, err, _ = dry(["-N"])
+        self.assertEqual(rc, 2)
+        self.assertIn("Missing argument", err)
+        self.assertIn("pssh --help", err)
 
 
 class CommandLine(unittest.TestCase):
@@ -141,23 +156,23 @@ class Paths(unittest.TestCase):
             f.write(text)
 
     def test_reads_and_picks(self):
-        self.assertEqual(pssh.paths(self.file, False),
+        self.assertEqual(pssh.paths_list(self.file, False),
                          [D("a", "git@example.com:me/a.git", "main"), D("b")])
         with mock.patch.object(pick, "pick", return_value=["b"]) as p:
-            self.assertEqual(pssh.paths(self.file, True), [D("b")])
+            self.assertEqual(pssh.paths_list(self.file, True), [D("b")])
         p.assert_called_once_with(["a", "b"], "paths")
 
     def test_found_on_the_search_path(self):
         env = {"HOME": "/nonexistent", "SSH_LISTS_PATH": self.tmp.name}
-        self.assertEqual(len(pssh.paths(None, False, env)), 2)
+        self.assertEqual(len(pssh.paths_list(None, False, env)), 2)
 
     def test_empty_and_missing(self):
         self.write("hosts = ['h1']\n")
         with self.assertRaises(hosts.HostsError) as cm:
-            pssh.paths(self.file, False)
+            pssh.paths_list(self.file, False)
         self.assertIn("no paths in", str(cm.exception))
         with self.assertRaises(hosts.HostsError):
-            pssh.paths(None, False, env={"HOME": self.tmp.name})
+            pssh.paths_list(None, False, env={"HOME": self.tmp.name})
 
 
 class ParallelArgv(unittest.TestCase):
@@ -221,13 +236,6 @@ class Main(unittest.TestCase):
                 mock.patch("shutil.which", return_value="/usr/bin/parallel"):
             self.assertEqual(pssh.main(["-C", "-f", self.file, "uptime"]), 130)
         h.assert_not_called()
-
-    def test_usage_errors(self):
-        with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
-            self.assertEqual(pssh.main(["-N"]), 2)
-            self.assertEqual(pssh.main(["-x", "uptime"]), 2)
-        self.assertIn("usage:", err.getvalue())
-        self.assertIn("unknown option -x", err.getvalue())
 
     def test_missing_parallel_and_file(self):
         with mock.patch("shutil.which", return_value=None), \

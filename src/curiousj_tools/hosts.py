@@ -21,7 +21,7 @@ Without -f the first readable of these is used:
 
 from __future__ import annotations
 
-import argparse
+import functools
 import getpass
 import os
 import shutil
@@ -30,8 +30,10 @@ import subprocess
 import sys
 from dataclasses import dataclass
 
+import click
+
 from . import lists, pick
-from .lists import HostInfo, HostsError, UsageError  # noqa: F401  (re-exported)
+from .lists import HostInfo, HostsError  # noqa: F401  (re-exported)
 
 EXIT_ERROR = 1
 EXIT_USAGE = 2
@@ -39,38 +41,53 @@ EXIT_USAGE = 2
 
 @dataclass
 class HostOpts:
-    """The host-selection flags xssh, pssh and pull-all share with ssh-hosts."""
+    """The host-selection flags xssh and pssh share with ssh-hosts."""
 
     no_local: bool = False
     pick: bool = False
     file: str | None = None
 
-    def argv(self) -> list[str]:
-        out = []
-        if self.no_local:
-            out.append("-N")
-        if self.pick:
-            out.append("-p")
-        if self.file:
-            out += ["-f", self.file]
-        return out
+
+def host_options(f):
+    """The -N, -p and -f every host tool takes; the callback gets them as one
+    HostOpts named opts."""
+    @click.option("-f", "file", metavar="FILE", help="the ssh-lists file to read")
+    @click.option("-p", "--pick", is_flag=True, help="choose hosts interactively")
+    @click.option("-N", "--no-local", is_flag=True, help="leave localhost out")
+    @functools.wraps(f)
+    def wrapper(no_local, pick, file, **kw):
+        return f(HostOpts(no_local, pick, file), **kw)
+    return wrapper
 
 
-def take_host_opt(argv: list[str], i: int, opts: HostOpts, prog: str) -> int:
-    """Consume argv[i] into opts if it is a host flag; return the new index, or i."""
-    arg = argv[i]
-    if arg in ("-N", "--no-local"):
-        opts.no_local = True
-        return i + 1
-    if arg in ("-p", "--pick"):
-        opts.pick = True
-        return i + 1
-    if arg == "-f":
-        if i + 1 >= len(argv):
-            raise UsageError("-f needs a file")
-        opts.file = argv[i + 1]
-        return i + 2
-    return i
+class Command(click.Command):
+    """A command whose help is its module docstring as written -- the usage
+    lines and file excerpts there are laid out by hand -- with the option
+    summary after it. -h works like --help."""
+
+    context_settings = {"help_option_names": ["-h", "--help"]}
+
+    def __init__(self, *args, **kw):
+        settings = dict(self.context_settings, **(kw.pop("context_settings", None) or {}))
+        super().__init__(*args, context_settings=settings, **kw)
+
+    def format_help(self, ctx, formatter):
+        formatter.write((self.help or "").rstrip() + "\n")
+        self.format_options(ctx, formatter)
+
+
+def run(command: click.Command, argv: list[str] | None, prog: str) -> int:
+    """command as a main(): its return value as the exit status, a usage
+    error printed and 2, --help printed and 0."""
+    try:
+        rv = command.main(args=argv, prog_name=prog, standalone_mode=False)
+    except click.UsageError as e:
+        e.show()
+        return EXIT_USAGE
+    except click.ClickException as e:
+        e.show()
+        return e.exit_code
+    return rv if isinstance(rv, int) else 0
 
 
 def self_names() -> set[str]:
@@ -169,15 +186,11 @@ def hosts(opts: HostOpts, env=None) -> list[HostInfo]:
     return entries
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="ssh-hosts", description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("-N", "--no-local", action="store_true", help="leave localhost out")
-    parser.add_argument("-p", "--pick", action="store_true", help="choose entries interactively")
-    parser.add_argument("-f", metavar="FILE", dest="file", help="the ssh-lists file to read")
-    args = parser.parse_args(argv)
+@click.command(cls=Command, help=__doc__)
+@host_options
+def cli(opts: HostOpts) -> int:
     try:
-        entries = hosts(HostOpts(args.no_local, args.pick, args.file))
+        entries = hosts(opts)
     except HostsError as e:
         print(f"ssh-hosts: {e}", file=sys.stderr)
         return EXIT_ERROR
@@ -185,6 +198,10 @@ def main(argv: list[str] | None = None) -> int:
         return pick.EXIT_ABORT
     print("\n".join(e.host for e in entries))
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    return run(cli, argv, "ssh-hosts")
 
 
 if __name__ == "__main__":

@@ -7,11 +7,15 @@ from curiousj_tools import hosts, pick, xssh
 from curiousj_tools.lists import HostInfo
 
 
-class SplitArgs(unittest.TestCase):
+class Arguments(unittest.TestCase):
     def test_host_flags_anywhere_rest_passes_through_in_order(self):
-        opts, rest = xssh.split_args(["--stay", "-N", "-l", "ev", "-f", "F", "-p", "-s"])
-        self.assertEqual(opts, hosts.HostOpts(True, True, "F"))
-        self.assertEqual(rest, ["--stay", "-l", "ev", "-s"])
+        with mock.patch.object(hosts, "hosts", return_value=[HostInfo("a")]) as h, \
+                mock.patch("shutil.which", return_value="/usr/bin/xpanes"), \
+                mock.patch("os.execvp") as ex, \
+                mock.patch.object(hosts, "confirm_new_hosts"):
+            xssh.main(["--stay", "-N", "-l", "ev", "-f", "F", "-p", "-s"])
+        h.assert_called_once_with(hosts.HostOpts(True, True, "F"))
+        self.assertEqual(ex.call_args[0][1], ["xpanes", "--stay", "-l", "ev", "-s", "-e", "ssh a"])
 
 
 class PaneCommands(unittest.TestCase):
