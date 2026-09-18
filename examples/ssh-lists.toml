@@ -1,0 +1,23 @@
+# The hosts xssh, pssh and ssh-hosts reach, and the paths `pssh -P` works in.
+# Lives at ~/.config/ssh-lists.toml, or on $SSH_LISTS_PATH (see README);
+# the same file can be YAML (ssh-lists.yaml) or JSON (ssh-lists.json).
+
+hosts = [
+    "alice@devbox",                      # [user@]host, as ssh takes it
+    "build.example.com",
+    # a table where a host needs more: commands run after login in the pane
+    # xssh opens; end in something interactive, or the pane ends
+    { host = "my-mac.local", commands = ["cd src", "exec zsh"] },
+]
+
+[[paths]]
+path = "dotfiles"                        # relative to ~ unless absolute
+git_url = "git@github.com:me/dotfiles.git"   # optional: `pssh -c` clones it when missing
+
+[[paths]]
+path = "src/webapp"
+git_url = "git@github.com:me/webapp.git"
+git_branch = "main"                      # optional: -b for the clone
+
+[[paths]]
+path = "/opt/tools/mytool"               # no git_url: never cloned, skipped where absent

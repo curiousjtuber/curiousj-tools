@@ -6,7 +6,9 @@ readme = "README.md"
 license = "MIT"
 authors = [{ name = "CuriousJ", email = "curious.j.tuber@gmail.com" }]
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "ruamel-yaml>=0.18",
+]
 classifiers = [
     "Environment :: Console",
     "Operating System :: POSIX",

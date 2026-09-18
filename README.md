@@ -111,68 +111,95 @@ never route remote), `EMACSCLIENT_FORWARD_SOCKET` (default `/tmp/emacs-remote-so
 ## Hosts and batch runs
 
 ```
-ssh-hosts [-N] [-p] [-f HOSTFILE]
-xssh      [-N] [-p] [-f HOSTFILE] [xpanes-options...]
-pssh      [-n] [-N] [-p] [-f HOSTFILE] [-i] [-d] [-c] [-r DIRFILE] [-D] [--] COMMAND [ARG...]
+ssh-hosts [-N] [-p] [-f FILE]
+xssh      [-N] [-p] [-f FILE] [xpanes-options...]
+pssh      [-n] [-N] [-p] [-f FILE] [-i] [-P] [-c] [-C] [--] COMMAND [ARG...]
 ```
 
-The host list is `~/.config/ssh-hosts` (or `-f`, see below): one `[user@]host` per line,
-blank lines and `#` comments ignored. `localhost` is appended for the local side unless
-`-N`, and entries naming the machine you are on are dropped, so one list serves every host on
-it. `-p` picks hosts in fzf (TAB marks several) or a numbered menu.
+All three read one lists file, `~/.config/ssh-lists.toml` (or `.yaml`, `.yml`, `.json`; see
+[where it lives](#where-the-lists-file-lives)): the `hosts` to reach and the `paths` to work
+in. A host is a `[user@]host` string, or a table when it needs `commands` run after login
+(`distrobox enter dev`, `cd src`, `exec zsh`): `xssh` runs them in that host's pane, so end
+them in something interactive, or the pane ends with them. A path is relative to `~` unless
+absolute, with an optional `git_url` and `git_branch` for `pssh -c` to clone it from.
+
+```toml
+hosts = [
+    "alice@devbox",
+    { host = "build.example.com", commands = ["distrobox enter dev"] },
+]
+
+[[paths]]
+path = "src/webapp"
+git_url = "git@github.com:me/webapp.git"
+git_branch = "main"
+```
+
+The same in YAML, where strings and mappings mix freely:
+
+```yaml
+hosts:
+  - alice@devbox
+  - host: build.example.com
+    commands: [distrobox enter dev]
+paths:
+  - path: src/webapp
+    git_url: git@github.com:me/webapp.git
+    git_branch: main
+```
+
+See [examples/ssh-lists.toml](examples/ssh-lists.toml) and
+[examples/ssh-lists.yaml](examples/ssh-lists.yaml). `localhost` is appended to the hosts for
+the local side unless `-N`, and entries naming the machine you are on are dropped, so one file
+serves every host on it. `-p` picks hosts in fzf (TAB marks several) or a numbered menu.
 
 ```sh
 xssh --stay                          # a synced pane per host; type once, runs everywhere
 pssh uptime                          # tagged output, all hosts at once, exit = hosts that failed
 pssh 'cd ~/src/webapp && git status' # one word is a shell line; several words are one argv
 pssh -i 'alias'                      # through `zsh -ic`, so aliases and functions exist
-pssh -d git status -s                # in every listed directory, on every host
-pssh -D 'git pull --rebase --autostash'   # ...choosing the directories first
-pssh -d -c 'git pull --rebase --autostash' # ...cloning any checkout a host lacks first
-pssh -n -d make                      # show the per-host script and the hosts, run nothing
+pssh -P git status -s                # in every listed path, on every host
+pssh -C 'git pull --rebase --autostash'   # ...choosing the paths first
+pssh -P -c 'git pull --rebase --autostash' # ...cloning any checkout a host lacks first
+pssh -n -P make                      # show the per-host script and the hosts, run nothing
 ```
 
-`-d` reads `~/.config/ssh-dirs.toml` (or `-r`), a list of `[[dir]]` tables:
-
-```toml
-[[dir]]
-path = "src/webapp"                     # relative to ~ unless absolute
-url = "git@github.com:me/webapp.git"    # optional: where `-c` clones it from
-branch = "main"                         # optional: -b for that clone
-```
-
-A directory a host does not have is skipped, unless `-c` is given and the entry has a `url`,
+A path a host does not have is skipped, unless `-c` is given and the entry has a `git_url`,
 in which case it is cloned first and the command runs in the fresh clone. One where the command
-fails marks that host failed. See [examples/ssh-dirs.toml](examples/ssh-dirs.toml). A shell
-alias makes a routine of it, and gives a new machine its checkouts on the first run:
+fails marks that host failed. A shell alias makes a routine of it, and gives a new machine its
+checkouts on the first run:
 
 ```sh
-alias pull-all="pssh -d -c 'git pull --rebase --autostash'"
+alias pull-all="pssh -P -c 'git pull --rebase --autostash'"
 ```
 
 `pssh` runs the command in a non-interactive shell: no aliases, no shell functions, no `cd`
-carrying over between calls. `xssh` gives each host a login shell, so all of those work there.
+carrying over between calls, and no host `commands` either. `xssh` gives each host a login
+shell, so all of those work there.
 
 Both contact a host whose key is not in `known_hosts` yet once beforehand, in the foreground, so
 ssh's yes/no question is asked where it can be answered: inside a synchronized xpanes window the
 answer would reach every pane, and under parallel the prompt stops the background ssh for good.
 
-### Where the lists live
+### Where the lists file lives
 
-Both lists are looked up the same way, first readable wins:
+First readable wins:
 
-| | hosts | directories |
-|---|---|---|
-| on the command line | `-f FILE` | `-r FILE` |
-| one file | `$SSH_HOSTS` | `$SSH_DIRS` |
-| one directory holding both | `$SSH_LISTS_DIR/ssh-hosts` | `$SSH_LISTS_DIR/ssh-dirs.toml` |
-| default | `~/.config/ssh-hosts` | `~/.config/ssh-dirs.toml` |
+| | |
+|---|---|
+| on the command line | `-f FILE` |
+| one file, wherever it is | `$SSH_LISTS_FILE` |
+| a search path | `$SSH_LISTS_PATH`, colon-separated directories, each tried for `ssh-lists.toml`, `.yaml`, `.yml`, `.json` in that order |
+| default | `~/.config` (`$XDG_CONFIG_HOME`), the same four names |
 
-The directory form is for keeping the lists in a private repo checked out on every host:
+The search path is for keeping the file in a private repo checked out on every host:
 
 ```sh
-export SSH_LISTS_DIR=~/src/my-lists     # contains ssh-hosts and ssh-dirs.toml
+export SSH_LISTS_PATH=~/src/my-lists     # holds ssh-lists.yaml
 ```
+
+The extension names the format. YAML is read with ruamel.yaml, TOML and JSON with the standard
+library.
 
 ## Development
 

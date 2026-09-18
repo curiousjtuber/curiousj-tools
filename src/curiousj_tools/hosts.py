@@ -1,8 +1,8 @@
 """ssh-hosts -- print the host list xssh and pssh work from, optionally picking a subset.
 
-    ssh-hosts [-h] [-N|--no-local] [-p|--pick] [-f HOSTFILE]
+    ssh-hosts [-h] [-N|--no-local] [-p|--pick] [-f FILE]
 
-One entry per line: every [user@]host in the host file, then `localhost`
+One entry per line: every [user@]host in the lists file, then `localhost`
 last, which consumers turn into whatever "this machine" means for them
 (xssh: a local pane, pssh: a local run); -N/--no-local leaves it out.
 Entries that name this machine are dropped, so one list can serve every
@@ -10,12 +10,13 @@ host on it. -p/--pick shows the list in fzf (TAB marks several) and prints
 only the marked entries; without fzf, a numbered menu (see `pick-lines -h`).
 Aborting the picker exits 130 with nothing printed.
 
-The host file is one [user@]host per line; blank lines and #-comments are
-ignored. Without -f the first readable of these is used:
+The hosts are the `hosts` list of the ssh-lists file, TOML, YAML or JSON
+(see the README, or the curiousj_tools.lists docstring, for the shape).
+Without -f the first readable of these is used:
 
-    $SSH_HOSTS                      explicit override
-    $SSH_LISTS_DIR/ssh-hosts   a directory of lists, e.g. a private repo
-    ~/.config/ssh-hosts             ($XDG_CONFIG_HOME/ssh-hosts)
+    $SSH_LISTS_FILE                 one file, wherever it is
+    DIR/ssh-lists.toml|yaml|yml|json    for each DIR in $SSH_LISTS_PATH
+                                    (colon-separated), default ~/.config
 """
 
 from __future__ import annotations
@@ -29,18 +30,11 @@ import subprocess
 import sys
 from dataclasses import dataclass
 
-from . import pick
+from . import lists, pick
+from .lists import HostInfo, HostsError, UsageError  # noqa: F401  (re-exported)
 
 EXIT_ERROR = 1
 EXIT_USAGE = 2
-
-
-class HostsError(Exception):
-    """A user-facing failure: the message is printed and the tool exits 1."""
-
-
-class UsageError(HostsError):
-    """A bad command line: the message is printed and the tool exits 2."""
 
 
 @dataclass
@@ -79,38 +73,6 @@ def take_host_opt(argv: list[str], i: int, opts: HostOpts, prog: str) -> int:
     return i
 
 
-LISTS_DIR_VAR = "SSH_LISTS_DIR"
-
-
-def find_config(explicit: str | None, var: str, name: str, env=None) -> str:
-    """The first readable of: explicit, $var, $SSH_LISTS_DIR/name,
-    $XDG_CONFIG_HOME/name. The directory variable is the one to set when
-    the lists are kept together, say in a private repo checked out on
-    every host."""
-    env = os.environ if env is None else env
-    if explicit:
-        if not os.access(explicit, os.R_OK):
-            raise HostsError(f"cannot read {explicit}")
-        return explicit
-    home = env.get("HOME") or os.path.expanduser("~")
-    config_home = env.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
-    lists_dir = env.get(LISTS_DIR_VAR)
-    candidates = [env.get(var),
-                  os.path.join(lists_dir, name) if lists_dir else None,
-                  os.path.join(config_home, name)]
-    for path in candidates:
-        if path and os.access(path, os.R_OK):
-            return path
-    raise HostsError(f"no {name} list: set {var} or {LISTS_DIR_VAR}, or create ~/.config/{name}")
-
-
-def read_list(path: str) -> list[str]:
-    """Non-blank, non-comment lines, stripped."""
-    with open(path) as f:
-        lines = [line.strip() for line in f]
-    return [line for line in lines if line and not line.startswith("#")]
-
-
 def self_names() -> set[str]:
     """Lowercased names this machine answers to: hostname, its first label,
     the loopback names and, on macOS, the Bonjour name (`my-mac.local` for a
@@ -128,14 +90,14 @@ def self_names() -> set[str]:
     return names
 
 
-def drop_self(entries: list[str], names: set[str], user: str) -> list[str]:
+def drop_self(entries: list[HostInfo], names: set[str], user: str) -> list[HostInfo]:
     """Entries minus those naming this machine: the list is shared between
     hosts, so each one's own name is in it, and `localhost` already stands
     for it. An entry for another user on this machine is kept: that is a
     different login, not this one."""
     kept = []
     for entry in entries:
-        entry_user, _, host = entry.rpartition("@")
+        entry_user, _, host = entry.host.rpartition("@")
         host = host.lower()
         mine = host in names or host.split(".", 1)[0] in names
         if mine and (not entry_user or entry_user == user):
@@ -192,17 +154,18 @@ def confirm_new_hosts(entries: list[str], prog: str) -> None:
             raise HostsError(f"{entry}: host key not confirmed (answer yes, or drop it from the list)")
 
 
-def hosts(opts: HostOpts, env=None) -> list[str]:
+def hosts(opts: HostOpts, env=None) -> list[HostInfo]:
     """The resolved, filtered, optionally picked list. Raises HostsError or
     pick.Abort."""
-    path = find_config(opts.file, "SSH_HOSTS", "ssh-hosts", env)
-    entries = drop_self(read_list(path), self_names(), getpass.getuser())
+    path = lists.find_file(opts.file, env)
+    entries = drop_self(lists.load(path).hosts, self_names(), getpass.getuser())
     if not entries and opts.no_local:
         raise HostsError(f"no hosts in {path} (entries naming this machine are dropped)")
     if not opts.no_local:
-        entries.append("localhost")
+        entries.append(HostInfo("localhost"))
     if opts.pick:
-        entries = pick.pick(entries, "hosts")
+        chosen = set(pick.pick([e.host for e in entries], "hosts"))
+        entries = [e for e in entries if e.host in chosen]
     return entries
 
 
@@ -211,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("-N", "--no-local", action="store_true", help="leave localhost out")
     parser.add_argument("-p", "--pick", action="store_true", help="choose entries interactively")
-    parser.add_argument("-f", metavar="HOSTFILE", dest="file", help="host list to use")
+    parser.add_argument("-f", metavar="FILE", dest="file", help="the ssh-lists file to read")
     args = parser.parse_args(argv)
     try:
         entries = hosts(HostOpts(args.no_local, args.pick, args.file))
@@ -220,7 +183,7 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_ERROR
     except pick.Abort:
         return pick.EXIT_ABORT
-    print("\n".join(entries))
+    print("\n".join(e.host for e in entries))
     return 0
 
 

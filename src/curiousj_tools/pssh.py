@@ -1,7 +1,7 @@
 """pssh -- run one command on every listed host at once, output tagged by host.
 
-    pssh [-h] [-n] [-N|--no-local] [-p|--pick] [-f HOSTFILE] [-i]
-         [-d|--dirs] [-c|--clone] [-r DIRFILE] [-D|--pick-dirs] [--] COMMAND [ARG...]
+    pssh [-h] [-n] [-N|--no-local] [-p|--pick] [-f FILE] [-i]
+         [-P|--paths] [-c|--clone] [-C|--pick-paths] [--] COMMAND [ARG...]
 
 The batch counterpart of xssh: the same host list and -N, -p, -f (see
 `ssh-hosts -h`), but the command runs non-interactively on each host through
@@ -13,29 +13,27 @@ A single COMMAND word is a shell command line, run as is:
 `pssh 'cd ~/src && git pull'`. Several words are one command's arguments,
 quoted for you, so `pssh ls 'my dir'` lists that one directory.
 
--d/--dirs runs the command once per listed directory on each host, from
-inside it, and reports each directory before its output; a directory a host
-does not have is reported and skipped, and one where the command fails
-marks that host failed. The list is a TOML file of [[dir]] tables:
+-P/--paths runs the command once per listed path on each host, from inside
+it, and reports each path before its output; a path a host does not have
+is reported and skipped, and one where the command fails marks that host
+failed. The paths are the `paths` list of the same ssh-lists file the hosts
+come from (TOML, YAML or JSON; -f names it, see `ssh-hosts -h`):
 
-    [[dir]]
+    [[paths]]
     path = "src/webapp"                     # relative to ~ unless absolute
-    url = "git@github.com:me/webapp.git"    # optional: what to clone it from
-    branch = "main"                         # optional: -b for the clone
+    git_url = "git@github.com:me/webapp.git"    # optional: what to clone it from
+    git_branch = "main"                     # optional: -b for the clone
 
--c/--clone clones a missing directory from its url before running the
-command there (one without a url is still skipped), so a fresh host gets
-its checkouts on the first run. -r names the file, otherwise the first
-readable of:
+-c/--clone clones a missing path from its git_url before running the
+command there (one without a git_url is still skipped), so a fresh host
+gets its checkouts on the first run. -C/--pick-paths chooses paths the way
+-p chooses hosts (fzf, else a numbered menu; see `pick-lines -h`), paths
+first when both are given. So `pssh -P git status -s` shows every checkout
+on every host, and `pssh -P -c 'git pull --rebase --autostash'` brings them
+all up to date.
 
-    $SSH_DIRS                       explicit override
-    $SSH_LISTS_DIR/ssh-dirs.toml    a directory of lists, e.g. a private repo
-    ~/.config/ssh-dirs.toml         ($XDG_CONFIG_HOME/ssh-dirs.toml)
-
--D/--pick-dirs chooses directories the way -p chooses hosts (fzf, else a
-numbered menu; see `pick-lines -h`), directories first when both are given.
-So `pssh -d git status -s` shows every checkout on every host, and
-`pssh -d -c 'git pull --rebase --autostash'` brings them all up to date.
+A host's `commands` in the lists file are for the login shells xssh opens;
+pssh runs its command as given, on every host alike.
 
 A host whose key is not in known_hosts yet is contacted once beforehand,
 in the foreground, so ssh's yes/no question can be answered; parallel
@@ -58,14 +56,13 @@ import os
 import shlex
 import shutil
 import sys
-import tomllib
 from dataclasses import dataclass
 
-from . import hosts, pick
+from . import hosts, lists, pick
+from .lists import PathInfo
 
-USAGE = ("usage: pssh [-n] [-N] [-p] [-f HOSTFILE] [-i] [-d] [-c] [-r DIRFILE] [-D] "
+USAGE = ("usage: pssh [-n] [-N] [-p] [-f FILE] [-i] [-P] [-c] [-C] "
          "[--] COMMAND [ARG...]")
-DIRS_NAME = "ssh-dirs.toml"
 
 
 @dataclass
@@ -73,17 +70,9 @@ class Opts:
     hosts: hosts.HostOpts
     interactive: bool = False
     dry_run: bool = False
-    dirs: bool = False
+    paths: bool = False
     clone: bool = False
-    dirfile: str | None = None
-    pick_dirs: bool = False
-
-
-@dataclass
-class Dir:
-    path: str
-    url: str | None = None
-    branch: str | None = None
+    pick_paths: bool = False
 
 
 def split_args(argv: list[str]) -> tuple[Opts, list[str]]:
@@ -100,20 +89,14 @@ def split_args(argv: list[str]) -> tuple[Opts, list[str]]:
             opts.interactive = True
         elif arg in ("-n", "--dry-run"):
             opts.dry_run = True
-        elif arg in ("-d", "--dirs"):
-            opts.dirs = True
+        elif arg in ("-P", "--paths"):
+            opts.paths = True
         elif arg in ("-c", "--clone"):
-            opts.dirs = True
+            opts.paths = True
             opts.clone = True
-        elif arg in ("-D", "--pick-dirs"):
-            opts.dirs = True
-            opts.pick_dirs = True
-        elif arg == "-r":
-            if i + 1 >= len(argv):
-                raise hosts.UsageError("-r needs a file")
-            opts.dirs = True
-            opts.dirfile = argv[i + 1]
-            i += 1
+        elif arg in ("-C", "--pick-paths"):
+            opts.paths = True
+            opts.pick_paths = True
         elif arg == "--":
             i += 1
             break
@@ -130,50 +113,30 @@ def command_line(words: list[str]) -> str:
     return words[0] if len(words) == 1 else shlex.join(words)
 
 
-def read_dirs(path: str) -> list[Dir]:
-    """The [[dir]] tables of a TOML list file. Raises HostsError on a
-    malformed file, naming the entry."""
-    try:
-        with open(path, "rb") as f:
-            data = tomllib.load(f)
-    except tomllib.TOMLDecodeError as e:
-        raise hosts.HostsError(f"{path}: {e}") from None
-    tables = data.get("dir", [])
-    if not isinstance(tables, list):
-        raise hosts.HostsError(f"{path}: 'dir' must be [[dir]] tables")
-    found = []
-    for n, t in enumerate(tables, 1):
-        if not isinstance(t, dict) or not isinstance(t.get("path"), str) or not t["path"]:
-            raise hosts.HostsError(f"{path}: [[dir]] entry {n} needs a path")
-        for key in ("url", "branch"):
-            if key in t and not isinstance(t[key], str):
-                raise hosts.HostsError(f"{path}: [[dir]] {t['path']}: {key} must be a string")
-        found.append(Dir(t["path"], t.get("url"), t.get("branch")))
-    return found
-
-
-def dirs(path_opt: str | None, pick_dirs: bool, env=None) -> list[Dir]:
-    path = hosts.find_config(path_opt, "SSH_DIRS", DIRS_NAME, env)
-    found = read_dirs(path)
+def paths(file: str | None, pick_paths: bool, env=None) -> list[PathInfo]:
+    """The paths list of the lists file, optionally picked from. Raises
+    HostsError when the file has none, or pick.Abort."""
+    path = lists.find_file(file, env)
+    found = lists.load(path).paths
     if not found:
-        raise hosts.HostsError(f"no [[dir]] entries in {path}")
-    if pick_dirs:
-        chosen = set(pick.pick([d.path for d in found], "dirs"))
-        found = [d for d in found if d.path in chosen]
+        raise hosts.HostsError(f"no paths in {path}")
+    if pick_paths:
+        chosen = set(pick.pick([p.path for p in found], "paths"))
+        found = [p for p in found if p.path in chosen]
     return found
 
 
-def dirs_script(dir_list: list[Dir], cmd: str, clone: bool = False) -> str:
-    """cmd in each directory in turn, cloning missing ones first when asked.
+def paths_script(path_list: list[PathInfo], cmd: str, clone: bool = False) -> str:
+    """cmd in each path in turn, cloning missing ones first when asked.
     POSIX sh on purpose: parallel runs it through whichever shell the host
     has."""
     calls = []
-    for d in dir_list:
-        words = [d.path]
-        if clone and d.url:
-            words.append(d.url)
-            if d.branch:
-                words.append(d.branch)
+    for p in path_list:
+        words = [p.path]
+        if clone and p.git_url:
+            words.append(p.git_url)
+            if p.git_branch:
+                words.append(p.git_branch)
         calls.append("run " + " ".join(shlex.quote(w) for w in words))
     return f"""rc=0
 run() {{ # run DIR [URL [BRANCH]]
@@ -223,10 +186,10 @@ def main(argv: list[str] | None = None) -> int:
             raise hosts.HostsError(
                 "GNU parallel not installed (brew install parallel / pacman -S parallel)")
         cmd = command_line(words)
-        if opts.dirs:
-            cmd = dirs_script(dirs(opts.dirfile, opts.pick_dirs), cmd, opts.clone)
+        if opts.paths:
+            cmd = paths_script(paths(opts.hosts.file, opts.pick_paths), cmd, opts.clone)
         cmd = shell_command(cmd, opts.interactive)
-        entries = hosts.hosts(opts.hosts)
+        entries = [e.host for e in hosts.hosts(opts.hosts)]
     except hosts.UsageError as e:
         print(f"pssh: {e}", file=sys.stderr)
         return hosts.EXIT_USAGE

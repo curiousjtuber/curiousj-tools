@@ -1,0 +1,13 @@
+# The same lists as ssh-lists.toml, in YAML: ~/.config/ssh-lists.yaml (or .yml).
+hosts:
+  - alice@devbox                         # [user@]host, as ssh takes it
+  - build.example.com
+  - host: my-mac.local                   # a mapping where a host needs more
+    commands: [cd src, exec zsh]         # run after login in the pane xssh opens
+paths:
+  - path: dotfiles                       # relative to ~ unless absolute
+    git_url: git@github.com:me/dotfiles.git   # optional: `pssh -c` clones it when missing
+  - path: src/webapp
+    git_url: git@github.com:me/webapp.git
+    git_branch: main                     # optional: -b for the clone
+  - /opt/tools/mytool                    # no git_url: never cloned, skipped where absent
