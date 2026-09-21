@@ -118,7 +118,18 @@ class ConfigDirMixin:
         patcher = mock.patch.object(sshtsf.getpass, "getuser", return_value="me")
         patcher.start()
         self.addCleanup(patcher.stop)
+        # No ssh-lists file unless a test writes one: the real one would
+        # otherwise be offered when a host is registered.
+        patcher = mock.patch.dict(os.environ, {"SSH_LISTS_FILE": "/nonexistent/ssh-lists.toml"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.cfg_path = cfg_path
+
+    def write_lists(self, text: str) -> None:
+        path = os.path.join(self.tmp.name, "ssh-lists.toml")
+        with open(path, "w") as fh:
+            fh.write(text)
+        os.environ["SSH_LISTS_FILE"] = path
 
 
 class TestHelp(unittest.TestCase):
@@ -253,7 +264,44 @@ class TestAddHost(ConfigDirMixin, unittest.TestCase):
             rc, _, err = run_capture(["nowhere", "--dry-run"])
         self.assertEqual(rc, 1)
         self.assertIn("in ~/.ssh/known_hosts:\n          other\n", err)
+        self.assertNotIn("ssh-lists", err)
         self.assertIn("`sshtsf -c nowhere` registers it", err)
+
+    def test_unknown_host_hint_shows_the_lists_logins_first(self):
+        self.write_lists('logins = ["alice@newbox", "devbox", "other"]\n')
+        with mock.patch.object(sshtsf, "ssh_known_hosts", return_value=["devbox", "other"]):
+            rc, _, err = run_capture(["nowhere", "--dry-run"])
+        self.assertEqual(rc, 1)
+        # A login is offered as is; a machine the lists name is not repeated
+        # from known_hosts, and one an entry dials is in neither list.
+        self.assertIn("in ssh-lists:\n          alice@newbox, other\n", err)
+        self.assertNotIn("known_hosts", err)
+
+    def test_lists_logins_are_offered_first_and_are_the_destination(self):
+        self.write_lists('logins = ["alice@newbox", { login = "build.example.com",'
+                         ' commands = ["cd src"] }, "alice@newbox"]\n')
+        # No "user on it": the login names one. No "name" typed: the default
+        # is the login's machine part.
+        answers = {"name for this [user@]host": "", "ssh destination": "", "alias": "",
+                   "forward the local Emacs socket": "", "forward Wayland": ""}
+        with mock.patch.object(sshtsf, "ssh_known_hosts",
+                               return_value=["newbox", "other"]), \
+             mock.patch.object(sshtsf, "pick", return_value="alice@newbox") as pick, \
+             mock.patch.object(sshtsf, "ask", side_effect=scripted(answers)), \
+             mock.patch.object(sshtsf, "route_add_session", return_value=0):
+            rc = sshtsf.route_add_host(sshtsf.load_config())
+        self.assertEqual(rc, 0)
+        self.assertEqual(pick.call_args.args[0],
+                         ["alice@newbox", "build.example.com", "other"])
+        self.assertEqual(sshtsf.load_config()["hosts"]["newbox"],
+                         {"target": "alice@newbox"})
+
+    def test_a_listed_login_an_entry_dials_is_noted(self):
+        self.write_lists('logins = ["me@devbox", "c"]\n')
+        with mock.patch.object(sshtsf, "ssh_known_hosts", return_value=[]):
+            got = sshtsf.host_candidates(sshtsf.load_config())
+        self.assertEqual(got, [("me@devbox", "registered as devbox", "ssh-lists"),
+                               ("c", "registered as devbox", "ssh-lists")])
 
     def add_host(self, answers, typed=""):
         with mock.patch.object(sshtsf, "ask", side_effect=scripted(answers)), \

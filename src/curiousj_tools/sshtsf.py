@@ -28,8 +28,9 @@ Selections use fzf when it is on PATH and fall back to a numbered menu. A
 host or session that does not exist yet is registered through the same
 prompts -c edits it with: each field shows its current value, blank keeps
 it and `-` clears it, or, at the name prompt, removes the entry. Hosts to
-add are offered from ~/.ssh/known_hosts; a name typed is fine too. The
-same list is shown when a name does not resolve.
+add are offered from the ssh-lists file xssh and pssh read (see
+`ssh-logins -h`), then from ~/.ssh/known_hosts; a name typed is fine too.
+The same two lists are shown when a name does not resolve.
 
 With ecf on, the connection also reverse-forwards the local Emacs server
 socket, so emacsclient / $EDITOR / magit on the remote open in the local
@@ -106,7 +107,7 @@ from typing import NamedTuple
 import click
 import tomllib
 
-from . import logins
+from . import lists, logins
 
 CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
 CONFIG_DIR = os.path.join(CONFIG_HOME, "sshtsf")
@@ -526,9 +527,9 @@ def host_hint(cfg: dict, ssh_hosts: bool = False) -> str:
     reader off to `sshtsf -l`. Indented to sit under the `sshtsf: ' prefix
     of the line it follows.
 
-    ssh_hosts adds the unregistered known_hosts entries. Right where the
-    answer might be "add one of those", wrong for -l/-L, whose subject can
-    only ever be a host registered here.
+    ssh_hosts adds the unregistered machines, from the ssh-lists file and
+    then known_hosts. Right where the answer might be "add one of those",
+    wrong for -l/-L, whose subject can only ever be a host registered here.
     """
     hosts = host_names(cfg)
     if hosts:
@@ -540,7 +541,7 @@ def host_hint(cfg: dict, ssh_hosts: bool = False) -> str:
     if ssh_hosts:
         # Only the fresh ones: the registered ones are in the list above.
         fresh = [(host, where) for host, note, where in host_candidates(cfg) if not note]
-        for where in ("~/.ssh/known_hosts",):
+        for where in ("ssh-lists", "~/.ssh/known_hosts"):
             candidates = [host for host, src in fresh if src == where]
             if not candidates:
                 continue
@@ -1161,11 +1162,35 @@ def set_field(holder: dict, field: str, value) -> None:
         holder[field] = value
 
 
+def lists_logins() -> list[str]:
+    """The logins of the ssh-lists file, in its order and once each; none
+    without a file. The other tools' list of machines, which is the first
+    place to look for one to register here."""
+    try:
+        entries = lists.load(lists.find_file(None)).logins
+    except lists.ToolError:
+        return []
+    return list(dict.fromkeys(entry.login for entry in entries))
+
+
 def host_candidates(cfg: dict) -> list[tuple[str, str, str]]:
-    """(destination, note, source) to offer for a new host: the known_hosts
-    machines, the fresh ones first (see ssh_host_candidates). source says
-    which file it came from, for a hint that groups by it."""
-    return [(host, note, "~/.ssh/known_hosts") for host, note in ssh_host_candidates(cfg)]
+    """(destination, note, source) to offer for a new host: the ssh-lists
+    logins, then the known_hosts machines the lists do not name, the fresh
+    ones first. A login is `[user@]host', exactly what a target holds, so
+    it is offered as is; one an entry already dials is noted with the
+    entry's name, as the known_hosts ones are (see ssh_host_candidates).
+    source says which file it came from, for a hint that groups by it."""
+    dialed = dialed_names(cfg)
+    listed = lists_logins()
+    out = []
+    for login in listed:
+        names = {login, login.rpartition("@")[2]}
+        hosts = sorted({host for name in names for host in dialed.get(name, [])})
+        out.append((login, "registered as %s" % ", ".join(hosts) if hosts else "",
+                    "ssh-lists"))
+    machines = {login.rpartition("@")[2] for login in listed}
+    return out + [(host, note, "~/.ssh/known_hosts")
+                  for host, note in ssh_host_candidates(cfg) if host not in machines]
 
 
 def pick_host_candidate(cfg: dict) -> str:
@@ -1176,7 +1201,7 @@ def pick_host_candidate(cfg: dict) -> str:
     if not labels:
         return ""
     choice = pick(list(labels), "host>",
-                  "hosts in ~/.ssh/known_hosts (or type a name)",
+                  "logins in ssh-lists, then ~/.ssh/known_hosts (or type a name)",
                   free_text=True) or ""
     return labels.get(choice, choice)
 
@@ -1209,11 +1234,10 @@ def edit_host(cfg: dict, name: str = "", existing: dict | None = None) -> str | 
         if target == CLEAR:
             target = ""
     else:
-        # Nothing typed yet: offer what you have already ssh'd to, so
-        # registering a host is a selection rather than a retype. free_text
-        # keeps a name that is not in known_hosts -- a machine you have not
-        # reached yet -- and aborting the picker just falls through to the
-        # prompt below.
+        # Nothing typed yet: offer what the other tools reach and what ssh
+        # has reached, so registering a host is a selection rather than a
+        # retype. free_text keeps a name that is in neither, and aborting the
+        # picker just falls through to the prompt below.
         if not name:
             name = pick_host_candidate(cfg)
         # What was picked or typed is a destination; the name may well be

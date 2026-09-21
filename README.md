@@ -70,10 +70,12 @@ Everything is remembered in `~/.config/sshtsf/config.toml`; see
 each field shows its current value, blank keeps it, `-` clears it, or at the name prompt
 removes the entry. A host or session named on the command line that is not registered yet
 goes through the same prompts, whether from `-c` or from a plain `sshtsf devbox api`. A new
-host is offered from `~/.ssh/known_hosts`. A host's `target` is the ssh destination,
-`[user@]host`, and is what every connection and probe dials; there is no separate user field.
-The user is asked for when the destination names none, and a blank leaves it to ssh
-(`~/.ssh/config`, or your own name). Two users on one machine are two host entries.
+host is offered from the `logins` of the [ssh-lists file](#hosts-and-batch-runs) first, then
+from `~/.ssh/known_hosts`. A host's `target` is the ssh destination, `[user@]host`, and is what
+every connection and probe dials; there is no separate user field. A login picked from the
+lists is the target as is; otherwise the user is asked for when the destination names none,
+and a blank leaves it to ssh (`~/.ssh/config`, or your own name). Two users on one machine are
+two host entries.
 
 `sshtsf -w` wraps the connection in `waypipe ssh`, and a terminal such as Konsole then sees
 `waypipe`, not the ssh it would otherwise title the tab after. So a waypipe session names the
