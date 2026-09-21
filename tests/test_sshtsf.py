@@ -827,6 +827,14 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
             rc, out, _ = run_capture(["-L", "build"])
         self.assertEqual(rc, 0)
         self.assertEqual(live.call_args.args, ("build.internal",))
+
+    def test_live_rows_are_worded_and_matched_by_name(self):
+        rows = ["web\t1\tattached", "scratch\t3\tdetached"]
+        with mock.patch.object(sshtsf, "live_sessions", return_value=(rows, "")):
+            rc, out, _ = run_capture(["-L", "devbox"])
+        self.assertEqual(rc, 0)
+        self.assertIn("    web  1 window, attached\n", out)
+        self.assertIn("    scratch  3 windows, detached   [unregistered]\n", out)
         rc, _, err = run_capture(["-L", "nowhere"])
         self.assertEqual(rc, 1)
         self.assertIn("unknown host: nowhere", err)
@@ -852,15 +860,16 @@ class TestRemoteSh(unittest.TestCase):
                              'PATH="/opt/tmux/bin:$PATH"; tmux -V')
 
     def test_live_sessions_probe_uses_it(self):
-        proc = mock.Mock(returncode=0, stdout="web\t2w\tdetached\n", stderr="")
+        proc = mock.Mock(returncode=0, stdout="web\t2\tdetached\n", stderr="")
         with mock.patch.object(sshtsf.subprocess, "run", return_value=proc) as run:
             sessions, why = sshtsf.live_sessions("devbox")
-        self.assertEqual((sessions, why), (["web\t2w\tdetached"], ""))
+        self.assertEqual((sessions, why), (["web\t2\tdetached"], ""))
         argv = run.call_args.args[0]
         self.assertEqual(argv[:4], ["ssh", "devbox", "sh", "-c"])
         # Quoted once for the remote login shell; sh then sees the script.
+        # -u, or a locale-less tmux turns the tabs into underscores.
         script = shlex.split(argv[4])[0]
-        self.assertTrue(script.startswith(REMOTE_PATH_LINE + "tmux list-sessions -F "))
+        self.assertTrue(script.startswith(REMOTE_PATH_LINE + "tmux -u list-sessions -F "))
 
     def test_remote_tmux_probe_uses_it(self):
         proc = mock.Mock(returncode=0, stdout="/opt/homebrew/bin/tmux\ntmux 3.5a\n")

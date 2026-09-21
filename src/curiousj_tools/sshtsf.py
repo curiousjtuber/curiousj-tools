@@ -689,11 +689,15 @@ def live_sessions(target: str) -> tuple[list[str], str]:
     PATH problem behind the same line as a host with no server, so the reason is
     carried out instead: tmux's own words when it said any, and otherwise the
     binary an ssh command actually resolved, since that mismatch IS the failure.
+
+    Tab-separated, and `-u' for the same reason connect passes it: the ssh
+    command's shell sets no locale, so tmux takes the client for non-UTF-8
+    and sanitizes what it prints for one, the tabs to underscores included.
     """
-    fmt = "#{session_name}\t#{session_windows}w\t#{?session_attached,attached,detached}"
+    fmt = "#{session_name}\t#{session_windows}\t#{?session_attached,attached,detached}"
     proc = subprocess.run(
         ["ssh", target] + [shlex.quote(word) for word in
-                           remote_sh("tmux list-sessions -F %s" % shlex.quote(fmt))],
+                           remote_sh("tmux -u list-sessions -F %s" % shlex.quote(fmt))],
         text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if proc.returncode == 0:
         return [line for line in proc.stdout.splitlines() if line.strip()], ""
@@ -1562,9 +1566,10 @@ def cmd_live(cfg: dict, token: str | None = None) -> int:
             continue
         known = cfg["hosts"][host].get("sessions", {}) or {}
         for row in rows:
-            name = row.split("\t")[0]
+            name, windows, state = (row.split("\t") + ["", ""])[:3]
             mark = "" if name in known else "   [unregistered]"
-            print("    %s%s" % (row.replace("\t", "  "), mark))
+            print("    %s  %s window%s, %s%s"
+                  % (name, windows, "" if windows == "1" else "s", state, mark))
     return 0
 
 
