@@ -54,21 +54,26 @@ sshtsf                  pick a host, then a session
 sshtsf devbox           pick a session on devbox
 sshtsf devbox web       connect to session web on devbox
 sshtsf devweb           the same, via a host+session alias
-sshtsf devbox -n [NAME] register a new session, then connect
+sshtsf -n devbox [NAME] register a new session, then connect
 sshtsf -e devbox web    ...forwarding the local Emacs server socket (ecf)
 sshtsf -w devbox web    ...forwarding Wayland, for GUI applications
-sshtsf remote devbox    git remote add, for the current repo's twin on devbox
-sshtsf set devbox ecf true
-sshtsf edit             open the config in $VISUAL / $EDITOR
+sshtsf -l [HOST]        show the registered hosts and sessions
+sshtsf -L [HOST]        show the live tmux sessions on the remote(s)
+sshtsf -c [HOST [SESSION]]  add, edit or remove a host or session, interactively
+sshtsf --edit           open the config in $VISUAL / $EDITOR
 sshtsf --dry-run devbox web
 ```
 
 Everything is remembered in `~/.config/sshtsf/config.toml`; see
 [examples/sshtsf-config.toml](examples/sshtsf-config.toml) and `sshtsf -h` for the fields.
-A host's `target` is the ssh destination, `[user@]host`, and is what every connection, probe
-and `sshtsf remote` URL dials; there is no separate user field. `sshtsf add` asks for the user
-when the destination names none, and a blank leaves it to ssh (`~/.ssh/config`, or your own
-name). Two users on one machine are two host entries.
+`sshtsf -c` walks through them: pick a host, then its settings or one of its sessions, and
+each field shows its current value, blank keeps it, `-` clears it, or at the name prompt
+removes the entry. A host or session named on the command line that is not registered yet
+goes through the same prompts, whether from `-c` or from a plain `sshtsf devbox api`. A new
+host is offered from `~/.ssh/known_hosts`. A host's `target` is the ssh destination,
+`[user@]host`, and is what every connection and probe dials; there is no separate user field.
+The user is asked for when the destination names none, and a blank leaves it to ssh
+(`~/.ssh/config`, or your own name). Two users on one machine are two host entries.
 
 `sshtsf -w` wraps the connection in `waypipe ssh`, and a terminal such as Konsole then sees
 `waypipe`, not the ssh it would otherwise title the tab after. So a waypipe session names the

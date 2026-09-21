@@ -1,5 +1,5 @@
 # Example sshtsf config. Lives at ~/.config/sshtsf/config.toml
-# ($XDG_CONFIG_HOME/sshtsf/config.toml); `sshtsf config-path` prints the path.
+# ($XDG_CONFIG_HOME/sshtsf/config.toml); `sshtsf --edit --dry-run` prints the path.
 # sshtsf rewrites the file, so comments outside its header are not preserved.
 
 default_host = "devbox"

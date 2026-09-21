@@ -126,13 +126,29 @@ class TestHelp(unittest.TestCase):
         rc, out, _ = run_capture(["--help"])
         self.assertEqual(rc, 0)
         self.assertIn("devbox", out)
-        self.assertIn("sshtsf remote devbox", out)
+        self.assertIn("sshtsf -c devbox web", out)
         self.assertIn("forwarding the local Emacs socket", out)
 
     def test_contradictory_flags_are_rejected(self):
         rc, _, err = run_capture(["-e", "-E", "devbox"])
         self.assertEqual(rc, 2)
         self.assertIn("contradictory", err)
+
+    def test_one_action_at_a_time(self):
+        rc, _, err = run_capture(["-l", "-L"])
+        self.assertEqual(rc, 2)
+        self.assertIn("one of -l, -L at a time", err)
+
+    def test_word_counts(self):
+        rc, _, err = run_capture(["-n"])
+        self.assertEqual(rc, 2)
+        self.assertIn("-n needs a host", err)
+        rc, _, err = run_capture(["-l", "devbox", "web"])
+        self.assertEqual(rc, 2)
+        self.assertIn("at most 1 word", err)
+        rc, _, err = run_capture(["a", "b", "c"])
+        self.assertEqual(rc, 2)
+        self.assertIn("at most 2 word", err)
 
 
 class TestConfigRoundTrip(ConfigDirMixin, unittest.TestCase):
@@ -175,11 +191,6 @@ class TestConfigRoundTrip(ConfigDirMixin, unittest.TestCase):
         with self.assertRaises(SystemExit) as ctx:
             sshtsf.load_config()
         self.assertIn("not valid TOML", str(ctx.exception))
-
-    def test_config_path_subcommand(self):
-        rc, out, _ = run_capture(["config-path"])
-        self.assertEqual(rc, 0)
-        self.assertEqual(out.strip(), self.cfg_path)
 
 
 def scripted(answers: dict[str, str]):
@@ -242,6 +253,7 @@ class TestAddHost(ConfigDirMixin, unittest.TestCase):
             rc, _, err = run_capture(["nowhere", "--dry-run"])
         self.assertEqual(rc, 1)
         self.assertIn("in ~/.ssh/known_hosts:\n          other\n", err)
+        self.assertIn("`sshtsf -c nowhere` registers it", err)
 
     def add_host(self, answers, typed=""):
         with mock.patch.object(sshtsf, "ask", side_effect=scripted(answers)), \
@@ -264,8 +276,9 @@ class TestAddHost(ConfigDirMixin, unittest.TestCase):
     def test_asks_the_host_defaults_before_the_first_session(self):
         hcfg = self.add_host({"name for this [user@]host": "mac", "ssh destination": "me@mac.local",
                               "alias": "m", "forward the local Emacs socket": "y",
-                              "forward Wayland": ""})
-        self.assertEqual(hcfg, {"target": "me@mac.local", "alias": "m", "ecf": True})
+                              "relay it": "41234", "forward Wayland": ""})
+        self.assertEqual(hcfg, {"target": "me@mac.local", "alias": "m", "ecf": True,
+                                "ecf_port": 41234})
 
     def test_a_no_leaves_the_fields_out(self):
         hcfg = self.add_host({"name for this [user@]host": "mac", "ssh destination": "",
@@ -352,22 +365,22 @@ class TestEdit(ConfigDirMixin, unittest.TestCase):
 
     def test_visual_wins_and_is_split_like_a_shell(self):
         with mock.patch.dict(os.environ, {"VISUAL": "emacsclient -t", "EDITOR": "nano"}):
-            rc, out, _ = run_capture(["edit", "--dry-run"])
+            rc, out, _ = run_capture(["--edit", "--dry-run"])
         self.assertEqual(rc, 0)
         self.assertEqual(out.strip(), "emacsclient -t " + self.cfg_path)
 
     def test_editor_then_vi(self):
         with mock.patch.dict(os.environ, {"VISUAL": "", "EDITOR": "nano"}):
-            _, out, _ = run_capture(["edit", "--dry-run"])
+            _, out, _ = run_capture(["--edit", "--dry-run"])
         self.assertEqual(out.strip(), "nano " + self.cfg_path)
         with mock.patch.dict(os.environ, {"VISUAL": "", "EDITOR": ""}):
-            _, out, _ = run_capture(["edit", "--dry-run"])
+            _, out, _ = run_capture(["--edit", "--dry-run"])
         self.assertEqual(out.strip(), "vi " + self.cfg_path)
 
     def test_missing_config_is_created_first(self):
         os.remove(self.cfg_path)
         with mock.patch.dict(os.environ, {"VISUAL": "ed"}):
-            rc, _, _ = run_capture(["edit", "--dry-run"])
+            rc, _, _ = run_capture(["--edit", "--dry-run"])
         self.assertEqual(rc, 0)
         self.assertTrue(os.path.exists(self.cfg_path))
         self.assertEqual(sshtsf.load_config(), {"hosts": {}})
@@ -380,7 +393,7 @@ class TestEdit(ConfigDirMixin, unittest.TestCase):
 
         with mock.patch.dict(os.environ, {"VISUAL": "ed"}), \
              mock.patch.object(sshtsf.subprocess, "run", side_effect=scribble) as run:
-            rc, _, err = run_capture(["edit"])
+            rc, _, err = run_capture(["--edit"])
         self.assertEqual(rc, 1)
         self.assertEqual(run.call_args.args[0], ["ed", self.cfg_path])
         self.assertIn("not valid TOML", err)
@@ -389,15 +402,15 @@ class TestEdit(ConfigDirMixin, unittest.TestCase):
         with mock.patch.dict(os.environ, {"VISUAL": "ed"}), \
              mock.patch.object(sshtsf.subprocess, "run",
                                return_value=mock.Mock(returncode=3)):
-            rc, _, err = run_capture(["edit"])
+            rc, _, err = run_capture(["--edit"])
         self.assertEqual(rc, 3)
         self.assertIn("ed exited 3", err)
 
     def test_works_on_a_config_that_will_not_parse(self):
         with open(self.cfg_path, "w") as fh:
             fh.write("[hosts.devbox\n")
-        # Every other verb stops at the parse error; edit is the way past it.
-        rc, _, err = run_capture(["list"])
+        # Every other action stops at the parse error; --edit is the way past it.
+        rc, _, err = run_capture(["-l"])
         self.assertEqual(rc, 1)
         self.assertIn("not valid TOML", err)
 
@@ -407,11 +420,11 @@ class TestEdit(ConfigDirMixin, unittest.TestCase):
 
         with mock.patch.dict(os.environ, {"VISUAL": "ed"}), \
              mock.patch.object(sshtsf.subprocess, "run", side_effect=repair):
-            rc, _, err = run_capture(["edit"])
+            rc, _, err = run_capture(["--edit"])
         self.assertEqual(rc, 0)
         # Told why the editor opened, before it did.
         self.assertIn("not valid TOML", err)
-        self.assertEqual(run_capture(["list"])[0], 0)
+        self.assertEqual(run_capture(["-l"])[0], 0)
 
 
 class TestResolution(unittest.TestCase):
@@ -745,18 +758,39 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
 
     def test_live_header_shows_the_target(self):
         with mock.patch.object(sshtsf, "live_sessions", return_value=([], "")):
-            rc, out, _ = run_capture(["live"])
+            rc, out, _ = run_capture(["-L"])
         self.assertEqual(rc, 0)
         self.assertIn("build  (-> build.internal):\n", out)
         self.assertIn("devbox:\n", out)
 
     def test_list_marks_last_used(self):
-        rc, out, _ = run_capture(["list"])
+        rc, out, _ = run_capture(["-l"])
         self.assertEqual(rc, 0)
         self.assertIn("devbox  (alias c, default)", out)
         self.assertIn("web  (devweb)  ~/src/webapp  -> make dev *", out)
         self.assertIn("api  ~/src/api  +ecf", out)
         self.assertIn("build  (-> build.internal)\n    (no sessions)", out)
+
+    def test_list_and_live_take_a_host(self):
+        rc, out, _ = run_capture(["-l", "c"])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("build", out)
+        with mock.patch.object(sshtsf, "live_sessions", return_value=([], "")) as live:
+            rc, out, _ = run_capture(["-L", "build"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(live.call_args.args, ("build.internal",))
+        rc, _, err = run_capture(["-L", "nowhere"])
+        self.assertEqual(rc, 1)
+        self.assertIn("unknown host: nowhere", err)
+
+    def test_new_session_flag_proposes_the_second_word(self):
+        with mock.patch.object(sshtsf, "route_add_session", return_value=0) as add:
+            rc, _, _ = run_capture(["-n", "c", "api2", "--dry-run"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(add.call_args.args[:3], (mock.ANY, "devbox", "api2"))
+        rc, _, err = run_capture(["-n", "nowhere"])
+        self.assertEqual(rc, 1)
+        self.assertIn("`sshtsf -c nowhere` registers it", err)
 
 
 class TestRemoteSh(unittest.TestCase):
@@ -825,56 +859,122 @@ class TestWaypipeRemoteProbe(unittest.TestCase):
         self.assertEqual(argv[-1], "test -x /opt/wp/bin/waypipe")
 
 
-class TestSubcommands(ConfigDirMixin, unittest.TestCase):
+class TestConfigure(ConfigDirMixin, unittest.TestCase):
+    """-c: the same prompt walk as registering, over an entry that exists."""
+
     def setUp(self):
         super().setUp()
         sshtsf.save_config(SAMPLE)
 
-    def test_set_and_clear_fields(self):
-        rc, out, _ = run_capture(["set", "devbox", "web", "command", "npm start"])
-        self.assertEqual(rc, 0)
-        self.assertEqual(sshtsf.load_config()["hosts"]["devbox"]["sessions"]["web"]["command"],
-                         "npm start")
-        rc, _, _ = run_capture(["set", "devbox", "ecf", "yes"])
-        self.assertEqual(rc, 0)
-        self.assertIs(sshtsf.load_config()["hosts"]["devbox"]["ecf"], True)
-        rc, _, err = run_capture(["set", "devbox", "ecf", "maybe"])
-        self.assertEqual(rc, 1)
-        self.assertIn("takes", err)
-        rc, _, _ = run_capture(["set", "devbox", "web", "command", ""])
-        self.assertEqual(rc, 0)
-        self.assertNotIn("command",
-                         sshtsf.load_config()["hosts"]["devbox"]["sessions"]["web"])
+    def configure(self, argv, answers, picked=None, folder="src/webapp"):
+        with mock.patch.object(sshtsf, "ask", side_effect=scripted(answers)), \
+             mock.patch.object(sshtsf, "pick", return_value=picked), \
+             mock.patch.object(sshtsf, "prompt_folder", return_value=folder), \
+             mock.patch.object(sshtsf, "connect") as connect:
+            rc, out, err = run_capture(["-c"] + argv)
+        connect.assert_not_called()
+        return rc, err, sshtsf.load_config()
 
-    def test_rm_session_and_host(self):
-        rc, _, _ = run_capture(["rm", "devbox", "web"])
+    def test_blank_keeps_and_dash_clears(self):
+        rc, _, cfg = self.configure(["devbox", "web"], {
+            "session name": "", "command to run": "-",
+            "forward the local Emacs socket": "", "forward Wayland": "", "alias for": ""})
         self.assertEqual(rc, 0)
-        cfg = sshtsf.load_config()
+        self.assertEqual(cfg["hosts"]["devbox"]["sessions"]["web"],
+                         {"alias": "devweb", "folder": "src/webapp"})
+
+    def test_session_flags_are_set_and_unset(self):
+        rc, _, cfg = self.configure(["devbox", "api"], {
+            "session name": "", "command to run": "",
+            "forward the local Emacs socket": "-", "forward Wayland": "yes", "alias for": ""},
+            folder="src/api")
+        self.assertEqual(rc, 0)
+        self.assertEqual(cfg["hosts"]["devbox"]["sessions"]["api"],
+                         {"folder": "src/api", "waypipe": True})
+
+    def test_rename_session_moves_last(self):
+        rc, _, cfg = self.configure(["devbox", "devweb"], {
+            "session name": "www", "command to run": "",
+            "forward the local Emacs socket": "", "forward Wayland": "", "alias for": "-"})
+        self.assertEqual(rc, 0)
+        sessions = cfg["hosts"]["devbox"]["sessions"]
+        self.assertNotIn("web", sessions)
+        self.assertEqual(sessions["www"], {"folder": "src/webapp", "command": "make dev"})
+        self.assertEqual(cfg["last"], {"host": "devbox", "session": "www"})
+
+    def test_remove_session_after_a_yes(self):
+        rc, _, cfg = self.configure(["devbox", "web"], {"session name": "-", "remove": "n"})
+        self.assertEqual(rc, 0)
+        self.assertIn("web", cfg["hosts"]["devbox"]["sessions"])
+        rc, _, cfg = self.configure(["devbox", "web"], {"session name": "-", "remove": "y"})
+        self.assertEqual(rc, 0)
         self.assertNotIn("web", cfg["hosts"]["devbox"]["sessions"])
         self.assertNotIn("last", cfg)  # last pointed at the removed session
-        rc, _, err = run_capture(["rm", "devbox"])
-        self.assertEqual(rc, 1)
-        self.assertIn("still has", err)
-        # The flag trails: argparse takes no option between two positionals here.
-        rc, _, _ = run_capture(["rm", "devbox", "-f"])
+
+    def test_host_settings_default_and_port(self):
+        rc, _, cfg = self.configure(["build"], {
+            "name": "", "ssh destination": "", "alias": "b",
+            "forward the local Emacs socket": "y", "relay it": "-",
+            "forward Wayland": "", "offer this host first": "y"},
+            picked=sshtsf.HOST_SETTINGS)
         self.assertEqual(rc, 0)
-        cfg = sshtsf.load_config()
+        self.assertEqual(cfg["hosts"]["build"],
+                         {"target": "build.internal", "alias": "b", "ecf": True})
+        self.assertEqual(cfg["default_host"], "build")
+
+    def test_rename_host_follows_default_and_last(self):
+        rc, _, cfg = self.configure(["devbox"], {
+            "name": "dev", "ssh destination": "", "alias": "",
+            "forward the local Emacs socket": "", "forward Wayland": "",
+            "offer this host first": ""},
+            picked=sshtsf.HOST_SETTINGS)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("devbox", cfg["hosts"])
+        # The destination was the old name, so it is now stated.
+        self.assertEqual(cfg["hosts"]["dev"]["target"], "devbox")
+        self.assertEqual(cfg["hosts"]["dev"]["alias"], "c")
+        self.assertIs(cfg["hosts"]["dev"]["ecf"], False)
+        self.assertEqual(cfg["default_host"], "dev")
+        self.assertEqual(cfg["last"]["host"], "dev")
+
+    def test_remove_host_with_sessions_asks(self):
+        rc, _, cfg = self.configure(["c"], {"name": "-", "remove devbox and its 3": "n"},
+                                    picked=sshtsf.HOST_SETTINGS)
+        self.assertEqual(rc, 0)
+        self.assertIn("devbox", cfg["hosts"])
+        rc, _, cfg = self.configure(["c"], {"name": "-", "remove devbox and its 3": "y"},
+                                    picked=sshtsf.HOST_SETTINGS)
+        self.assertEqual(rc, 0)
         self.assertNotIn("devbox", cfg["hosts"])
         self.assertNotIn("default_host", cfg)
+        self.assertNotIn("last", cfg)
 
-    def test_default(self):
-        rc, _, _ = run_capture(["default", "build"])
+    def test_unknown_names_register_without_connecting(self):
+        rc, err, cfg = self.configure(["newbox"], {
+            "name for this [user@]host": "", "ssh destination": "", "user on it": "",
+            "alias": "", "forward the local Emacs socket": "", "forward Wayland": ""})
         self.assertEqual(rc, 0)
-        self.assertEqual(sshtsf.load_config()["default_host"], "build")
+        self.assertIn("new host newbox", err)
+        self.assertEqual(cfg["hosts"]["newbox"], {})
+        rc, err, cfg = self.configure(["devbox", "api2"], {
+            "session name": "", "command to run": "", "forward the local Emacs socket": "",
+            "forward Wayland": "", "alias for": ""}, folder="")
+        self.assertEqual(rc, 0)
+        self.assertIn("new session on devbox", err)
+        self.assertEqual(cfg["hosts"]["devbox"]["sessions"]["api2"], {"alias": "api2"})
 
-    def test_remote_dry_run_uses_mirrored_path(self):
-        with mock.patch.object(sshtsf, "home_relative_repo",
-                               return_value=("src/mytool", "/home/me/src/mytool")), \
-             mock.patch.object(sshtsf, "git_remote_url", return_value=None), \
-             mock.patch.object(sshtsf, "valid_remote_name", return_value=True):
-            rc, out, _ = run_capture(["remote", "c", "--dry-run"])
-        self.assertEqual(rc, 0)
-        self.assertEqual(out.strip(), "git remote add c devbox:src/mytool")
+    def test_picker_lists_settings_sessions_and_new(self):
+        with mock.patch.object(sshtsf, "pick", return_value=None) as pick:
+            rc, _, _ = run_capture(["-c", "devbox"])
+        self.assertEqual(rc, 130)
+        items = pick.call_args.args[0]
+        self.assertEqual(items[0], sshtsf.HOST_SETTINGS)
+        self.assertEqual(items[-1], sshtsf.NEW_SESSION)
+        self.assertEqual(len(items), 5)
+        with mock.patch.object(sshtsf, "pick", return_value=None) as pick:
+            rc, _, _ = run_capture(["-c"])
+        self.assertEqual(rc, 130)
+        self.assertEqual(pick.call_args.args[0][-1], sshtsf.NEW_HOST)
 
 
 if __name__ == "__main__":
