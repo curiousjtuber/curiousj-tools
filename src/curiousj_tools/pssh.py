@@ -1,9 +1,11 @@
-"""pssh -- run one command on every listed login at once, output tagged by login.
+"""pssh -- run one command, or the lists' operations, on every listed login at once, output tagged by login.
 
-    pssh [-h] [-n] [-N|--no-local] [-p|--pick] [-f FILE] [-i]
-         [-P|--paths] [-c|--clone] [-C|--pick-paths] [--] COMMAND [ARG...]
+    pssh [-h] [-n] [-s] [-N|--no-local] [-a TERM]... [-p|--pick] [-f FILE]... [-i]
+         [-P|--paths] [-A TERM]... [-c|--clone] [-C|--pick-paths] [--] COMMAND [ARG...]
+    pssh [same flags] -o NAME...
+    pssh [-f FILE]... -L|--list-ops
 
-The batch counterpart of xssh: the same login list and -N, -p, -f (see
+The batch counterpart of xssh: the same login list and -N, -a, -p, -f (see
 `ssh-logins -h`), but the command runs non-interactively on each login through
 GNU parallel, all at once, every output line prefixed with its login;
 `localhost` runs it here. The exit status is the number of logins on which
@@ -16,21 +18,63 @@ quoted for you, so `pssh ls 'my dir'` lists that one directory.
 -P/--paths runs the command once per listed path on each login, from inside
 it, and reports each path before its output; a path a host does not have
 is reported and skipped, and one where the command fails marks that login
-failed. The paths are the `paths` list of the same ssh-lists file the logins
-come from (TOML, YAML or JSON; -f names it, see `ssh-logins -h`):
+failed. The paths are the `paths` list of the same ssh-lists files the logins
+come from (TOML, YAML or JSON; -f names them, see `ssh-logins -h`):
 
     [[paths]]
     path = "src/webapp"                     # relative to ~ unless absolute
     git_url = "git@github.com:me/webapp.git"    # optional: what to clone it from
     git_branch = "main"                     # optional: -b for the clone
+    attributes = ["git", "py-project"]      # optional: what -A and operations select on
 
 -c/--clone clones a missing path from its git_url before running the
 command there (one without a git_url is still skipped), so a fresh host
 gets its checkouts on the first run. -C/--pick-paths chooses paths the way
 -p chooses logins (fzf, else a numbered menu; see `pick-lines -h`), paths
-first when both are given. So `pssh -P git status -s` shows every checkout
-on every login, and `pssh -P -c 'git pull --rebase --autostash'` brings them
-all up to date.
+first when both are given; -A/--path-attr TERM keeps the paths whose
+attributes satisfy TERM, as -a does for logins. So `pssh -P git status -s`
+shows every checkout on every login, and `pssh -A git -c 'git pull'` brings
+the git ones up to date.
+
+-o/--op NAME runs an operation of the lists files instead of a COMMAND, one
+that says itself what it runs and where:
+
+    [operations.git-pull]
+    command = "git pull --rebase --autostash"
+    paths = "git"                           # per path, in the paths matching (true: all)
+    clone = true                            # as -c
+
+    [operations.mise-update]
+    command = "mise self-update -y && mise upgrade"
+    logins = "mise"                         # per login, on the logins matching (absent: all)
+
+    [operations.cachy-update]
+    command = "cachy-update"
+    logins = "cachyos"
+    serial = true                           # asks questions: as -s
+
+    [operations.system-update]
+    operations = ["cachy-update", "brew-upgrade"]     # a group: each login runs what it matches
+
+A condition is a term (`mise`, `arch=x86_64`, `!mise`, `arch!=x86_64`), a
+list of terms that all hold, or a table with `all`, `any`, `none`. A login
+or path can carry its own command for an operation, `operations = {
+git-pull = "git pull --ff-only" }`, and then takes part with it whatever the
+condition says; the name need not be in the [operations.*] table at all.
+Given several -o, or a group, each login runs the operations that apply to
+it in order, in one shell, each announced by `== NAME` and, per path, by
+`== DIR` as -P does; a login none applies to is left alone. -A narrows the
+paths, -C picks them, -c clones for every per-path operation, -a narrows
+the logins: `pssh -o git-pull -A py-project`, `pssh -a cachyos -o
+system-update`. -L/--list-ops lists the operations the lists files define,
+where each runs and what, the entries' own commands under it.
+
+-s/--serial runs one login at a time, in the foreground, through `ssh -t`
+(`localhost`: a local shell), each announced by `== LOGIN`, so a command
+that asks questions -- a package manager, sudo -- can be answered; the
+output is not tagged. An operation with `serial = true` makes the run
+serial by itself. (xssh -o runs an operation in synchronized panes instead,
+one keystroke answering every login.)
 
 A login's `commands` in the lists file are for the shells xssh opens; pssh
 runs its command as given, on every login alike. A login's `via` is pssh's:
@@ -63,6 +107,7 @@ explicitly.
 
 from __future__ import annotations
 
+import functools
 import os
 import shlex
 import shutil
@@ -71,8 +116,8 @@ import sys
 
 import click
 
-from . import lists, logins, pick
-from .lists import PathInfo
+from . import attrs, lists, logins, pick
+from .lists import Login, Operation, PathInfo, ToolError
 
 
 def command_line(words: list[str]) -> str:
@@ -80,45 +125,179 @@ def command_line(words: list[str]) -> str:
     return words[0] if len(words) == 1 else shlex.join(words)
 
 
-def paths_list(file: str | None, pick_paths: bool, env=None) -> list[PathInfo]:
-    """The paths list of the lists file, optionally picked from. Raises
-    ToolError when the file has none, or pick.Abort."""
-    path = lists.find_file(file, env)
-    found = lists.load(path).paths
-    if not found:
-        raise logins.ToolError(f"no paths in {path}")
+def paths_list(found: lists.Lists, pick_paths: bool = False,
+               terms: tuple[attrs.Term, ...] = ()) -> list[PathInfo]:
+    """The paths of the lists, those -A keeps, optionally picked from.
+    Raises ToolError when none is left, or pick.Abort."""
+    path_list = [p for p in found.paths if attrs.holds_all(terms, p.attributes)]
+    if not path_list:
+        why = f" match -A {' '.join(map(str, terms))}" if terms and found.paths else ""
+        raise ToolError(f"no paths in {', '.join(found.files)}{why}")
     if pick_paths:
-        found = pick.pick_from(found, "paths", lambda p: p.path)
-    return found
+        path_list = pick.pick_from(path_list, "paths", lambda p: p.path)
+    return path_list
 
 
-def paths_script(path_list: list[PathInfo], cmd: str, clone: bool = False) -> str:
-    """cmd in each path in turn, cloning missing ones first when asked.
-    POSIX sh on purpose: parallel runs it through whichever shell the host
-    has."""
-    calls = []
-    for p in path_list:
+# The per-login script. POSIX sh on purpose: parallel and ssh run it through
+# whichever shell the host has. The command comes in $cmd, set before the
+# calls that use it, so one function serves every operation.
+RUN = '''run() { # run DIR [URL [BRANCH]]: $cmd in DIR, cloned from URL first when missing
+    d=$1
+    case $d in /*) ;; *) d=$HOME/$d ;; esac
+    if [ ! -d "$d" ] && [ -n "$2" ]; then
+        echo "== $d: cloning $2"
+        git clone -q ${3:+-b "$3"} -- "$2" "$d" || { echo "== $d: clone FAILED"; rc=1; return; }
+    fi
+    if [ ! -d "$d" ]; then echo "== $d: missing, skipped"; return; fi
+    echo "== $d"
+    ( cd "$d" && eval "$cmd" ) || { echo "== $d: FAILED"; rc=1; }
+}'''
+
+
+def set_cmd(cmd: str) -> str:
+    return "cmd=" + shlex.quote(cmd)
+
+
+def path_calls(pairs: list[tuple[PathInfo, str]], clone: bool = False) -> list[str]:
+    """A `run` per path with its command, set whenever it changes; the url
+    and branch along when a missing path is to be cloned."""
+    lines: list[str] = []
+    current = None
+    for p, cmd in pairs:
+        if cmd != current:
+            lines.append(set_cmd(cmd))
+            current = cmd
         words = [p.path]
         if clone and p.git_url:
             words.append(p.git_url)
             if p.git_branch:
                 words.append(p.git_branch)
-        calls.append("run " + " ".join(shlex.quote(w) for w in words))
-    return f"""rc=0
-run() {{ # run DIR [URL [BRANCH]]
-    d=$1
-    case $d in /*) ;; *) d=$HOME/$d ;; esac
-    if [ ! -d "$d" ] && [ -n "$2" ]; then
-        echo "== $d: cloning $2"
-        git clone -q ${{3:+-b "$3"}} -- "$2" "$d" || {{ echo "== $d: clone FAILED"; rc=1; return; }}
-    fi
-    if [ ! -d "$d" ]; then echo "== $d: missing, skipped"; return; fi
-    echo "== $d"
-    ( cd "$d" && {{ {cmd}
-    }} ) || {{ echo "== $d: FAILED"; rc=1; }}
-}}
-{chr(10).join(calls)}
-exit $rc"""
+        lines.append("run " + " ".join(shlex.quote(w) for w in words))
+    return lines
+
+
+def home_call(name: str, cmd: str) -> list[str]:
+    """cmd from the home directory, a failure reported under name."""
+    failed = shlex.quote(f"== {name}: FAILED")
+    return [set_cmd(cmd), f'( eval "$cmd" ) || {{ echo {failed}; rc=1; }}']
+
+
+def header(name: str) -> str:
+    return "echo " + shlex.quote(f"== {name}")
+
+
+def script(lines: list[str]) -> str:
+    return "rc=0\n" + RUN + "\n" + "\n".join(lines) + "\nexit $rc"
+
+
+def paths_script(path_list: list[PathInfo], cmd: str, clone: bool = False) -> str:
+    """cmd in each path in turn, cloning missing ones first when asked."""
+    return script(path_calls([(p, cmd) for p in path_list], clone))
+
+
+def expand(names: list[str], ops: dict[str, Operation]) -> list[Operation]:
+    """The operations named, groups opened depth-first, each once, in order.
+    Raises ToolError on a name the lists do not have."""
+    out: dict[str, Operation] = {}
+
+    def walk(name: str, inside: str | None) -> None:
+        op = ops.get(name)
+        if op is None:
+            where = f" (in {inside})" if inside else ""
+            known = ", ".join(sorted(ops)) or "none"
+            raise ToolError(f"unknown operation {name!r}{where}; known: {known}")
+        if op.group:
+            for member in op.members:
+                walk(member, name)
+        else:
+            out.setdefault(name, op)
+
+    for name in names:
+        walk(name, None)
+    return list(out.values())
+
+
+def describe(op: Operation, found: lists.Lists) -> list[str]:
+    """One line for an operation -- where it runs, its flags, its command
+    or members -- and one, indented, per entry with its own command for it."""
+    if op.group:
+        where, what = "group", ", ".join(op.members)
+    else:
+        if op.per_path:
+            where = "per path" + ("" if op.paths == attrs.EVERYTHING else f" {op.paths}")
+            if op.logins != attrs.EVERYTHING:
+                where += f" on logins {op.logins}"
+        else:
+            where = "per login" + ("" if op.logins == attrs.EVERYTHING else f" {op.logins}")
+        where += "".join(f", {flag}" for flag in ("clone", "serial") if getattr(op, flag))
+        what = op.command or "(the entries' own commands)"
+    lines = [f"{where}\t{what}"]
+    entries = found.paths if op.per_path else found.logins
+    for entry in entries:
+        own = entry.operations.get(op.name)
+        if own is not None:
+            lines.append(f"    {getattr(entry, 'path' if op.per_path else 'login')}: {own}")
+    return lines
+
+
+def list_operations(found: lists.Lists) -> str:
+    """The operations of the lists, one per line, name, place and command
+    in columns, for -L."""
+    if not found.operations:
+        return f"no operations in {', '.join(found.files)}"
+    width = max(len(name) for name in found.operations)
+    rows = []
+    for name, op in found.operations.items():
+        first, *rest = describe(op, found)
+        rows.append((name.ljust(width) + "  " + first, rest))
+    place = max(len(row.split("\t")[0]) for row, _ in rows)
+    out = []
+    for row, rest in rows:
+        head, what = row.split("\t")
+        out.append(head.ljust(place) + "  " + what)
+        out.extend(rest)
+    return "\n".join(out)
+
+
+def per_login_command(op: Operation, entry: Login) -> str | None:
+    """What a per-login operation runs on a login: its own command, else the
+    operation's when the login matches; None when nothing."""
+    own = entry.operations.get(op.name)
+    if own is not None:
+        return own
+    if op.command and op.logins.matches(entry.attributes):
+        return op.command
+    return None
+
+
+def per_path_command(op: Operation, p: PathInfo) -> str | None:
+    own = p.operations.get(op.name)
+    if own is not None:
+        return own
+    if op.command and op.paths is not None and op.paths.matches(p.attributes):
+        return op.command
+    return None
+
+
+def login_script(entry: Login, ops: list[Operation], path_list: list[PathInfo],
+                 clone: bool = False) -> str | None:
+    """The script running the operations that apply to the login, in order,
+    or None when none does."""
+    lines: list[str] = []
+    for op in ops:
+        if op.per_path:
+            if not op.logins.matches(entry.attributes):
+                continue
+            pairs = [(p, cmd) for p in path_list if (cmd := per_path_command(op, p))]
+            if pairs:
+                lines.append(header(op.name))
+                lines.extend(path_calls(pairs, clone or op.clone))
+        else:
+            cmd = per_login_command(op, entry)
+            if cmd is not None:
+                lines.append(header(op.name))
+                lines.extend(home_call(op.name, cmd))
+    return script(lines) if lines else None
 
 
 def shell_command(cmd: str, interactive: bool = False) -> str:
@@ -143,12 +322,13 @@ def wrap(cmd: str, via: str | None, interactive: bool = False) -> str:
     return via + " " + (cmd if interactive else "sh -c " + shlex.quote(cmd))
 
 
-def runs(entries: list, cmd: str, interactive: bool = False) -> dict[str, list[str]]:
+def runs(pairs: list[tuple[Login, str]], interactive: bool = False) -> dict[str, list[str]]:
     """What runs where: each distinct final command with its logins, in list
-    order. A login listed twice with the same via is one run; one listed
-    plainly and with a via is two, one for each place."""
+    order, from (login, its command) pairs. A login listed twice with the
+    same via is one run; one listed plainly and with a via is two, one for
+    each place."""
     out: dict[str, list[str]] = {}
-    for entry in entries:
+    for entry, cmd in pairs:
         line = wrap(cmd, entry.via, interactive)
         group = out.setdefault(line, [])
         if entry.login not in group:
@@ -161,28 +341,108 @@ def parallel_argv(entries: list[str], cmd: str) -> list[str]:
     return ["parallel", "--nonall", "--tag", "--linebuffer", "-S", ",".join(logins), cmd]
 
 
+def serial_argv(login: str, cmd: str) -> list[str]:
+    return ["sh", "-c", cmd] if login == "localhost" else ["ssh", "-t", login, cmd]
+
+
+def serial_run(groups: dict[str, list[str]]) -> int:
+    """Each login in turn, in the foreground: the number that failed; 130
+    when interrupted."""
+    failed = 0
+    try:
+        for line, entries in groups.items():
+            for login in entries:
+                print(f"== {login}", flush=True)
+                if subprocess.run(serial_argv(login, line)).returncode != 0:
+                    failed += 1
+    except KeyboardInterrupt:
+        return pick.EXIT_ABORT
+    return failed
+
+
+def path_options(f=None, *, short: bool = True, implies: str = " (implies -P)"):
+    """The -A, -c and -C of a tool that works in the listed paths; long
+    names only for -c and -C where those letters are taken (xssh hands
+    them to xpanes)."""
+    if f is None:
+        return functools.partial(path_options, short=short, implies=implies)
+    pick_names = ("-C", "--pick-paths") if short else ("--pick-paths",)
+    clone_names = ("-c", "--clone") if short else ("--clone",)
+
+    @click.option(*pick_names, "pick_paths", is_flag=True, help="choose the paths" + implies)
+    @click.option(*clone_names, "clone", is_flag=True, help="clone a missing path first" + implies)
+    @click.option("-A", "--path-attr", "path_attrs", metavar="TERM", multiple=True,
+                  callback=logins.attr_terms,
+                  help="keep paths with the attribute, as -a for logins" + implies)
+    @functools.wraps(f)
+    def wrapper(*args, **kw):
+        return f(*args, **kw)
+    return wrapper
+
+
+def need_parallel() -> None:
+    if not shutil.which("parallel"):
+        raise ToolError("GNU parallel not installed (brew install parallel / pacman -S parallel)")
+
+
 @click.command(cls=logins.Command, help=__doc__,
                context_settings={"allow_interspersed_args": False})
 @click.option("-n", "--dry-run", is_flag=True, help="print the command and the hosts, run nothing")
+@click.option("-s", "--serial", is_flag=True,
+              help="one login at a time in the foreground, through `ssh -t'")
 @logins.login_options
 @click.option("-i", "--interactive", is_flag=True, help="run through `zsh -ic'")
+@click.option("-o", "--op", "ops", metavar="NAME", multiple=True,
+              help="run the lists' operation NAME instead of a COMMAND (repeatable)")
+@click.option("-L", "--list-ops", is_flag=True, help="list the operations of the lists files")
 @click.option("-P", "--paths", is_flag=True, help="in every listed path on each login")
-@click.option("-c", "--clone", is_flag=True, help="clone a missing path first (implies -P)")
-@click.option("-C", "--pick-paths", is_flag=True, help="choose the paths (implies -P)")
-@click.argument("command", nargs=-1, required=True, type=click.UNPROCESSED)
-def cli(opts: logins.LoginOpts, dry_run: bool, interactive: bool, paths: bool, clone: bool,
-        pick_paths: bool, command: tuple[str, ...]) -> int:
+@path_options
+@click.argument("command", nargs=-1, type=click.UNPROCESSED)
+def cli(opts: logins.LoginOpts, dry_run: bool, serial: bool, interactive: bool,
+        ops: tuple[str, ...], list_ops: bool, paths: bool, path_attrs: tuple[attrs.Term, ...],
+        clone: bool, pick_paths: bool, command: tuple[str, ...]) -> int:
     """Flags first; the first word that is not one starts the command."""
-    paths = paths or clone or pick_paths
+    ctx = click.get_current_context()
+    if list_ops:
+        try:
+            print(list_operations(lists.load_all(opts.files)))
+        except ToolError as e:
+            print(f"pssh: {e}", file=sys.stderr)
+            return logins.EXIT_ERROR
+        return 0
+    if not command and not ops:
+        raise click.UsageError("Missing argument 'COMMAND...' (or -o NAME).", ctx)
+    if command and ops:
+        raise click.UsageError("COMMAND and -o NAME are alternatives.", ctx)
+    if paths and ops:
+        raise click.UsageError("-P and -o: an operation says itself where it runs.", ctx)
+    paths = paths or clone or pick_paths or bool(path_attrs)
+    skipped: list[str] = []
     try:
-        if not dry_run and not shutil.which("parallel"):
-            raise logins.ToolError(
-                "GNU parallel not installed (brew install parallel / pacman -S parallel)")
-        cmd = command_line(list(command))
-        if paths:
-            cmd = paths_script(paths_list(opts.file, pick_paths), cmd, clone)
-        groups = runs(logins.logins(opts), cmd, interactive)
-    except logins.ToolError as e:
+        if not dry_run and not serial and not ops:
+            need_parallel()
+        found = lists.load_all(opts.files) if paths or ops else None
+        if ops:
+            leaves = expand(list(ops), found.operations)
+            path_list = (paths_list(found, pick_paths, path_attrs)
+                         if any(op.per_path for op in leaves) else [])
+            entries = logins.logins(opts, found=found)
+            scripts = [(e, login_script(e, leaves, path_list, clone)) for e in entries]
+            skipped = list(dict.fromkeys(e.login for e, s in scripts if s is None))
+            groups = runs([(e, s) for e, s in scripts if s], interactive)
+            askers = [op.name for op in leaves if op.serial]
+            if askers and not serial:
+                serial = True
+                print(f"pssh: {', '.join(askers)} asks questions: one login at a time",
+                      file=sys.stderr)
+            if not dry_run and not serial:
+                need_parallel()
+        else:
+            cmd = command_line(list(command))
+            if paths:
+                cmd = paths_script(paths_list(found, pick_paths, path_attrs), cmd, clone)
+            groups = runs([(e, cmd) for e in logins.logins(opts, found=found)], interactive)
+    except ToolError as e:
         print(f"pssh: {e}", file=sys.stderr)
         return logins.EXIT_ERROR
     except pick.Abort:
@@ -190,16 +450,27 @@ def cli(opts: logins.LoginOpts, dry_run: bool, interactive: bool, paths: bool, c
     if dry_run:
         for line, entries in groups.items():
             print(line)
-            print("-- on:")
+            print("-- one at a time on:" if serial else "-- on:")
             for entry in entries:
                 print(f"   {entry}")
+        if skipped:
+            print("-- not contacted (no operation applies):")
+            for login in skipped:
+                print(f"   {login}")
+        return 0
+    for login in skipped:
+        print(f"pssh: {login}: no operation applies, skipped", file=sys.stderr)
+    if not groups:
+        print("pssh: no login takes part", file=sys.stderr)
         return 0
     try:
         logins.confirm_new_hosts(list(dict.fromkeys(e for g in groups.values() for e in g)),
                                  "pssh")
-    except logins.ToolError as e:
+    except ToolError as e:
         print(f"pssh: {e}", file=sys.stderr)
         return logins.EXIT_ERROR
+    if serial:
+        return serial_run(groups)
     if len(groups) == 1:
         (line, entries), = groups.items()
         os.execvp("parallel", parallel_argv(entries, line))

@@ -1,13 +1,13 @@
 # curiousj-tools
 
 Small command-line tools for working across several machines over ssh and tmux, with Emacs
-as the editor on all of them. Python 3.11+, standard library only.
+as the editor on all of them. Python 3.11+, click and ruamel.yaml.
 
 | Command | What it does |
 |---|---|
 | `sshtsf` | ssh to a host and `tmux new-session -A` there; remembers host, session, folder and command so a two-word invocation replaces a hand-written alias per session |
 | `xssh` | one synchronized tmux pane per login plus a local shell, so one typed line runs everywhere (interactive; needs [xpanes](https://github.com/greymd/tmux-xpanes)) |
-| `pssh` | the batch counterpart: one command on every host at once through GNU parallel, output tagged by host; `-d` repeats it in every listed directory, `-c` cloning the ones a host lacks |
+| `pssh` | the batch counterpart: one command on every login at once through GNU parallel, output tagged by login; `-P` repeats it in every listed path, `-c` cloning the ones a host lacks; `-o` runs an operation the lists file defines, `-s` one login at a time for commands that ask questions |
 | `ssh-logins` | the login list behind `xssh` and `pssh`, with an fzf/menu picker |
 | `pick-lines` | the multi-select picker the others use: fzf when present, else a numbered menu |
 | `emacsclient-auto` | `emacsclient` that reaches a forwarded Emacs when its socket is live, the local server otherwise; use it as `$EDITOR` on hosts you reach with `sshtsf -e` |
@@ -118,98 +118,183 @@ never route remote), `EMACSCLIENT_FORWARD_SOCKET` (default `/tmp/emacs-remote-so
 ## Hosts and batch runs
 
 ```
-ssh-logins [-N] [-p] [-f FILE]
-xssh      [-N] [-p] [-f FILE] [xpanes-options...]
-pssh      [-n] [-N] [-p] [-f FILE] [-i] [-P] [-c] [-C] [--] COMMAND [ARG...]
+ssh-logins [-N] [-a TERM]... [-p] [-f FILE]...
+xssh      [-N] [-a TERM]... [-p] [-f FILE]... [-o NAME]... [-A TERM]... [--clone] [--pick-paths] [xpanes-options...]
+pssh      [-n] [-s] [-N] [-a TERM]... [-p] [-f FILE]... [-i] [-P] [-A TERM]... [-c] [-C] [--] COMMAND [ARG...]
+pssh      [same flags] -o NAME...
 ```
 
-All three read one lists file, `~/.config/ssh-lists.toml` (or `.yaml`, `.yml`, `.json`; see
-[where it lives](#where-the-lists-file-lives)): the `logins` to reach and the `paths` to work
-in. A login is a `[user@]host` string, or a table when it needs `commands` run after login
-(`distrobox enter dev -nw`, `cd src`, `exec zsh`): `xssh` runs them in that login's pane, so end
-them in something interactive, or the pane ends with them. `via` is the batch counterpart, for
-`pssh`: a command line its command is run through there, handed `sh -c '...'`. A path is
-relative to `~` unless absolute, with an optional `git_url` and `git_branch` for `pssh -c` to
-clone it from.
+All three read the same lists, `~/.config/ssh-lists.toml` (or `.yaml`, `.yml`, `.json`, or several
+such files; see [where they live](#where-the-lists-files-live)): the `logins` to reach, the
+`paths` to work in, and the `operations` to run there. A login is a `[user@]host` string, or a
+table when it needs `commands` run after login (`distrobox enter dev -nw`, `cd src`, `exec zsh`):
+`xssh` runs them in that login's pane, so end them in something interactive, or the pane ends
+with them. `via` is the batch counterpart, for `pssh`: a command line its command is run through
+there, handed `sh -c '...'`. A path is relative to `~` unless absolute, with an optional
+`git_url` and `git_branch` for `pssh -c` to clone it from. Both carry `attributes`, flags or
+`key=value` pairs, for the operations and the `-a`/`-A` flags to select on.
 
 ```toml
 logins = [
-    "alice@devbox",
+    { login = "alice@devbox", attributes = ["cachyos", "mise"] },
     { login = "alice@devbox", commands = ["distrobox enter dev -nw"], via = "distrobox enter dev -nw --" },
+    { login = "my-mac.local", attributes = ["mac", "brew", "mise"] },
 ]
 
 [[paths]]
 path = "src/webapp"
 git_url = "git@github.com:me/webapp.git"
 git_branch = "main"
+attributes = ["git", "py-project"]
 ```
 
 The same in YAML, where strings and mappings mix freely:
 
 ```yaml
 logins:
-  - alice@devbox
+  - login: alice@devbox
+    attributes: [cachyos, mise]
   - login: alice@devbox
     commands: [distrobox enter dev -nw]
     via: distrobox enter dev -nw --
+  - login: my-mac.local
+    attributes: [mac, brew, mise]
 paths:
   - path: src/webapp
     git_url: git@github.com:me/webapp.git
     git_branch: main
+    attributes: [git, py-project]
 ```
 
 See [examples/ssh-lists.toml](examples/ssh-lists.toml) and
 [examples/ssh-lists.yaml](examples/ssh-lists.yaml). `localhost` is appended to the logins for
 the local side unless `-N`, and entries naming the machine you are on, for your user, are
-dropped, so one file serves every host on it. `-p` picks logins in fzf (TAB marks several) or a
-numbered menu; a login listed twice, for two sets of `commands`, is shown with them so the two
-can be told apart.
+dropped, so one file serves every host on it; `localhost` takes over the attributes and
+operations of the first such entry. `-a TERM` keeps the logins whose attributes satisfy the
+term, `mise`, `arch=x86_64`, `!mise` or `arch!=x86_64` (quote the `!` for the shell), every
+term when given several; `-A` does the same for paths. `-p` picks logins in fzf (TAB marks
+several) or a numbered menu; a login listed twice, for two sets of `commands`, is shown with
+them so the two can be told apart.
 
 ```sh
 xssh --stay                          # a synced pane per login; type once, runs everywhere
+xssh -a cachyos                      # ...for the logins with that attribute only
 pssh uptime                          # tagged output, all logins at once, exit = logins that failed
 pssh 'cd ~/src/webapp && git status' # one word is a shell line; several words are one argv
 pssh -i 'alias'                      # through `zsh -ic`, so aliases and functions exist
 pssh -P git status -s                # in every listed path, on every login
 pssh -C 'git pull --rebase --autostash'   # ...choosing the paths first
-pssh -P -c 'git pull --rebase --autostash' # ...cloning any checkout a host lacks first
+pssh -A git -c 'git pull --rebase --autostash' # ...the git ones, cloning any a host lacks first
 pssh -n -P make                      # show the per-login script and the logins, run nothing
+pssh -s 'sudo apt upgrade'           # one login at a time in the foreground, questions answered
 ```
 
 A path a host does not have is skipped, unless `-c` is given and the entry has a `git_url`,
 in which case it is cloned first and the command runs in the fresh clone. One where the command
-fails marks that login failed. A shell alias makes a routine of it, and gives a new machine its
-checkouts on the first run:
-
-```sh
-alias pull-all="pssh -P -c 'git pull --rebase --autostash'"
-```
+fails marks that login failed.
 
 `pssh` runs the command in a non-interactive shell: no aliases, no shell functions, no `cd`
 carrying over between calls, and no login `commands` either. `xssh` gives each one a login
 shell, so all of those work there. A login listed plainly and again with a `via` is run in both
 places by `pssh`, and once per place: inside `distrobox enter dev -nw -- sh -c '...'` the `~` is
-the container's own home, so `pull-all` keeps its checkouts current alongside the host's.
+the container's own home, so a `git pull` there keeps the container's checkouts current
+alongside the host's.
 
 Both contact a host whose key is not in `known_hosts` yet once beforehand, in the foreground, so
 ssh's yes/no question is asked where it can be answered: inside a synchronized xpanes window the
 answer would reach every pane, and under parallel the prompt stops the background ssh for good.
 
-### Where the lists file lives
+### Operations
 
-First readable wins:
+A routine worth a name goes in the lists file as an operation, which says itself what it runs
+and where, and `pssh -o NAME` runs it:
+
+```toml
+[operations.git-pull]
+command = "git pull --rebase --autostash"
+paths = "git"                      # per path: in every path whose attributes match (true: all)
+clone = true                       # as -c
+
+[operations.uv-tool-update]
+command = "uv tool install --force --reinstall ."
+paths = "py-project"
+
+[operations.mise-update]
+command = "mise self-update -y && mise upgrade"
+logins = "mise"                    # per login: on every login whose attributes match (absent: all)
+
+[operations.cachy-update]
+command = "cachy-update"
+logins = "cachyos"
+serial = true                      # asks questions: run one login at a time, as -s
+
+[operations.brew-upgrade]
+command = "brew update && brew upgrade"
+logins = { any = ["mac", "brew"] }
+
+[operations.system-update]         # a group: each login runs the members that apply to it
+operations = ["cachy-update", "brew-upgrade"]
+
+[operations.update-all]
+operations = ["git-pull", "uv-tool-update", "mise-update", "system-update"]
+```
+
+A condition is a term, a list of terms that all have to hold, or a table with any of `all`,
+`any` and `none`. A login or path can carry its own command for an operation, and then takes
+part with it whatever the condition says; the name need not be in the table at all:
+
+```toml
+[[paths]]
+path = "src/legacy"
+operations = { git-pull = "git pull --ff-only" }
+```
+
+Each login runs the operations that apply to it, in order, in one shell, each announced by
+`== NAME` and each path by `== DIR`; a login none applies to is left alone. `-a` narrows the
+logins and `-A` the paths, `-C` picks paths, `-c` clones for every per-path operation, `-n`
+shows the scripts:
+
+```sh
+pssh -o update-all                   # everything, everywhere it applies
+pssh -o git-pull -A py-project       # the python checkouts only
+pssh -a cachyos -o system-update     # the CachyOS boxes only
+pssh -n -o update-all                # the per-login scripts and who runs which
+pssh -L                              # the operations the lists define, where and what each runs
+xssh -o system-update --stay         # the same, a synchronized pane per login instead
+```
+
+A command that asks questions -- a package manager, `sudo` -- cannot be answered under
+parallel. `pssh -s` runs one login at a time in the foreground through `ssh -t` instead, each
+announced by `== LOGIN`, and an operation with `serial = true` does that by itself. `xssh -o`
+opens a synchronized pane per login the operation applies to, runs it there, then runs the
+login's `commands` as a plain pane would (a shell, when it has none): one keystroke answers every
+login, which suits a question every host asks alike; where
+hosts ask different things, `pssh -s` is the tool. Shell functions make routines of it:
+
+```sh
+pull-all()   { pssh -o git-pull "$@"; }      # pull-all -n, pull-all -A py-project
+sys-update() { pssh -o system-update "$@"; }
+```
+
+### Where the lists files live
+
+Several files make one list, merged in this order:
 
 | | |
 |---|---|
-| on the command line | `-f FILE` |
-| one file, wherever it is | `$SSH_LISTS_FILE` |
-| a search path | `$SSH_LISTS_PATH`, colon-separated directories, each tried for `ssh-lists.toml`, `.yaml`, `.yml`, `.json` in that order |
-| default | `~/.config` (`$XDG_CONFIG_HOME`), the same four names |
+| on the command line | `-f FILE`, repeatable: those files and no other |
+| named files | `$SSH_LISTS_FILE`, colon-separated, when no `-f` |
+| a search path | `$SSH_LISTS_PATH`, colon-separated directories, otherwise: every `ssh-lists*.toml`, `.yaml`, `.yml`, `.json` in each, by name |
+| default | `~/.config` (`$XDG_CONFIG_HOME`), the same names |
 
-The search path is for keeping the file in a private repo checked out on every host:
+An entry defined twice -- a login with the same `commands` and `via`, a path, an operation name
+-- keeps its first definition, with a warning naming both files, so a second file can add to
+the first but not change it. (Mind that `ssh-lists-extra.yaml` sorts before `ssh-lists.yaml`.)
+The search path is for keeping the files in a private repo checked out on every host, and the
+several files for keeping a host's own additions out of it:
 
 ```sh
-export SSH_LISTS_PATH=~/src/my-lists     # holds ssh-lists.yaml
+export SSH_LISTS_PATH=~/src/my-lists     # holds ssh-lists.yaml, and ssh-lists-local.yaml on one host
 ```
 
 The extension names the format. YAML is read with ruamel.yaml, TOML and JSON with the standard

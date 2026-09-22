@@ -1167,11 +1167,11 @@ def set_field(holder: dict, field: str, value) -> None:
 
 
 def lists_logins() -> list[str]:
-    """The logins of the ssh-lists file, in its order and once each; none
+    """The logins of the ssh-lists files, in their order and once each; none
     without a file. The other tools' list of machines, which is the first
     place to look for one to register here."""
     try:
-        entries = lists.load(lists.find_file(None)).logins
+        entries = lists.load_all().logins
     except lists.ToolError:
         return []
     return list(dict.fromkeys(entry.login for entry in entries))

@@ -1,16 +1,45 @@
 # The same lists as ssh-lists.toml, in YAML: ~/.config/ssh-lists.yaml (or .yml).
 logins:
-  - alice@devbox                         # [user@]host, as ssh takes it
-  - build.example.com
-  - login: my-mac.local                  # a mapping where a login needs more
+  - build.example.com                    # [user@]host, as ssh takes it
+  - login: alice@devbox                  # a mapping where a login needs more
+    attributes: [cachyos, mise]          # what operations and -a select on
+  - login: my-mac.local
     commands: [cd src, exec zsh]         # run after login in the pane xssh opens
+    attributes: [mac, brew, mise]
+    operations:                          # this login's own command for an operation
+      brew-upgrade: brew update && brew upgrade --greedy
   - login: alice@devbox                  # the same login twice: one pane on the
     commands: [distrobox enter dev -nw]      # host, one inside its container...
     via: distrobox enter dev -nw --          # ...and pssh runs its command in there too
 paths:
   - path: dotfiles                       # relative to ~ unless absolute
     git_url: git@github.com:me/dotfiles.git   # optional: `pssh -c` clones it when missing
+    attributes: [git]
   - path: src/webapp
     git_url: git@github.com:me/webapp.git
     git_branch: main                     # optional: -b for the clone
-  - /opt/tools/mytool                    # no git_url: never cloned, skipped where absent
+    attributes: [git, py-project]
+  - path: /opt/tools/mytool              # no git_url: never cloned, skipped where absent
+    operations: {git-pull: git pull --ff-only}   # this path's own way of being pulled
+operations:                              # `pssh -o NAME`, `xssh -o NAME`
+  git-pull:                              # per path: `paths` says which (true: all)
+    command: git pull --rebase --autostash
+    paths: git
+    clone: true                          # clone a missing path first, as -c
+  uv-tool-update:
+    command: uv tool install --force --reinstall .
+    paths: py-project
+  mise-update:                           # per login: `logins` says which (absent: all)
+    command: mise self-update -y && mise upgrade
+    logins: mise
+  cachy-update:
+    command: cachy-update
+    logins: cachyos
+    serial: true                         # asks questions: one login at a time, as -s
+  brew-upgrade:
+    command: brew update && brew upgrade
+    logins: {any: [mac, brew], none: headless}
+  system-update:                         # a group: each login runs the members that apply
+    operations: [cachy-update, brew-upgrade]
+  update-all:
+    operations: [git-pull, uv-tool-update, mise-update, system-update]

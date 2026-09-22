@@ -1,21 +1,31 @@
 """ssh-logins -- print the login list xssh and pssh work from, optionally picking a subset.
 
-    ssh-logins [-h] [-N|--no-local] [-p|--pick] [-f FILE]
+    ssh-logins [-h] [-N|--no-local] [-a TERM]... [-p|--pick] [-f FILE]...
 
-One entry per line: every login ([user@]host) in the lists file, then
+One entry per line: every login ([user@]host) in the lists files, then
 `localhost` last, which consumers turn into whatever "this machine" means
 for them (xssh: a local pane, pssh: a local run); -N/--no-local leaves it
 out. Entries that name this machine, for this user, are dropped, so one
-list can serve every host on it. -p/--pick shows the list in fzf (TAB marks
-several) and prints only the marked entries; without fzf, a numbered menu
-(see `pick-lines -h`). Aborting the picker exits 130 with nothing printed.
+list can serve every host on it; `localhost` takes over the attributes and
+operations of the first such entry (one without a via). -p/--pick shows the
+list in fzf (TAB marks several) and prints only the marked entries; without
+fzf, a numbered menu (see `pick-lines -h`). Aborting the picker exits 130
+with nothing printed.
 
-The logins are the `logins` list of the ssh-lists file, TOML, YAML or JSON
+-a/--attr TERM keeps the logins whose attributes satisfy TERM: `mise` has
+it, `arch=x86_64` has it with that value, `!mise` lacks it, `arch!=x86_64`
+lacks it or has another value; given several times, every TERM has to hold.
+`localhost` is kept or dropped like any other, by the attributes it took
+over; with no entry naming this machine it has none. Quote a `!` for the
+shell.
+
+The logins are the `logins` list of the ssh-lists files, TOML, YAML or JSON
 (see the README, or the curiousj_tools.lists docstring, for the shape).
-Without -f the first readable of these is used:
+Which files, merged in this order:
 
-    $SSH_LISTS_FILE                 one file, wherever it is
-    DIR/ssh-lists.toml|yaml|yml|json    for each DIR in $SSH_LISTS_PATH
+    -f FILE                         on the command line, repeatable
+    $SSH_LISTS_FILE                 colon-separated files, without -f
+    DIR/ssh-lists*.toml|yaml|yml|json   otherwise, for each DIR in $SSH_LISTS_PATH
                                     (colon-separated), default ~/.config
 """
 
@@ -32,7 +42,7 @@ from dataclasses import dataclass
 
 import click
 
-from . import lists, pick
+from . import attrs, lists, pick
 from .lists import Login, ToolError  # noqa: F401  (re-exported)
 
 EXIT_ERROR = 1
@@ -45,18 +55,30 @@ class LoginOpts:
 
     no_local: bool = False
     pick: bool = False
-    file: str | None = None
+    files: tuple[str, ...] = ()
+    attrs: tuple[attrs.Term, ...] = ()
+
+
+def attr_terms(ctx, param, value) -> tuple[attrs.Term, ...]:
+    """A repeatable TERM option's values parsed; a bad one is a usage error."""
+    try:
+        return tuple(attrs.term(t, "term") for t in value)
+    except ValueError as e:
+        raise click.BadParameter(str(e).removeprefix("term: "))
 
 
 def login_options(f):
-    """The -N, -p and -f every login tool takes; the callback gets them as
-    one LoginOpts named opts."""
-    @click.option("-f", "file", metavar="FILE", help="the ssh-lists file to read")
+    """The -N, -a, -p and -f every login tool takes; the callback gets them
+    as one LoginOpts named opts."""
+    @click.option("-f", "files", metavar="FILE", multiple=True,
+                  help="an ssh-lists file to read (repeatable; these and no other)")
     @click.option("-p", "--pick", is_flag=True, help="choose logins interactively")
+    @click.option("-a", "--attr", "attrs", metavar="TERM", multiple=True, callback=attr_terms,
+                  help="keep logins with the attribute: key, key=value, !key, key!=value (repeatable)")
     @click.option("-N", "--no-local", is_flag=True, help="leave localhost out")
     @functools.wraps(f)
-    def wrapper(no_local, pick, file, **kw):
-        return f(LoginOpts(no_local, pick, file), **kw)
+    def wrapper(no_local, attrs, pick, files, **kw):
+        return f(LoginOpts(no_local, pick, tuple(files), attrs), **kw)
     return wrapper
 
 
@@ -107,20 +129,31 @@ def self_names() -> set[str]:
     return names
 
 
+def is_self(entry: Login, names: set[str], user: str) -> bool:
+    """Whether the entry names this machine, for this user. An entry for
+    another user on this machine is a different login, not this one."""
+    entry_user, _, host = entry.login.rpartition("@")
+    host = host.lower()
+    mine = host in names or host.split(".", 1)[0] in names
+    return mine and (not entry_user or entry_user == user)
+
+
 def drop_self(entries: list[Login], names: set[str], user: str) -> list[Login]:
     """Entries minus those naming this machine: the list is shared between
     hosts, so each one's own name is in it, and `localhost` already stands
-    for it. An entry for another user on this machine is kept: that is a
-    different login, not this one."""
-    kept = []
+    for it."""
+    return [entry for entry in entries if not is_self(entry, names, user)]
+
+
+def local_login(entries: list[Login], names: set[str], user: str) -> Login:
+    """`localhost` as the list describes this machine: the attributes and
+    operations of the first entry naming it that has no via (one with a via
+    is a place inside it, not the machine). A bare `localhost` without one."""
     for entry in entries:
-        entry_user, _, host = entry.login.rpartition("@")
-        host = host.lower()
-        mine = host in names or host.split(".", 1)[0] in names
-        if mine and (not entry_user or entry_user == user):
-            continue
-        kept.append(entry)
-    return kept
+        if entry.via is None and is_self(entry, names, user):
+            return Login("localhost", attributes=dict(entry.attributes),
+                         operations=dict(entry.operations), file=entry.file)
+    return Login("localhost")
 
 
 def ssh_config(entry: str) -> dict[str, str]:
@@ -171,15 +204,23 @@ def confirm_new_hosts(entries: list[str], prog: str) -> None:
             raise ToolError(f"{entry}: host key not confirmed (answer yes, or drop it from the list)")
 
 
-def logins(opts: LoginOpts, env=None) -> list[Login]:
-    """The resolved, filtered, optionally picked list. Raises ToolError or
-    pick.Abort."""
-    path = lists.find_file(opts.file, env)
-    entries = drop_self(lists.load(path).logins, self_names(), getpass.getuser())
-    if not entries and opts.no_local:
-        raise ToolError(f"no logins in {path} (entries naming this machine are dropped)")
+def logins(opts: LoginOpts, env=None, found: lists.Lists | None = None) -> list[Login]:
+    """The resolved, filtered, optionally picked list; from the lists files,
+    or from `found` when the caller has read them already. Raises ToolError
+    or pick.Abort."""
+    if found is None:
+        found = lists.load_all(opts.files, env)
+    names, user = self_names(), getpass.getuser()
+    entries = [e for e in drop_self(found.logins, names, user)
+               if attrs.holds_all(opts.attrs, e.attributes)]
     if not opts.no_local:
-        entries.append(Login("localhost"))
+        local = local_login(found.logins, names, user)
+        if attrs.holds_all(opts.attrs, local.attributes):
+            entries.append(local)
+    if not entries:
+        why = (f"match -a {' '.join(map(str, opts.attrs))}" if opts.attrs
+               else "(entries naming this machine are dropped)")
+        raise ToolError(f"no logins in {', '.join(found.files)} {why}")
     if opts.pick:
         # Shown with their commands, since one login can be listed twice for
         # two different ones; the picker keeps such twins apart by number.

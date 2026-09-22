@@ -8,7 +8,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 BLOCKLIST = re.compile(
     r"(?i)amazon|rabbit|lapin|brazil|peru|zatanna|flex|midway|\bcld\b|weblab|transporter"
     r"|workplace|kiro|hwjlee|hjlee|/home/curiousj|curiousj@|laptop|dot-files|cloud desktop"
-    r"|mac-mini|cachyos|ryzen"
+    r"|mac-mini|cachyos-|ryzen"
 )
 
 
