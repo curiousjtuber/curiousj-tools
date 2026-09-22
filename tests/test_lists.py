@@ -352,6 +352,22 @@ class ExampleFiles(unittest.TestCase):
                          (yaml.logins, yaml.paths, yaml.operations))
         self.assertTrue(toml.logins and toml.paths and toml.operations)
 
+    def test_operations_file_adds_to_the_yaml_without_a_warning(self):
+        root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples")
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            found = lists.load_files([os.path.join(root, "ssh-lists.yaml"),
+                                      os.path.join(root, "ssh-lists-operations.yaml")])
+        self.assertEqual(err.getvalue(), "")
+        alone = lists.load(os.path.join(root, "ssh-lists.yaml"))
+        self.assertGreater(len(found.operations), len(alone.operations))
+        self.assertTrue(set(alone.operations) < set(found.operations))
+        group = next(op for op in found.operations.values()
+                     if op.group and op.file.endswith("ssh-lists-operations.yaml"))
+        self.assertTrue(any(found.operations[m].file.endswith("ssh-lists.yaml") for m in group.members))
+        with self.assertRaises(ToolError) as cm:  # the group needs the other file
+            lists.load(os.path.join(root, "ssh-lists-operations.yaml"))
+        self.assertIn("unknown member", str(cm.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

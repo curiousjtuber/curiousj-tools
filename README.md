@@ -167,7 +167,9 @@ paths:
 ```
 
 See [examples/ssh-lists.toml](examples/ssh-lists.toml) and
-[examples/ssh-lists.yaml](examples/ssh-lists.yaml). `localhost` is appended to the logins for
+[examples/ssh-lists.yaml](examples/ssh-lists.yaml), and
+[examples/ssh-lists-operations.yaml](examples/ssh-lists-operations.yaml) for operations kept in a
+file of their own. `localhost` is appended to the logins for
 the local side unless `-N`, and entries naming the machine you are on, for your user, are
 dropped, so one file serves every host on it; `localhost` takes over the attributes and
 operations of the first such entry. `-a TERM` keeps the logins whose attributes satisfy the
