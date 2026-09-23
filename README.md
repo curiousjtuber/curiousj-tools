@@ -69,8 +69,10 @@ Everything is remembered in `~/.config/sshtsf/config.toml`; see
 `sshtsf -c` walks through them: pick a host, then its settings or one of its sessions, and
 each field shows its current value, blank keeps it, `-` clears it, or at the name prompt
 removes the entry. A host or session named on the command line that is not registered yet
-goes through the same prompts, whether from `-c` or from a plain `sshtsf devbox api`. A new
-host is offered from the `logins` of the [ssh-lists file](#hosts-and-batch-runs) first, then
+goes through the same prompts under `-c`. Connecting registers only an unknown session on a
+known host, so `sshtsf devbox api` asks for `api` and then connects; an unknown host is
+refused there, as the typo it usually is, with the `sshtsf -c` line that would register it.
+A new host is offered from the `logins` of the [ssh-lists file](#hosts-and-batch-runs) first, then
 from `~/.ssh/known_hosts`. A host's `target` is the ssh destination, `[user@]host`, and is what
 every connection and probe dials; there is no separate user field. A login picked from the
 lists is the target as is; otherwise the user is asked for when the destination names none,

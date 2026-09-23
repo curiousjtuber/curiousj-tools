@@ -794,6 +794,23 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         self.assertIn("unknown host or alias: nowhere", err)
         self.assertIn("devbox  (alias c, default)", err)
 
+    def test_unknown_host_is_refused_not_registered(self):
+        # The README once promised `sshtsf newbox api` would register newbox;
+        # only -c does. Any prompt here fails the scripted ask.
+        with mock.patch.object(sshtsf, "ask", side_effect=scripted({})), \
+             mock.patch.object(sshtsf, "ssh_known_hosts", return_value=[]):
+            rc, _, err = run_capture(["newbox", "api", "--dry-run"])
+        self.assertEqual(rc, 1)
+        self.assertIn("unknown host: newbox (`sshtsf -c newbox` registers it)", err)
+        self.assertNotIn("newbox", sshtsf.load_config()["hosts"])
+
+    def test_unknown_session_on_a_known_host_is_registered(self):
+        with mock.patch.object(sshtsf, "route_add_session", return_value=0) as add:
+            rc, _, err = run_capture(["c", "api2", "--dry-run"])
+        self.assertEqual(rc, 0)
+        self.assertIn("no session api2 on devbox", err)
+        self.assertEqual(add.call_args.args[:3], (mock.ANY, "devbox", "api2"))
+
     def test_host_picker_shows_the_target(self):
         cfg = sshtsf.load_config()
         cfg["hosts"]["devbox"]["target"] = "me@devbox.local"

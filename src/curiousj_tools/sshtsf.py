@@ -24,10 +24,12 @@ two-word invocation replaces a hand-written alias per session.
     sshtsf -c devbox web    ...that session; an unknown name registers it
     sshtsf --edit           open the config in $VISUAL / $EDITOR (vi if neither)
 
-Selections use fzf when it is on PATH and fall back to a numbered menu. A
-host or session that does not exist yet is registered through the same
-prompts -c edits it with: each field shows its current value, blank keeps
-it and `-` clears it, or, at the name prompt, removes the entry. Hosts to
+Selections use fzf when it is on PATH and fall back to a numbered menu.
+-c registers a host or session that does not exist yet through the same
+prompts it edits one with: each field shows its current value, blank keeps
+it and `-` clears it, or, at the name prompt, removes the entry. Connecting
+registers an unknown session on a known host the same way, but refuses an
+unknown host, pointing at `sshtsf -c HOST`. Hosts to
 add are offered from the ssh-lists file xssh and pssh read (see
 `ssh-logins -h`), then from ~/.ssh/known_hosts; a name typed is fine too.
 The same two lists are shown when a name does not resolve.
