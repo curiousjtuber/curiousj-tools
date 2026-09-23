@@ -60,7 +60,8 @@ A missing tool is a warning, never a refusal. A forward whose tool is absent
 at either end (no Emacs server, no waypipe, no socat on the remote) is left
 out and said so on stderr; a remote without tmux, or a session that cannot
 be created or attached, gets a plain login shell in the session's folder
-instead. The worst case is a plain ssh, not a connection that dies.
+instead, and a session whose command will not start is made without it. The
+worst case is a plain ssh, not a connection that dies.
 
 Everything sshtsf runs on the remote (tmux, socat) is looked for in the
 Homebrew, Linuxbrew and ~/.local/bin directories first, since a non-
