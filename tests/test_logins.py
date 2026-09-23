@@ -59,25 +59,25 @@ class Hosts(unittest.TestCase):
         # uid names no entry's user@, so alice@my-mac.local is someone else.
         with mock.patch("getpass.getuser", side_effect=KeyError("uid 1000")), \
                 mock.patch("os.getuid", return_value=1000):
-            got = logins.logins(logins.LoginOpts(files=(self.file,)))
+            got = logins.select(logins.LoginOpts(files=(self.file,)))
         self.assertEqual([e.login for e in got], ["a", "alice@my-mac.local", "b", "c", "localhost"])
 
     def test_default_adds_localhost_last(self):
-        self.assertEqual(logins.logins(logins.LoginOpts(files=(self.file,))), H("a", "b", "c", "localhost"))
+        self.assertEqual(logins.select(logins.LoginOpts(files=(self.file,))), H("a", "b", "c", "localhost"))
 
     def test_no_local(self):
-        self.assertEqual(logins.logins(logins.LoginOpts(no_local=True, files=(self.file,))), H("a", "b", "c"))
+        self.assertEqual(logins.select(logins.LoginOpts(no_local=True, files=(self.file,))), H("a", "b", "c"))
 
     def test_only_self_and_no_local_is_an_error(self):
         with open(self.file, "w") as f:
             f.write('logins = ["my-mac"]\n')
         with self.assertRaises(logins.ToolError):
-            logins.logins(logins.LoginOpts(no_local=True, files=(self.file,)))
-        self.assertEqual(logins.logins(logins.LoginOpts(files=(self.file,))), H("localhost"))
+            logins.select(logins.LoginOpts(no_local=True, files=(self.file,)))
+        self.assertEqual(logins.select(logins.LoginOpts(files=(self.file,))), H("localhost"))
 
     def test_pick_goes_through_picker(self):
-        with mock.patch.object(pick, "pick", return_value=["c", "localhost"]) as p:
-            self.assertEqual(logins.logins(logins.LoginOpts(pick=True, files=(self.file,))),
+        with mock.patch.object(pick, "choose_many", return_value=["c", "localhost"]) as p:
+            self.assertEqual(logins.select(logins.LoginOpts(choose=True, files=(self.file,))),
                              H("c", "localhost"))
         p.assert_called_once_with(["a", "b", "c", "localhost"], "logins")
 
@@ -85,47 +85,47 @@ class Hosts(unittest.TestCase):
         # The same login twice, once with commands: picking one is one.
         with open(self.file, "w") as f:
             f.write('logins = ["a", { login = "a", commands = ["exec zsh"] }]\n')
-        with mock.patch.object(pick, "pick", return_value=["a  exec zsh"]) as p:
-            self.assertEqual(logins.logins(logins.LoginOpts(pick=True, files=(self.file,))),
+        with mock.patch.object(pick, "choose_many", return_value=["a  exec zsh"]) as p:
+            self.assertEqual(logins.select(logins.LoginOpts(choose=True, files=(self.file,))),
                              [Login("a", ["exec zsh"])])
         p.assert_called_once_with(["a", "a  exec zsh", "localhost"], "logins")
 
     def test_commands_ride_along(self):
         with open(self.file, "w") as f:
             f.write('[[logins]]\nlogin = "a"\ncommands = ["exec zsh"]\n')
-        self.assertEqual(logins.logins(logins.LoginOpts(no_local=True, files=(self.file,))),
+        self.assertEqual(logins.select(logins.LoginOpts(no_local=True, files=(self.file,))),
                          [Login("a", ["exec zsh"])])
 
     def test_attr_terms_filter_logins_and_localhost_alike(self):
         with open(self.file, "w") as f:
             f.write('logins = [{ login = "a", attributes = ["mise"] }, "b",\n'
                     '  { login = "alice@my-mac.local", attributes = ["mise", "mac"] }]\n')
-        opts = logins.LoginOpts(files=(self.file,), attrs=(Term("mise"),))
-        found = logins.logins(opts)
+        opts = logins.LoginOpts(files=(self.file,), terms=(Term("mise"),))
+        found = logins.select(opts)
         self.assertEqual([e.login for e in found], ["a", "localhost"])
         self.assertEqual(found[1].attributes, {"mise": None, "mac": None})
-        opts = logins.LoginOpts(files=(self.file,), attrs=(Term("mise", negated=True),))
-        self.assertEqual([e.login for e in logins.logins(opts)], ["b"])
-        opts = logins.LoginOpts(files=(self.file,), attrs=(Term("mac"), Term("mise")))
-        self.assertEqual([e.login for e in logins.logins(opts)], ["localhost"])
+        opts = logins.LoginOpts(files=(self.file,), terms=(Term("mise", negated=True),))
+        self.assertEqual([e.login for e in logins.select(opts)], ["b"])
+        opts = logins.LoginOpts(files=(self.file,), terms=(Term("mac"), Term("mise")))
+        self.assertEqual([e.login for e in logins.select(opts)], ["localhost"])
 
     def test_nothing_matching_is_an_error(self):
         with self.assertRaises(logins.ToolError) as cm:
-            logins.logins(logins.LoginOpts(files=(self.file,), attrs=(Term("mac"),)))
+            logins.select(logins.LoginOpts(files=(self.file,), terms=(Term("mac"),)))
         self.assertIn(f"no logins in {self.file} match -a mac", str(cm.exception))
         with self.assertRaises(logins.ToolError) as cm:
-            logins.logins(logins.LoginOpts(no_local=True, files=(self.file,), attrs=(Term("x"),)))
+            logins.select(logins.LoginOpts(no_local=True, files=(self.file,), terms=(Term("x"),)))
         self.assertIn("match -a x", str(cm.exception))
 
     def test_a_second_file_adds_logins_and_found_lists_are_taken_as_given(self):
         second = os.path.join(self.tmp.name, "ssh-lists-more.toml")
         with open(second, "w") as f:
             f.write('logins = ["d"]\n')
-        self.assertEqual([e.login for e in logins.logins(logins.LoginOpts(files=(self.file, second)))],
+        self.assertEqual([e.login for e in logins.select(logins.LoginOpts(files=(self.file, second)))],
                          ["a", "b", "c", "d", "localhost"])
         found = lists.Lists([Login("z")], files=["Z"])
         with mock.patch.object(lists, "load_all") as load:
-            self.assertEqual([e.login for e in logins.logins(logins.LoginOpts(), found=found)],
+            self.assertEqual([e.login for e in logins.select(logins.LoginOpts(), found=found)],
                              ["z", "localhost"])
         load.assert_not_called()
 
@@ -139,7 +139,7 @@ class Hosts(unittest.TestCase):
         with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
             self.assertEqual(logins.main(["-f", os.path.join(self.tmp.name, "none")]), 1)
         self.assertIn("cannot read", err.getvalue())
-        with mock.patch.object(pick, "pick", side_effect=pick.Abort):
+        with mock.patch.object(pick, "choose_many", side_effect=pick.Abort):
             self.assertEqual(logins.main(["-p", "-f", self.file]), 130)
 
 

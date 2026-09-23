@@ -333,8 +333,8 @@ def runs(pairs: list[tuple[Login, str]], interactive: bool = False) -> dict[str,
 
 
 def parallel_argv(entries: list[str], cmd: str) -> list[str]:
-    logins = [":" if e == "localhost" else e for e in entries]  # ':' is parallel's "here"
-    return ["parallel", "--nonall", "--tag", "--linebuffer", "-S", ",".join(logins), cmd]
+    hosts = [":" if e == "localhost" else e for e in entries]  # ':' is parallel's "here"
+    return ["parallel", "--nonall", "--tag", "--linebuffer", "-S", ",".join(hosts), cmd]
 
 
 def serial_argv(login: str, cmd: str) -> list[str]:
@@ -429,7 +429,7 @@ def cli(opts: logins.LoginOpts, dry_run: bool, serial: bool, interactive: bool,
         if ops:
             path_list = (paths_list(found, pick_paths, path_attrs)
                          if any(op.per_path for op in leaves) else [])
-            entries = logins.logins(opts, found=found)
+            entries = logins.select(opts, found=found)
             scripts = [(e, login_script(e, leaves, path_list, clone)) for e in entries]
             skipped = list(dict.fromkeys(e.login for e, s in scripts if s is None))
             groups = runs([(e, s) for e, s in scripts if s], interactive)
@@ -437,7 +437,7 @@ def cli(opts: logins.LoginOpts, dry_run: bool, serial: bool, interactive: bool,
             cmd = command_line(list(command))
             if paths:
                 cmd = paths_script(paths_list(found, pick_paths, path_attrs), cmd, clone)
-            groups = runs([(e, cmd) for e in logins.logins(opts, found=found)], interactive)
+            groups = runs([(e, cmd) for e in logins.select(opts, found=found)], interactive)
     except ToolError as e:
         print(f"pssh: {e}", file=sys.stderr)
         return cmdline.EXIT_ERROR

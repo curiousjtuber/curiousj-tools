@@ -143,13 +143,13 @@ class Choose(unittest.TestCase):
 
 class Main(unittest.TestCase):
     def test_prints_selection(self):
-        with mock.patch.object(pick, "pick", return_value=["beta"]), \
+        with mock.patch.object(pick, "choose_many", return_value=["beta"]), \
                 mock.patch("sys.stdout", new_callable=io.StringIO) as out:
             self.assertEqual(pick.main(["hosts", *ITEMS]), 0)
         self.assertEqual(out.getvalue(), "beta\n")
 
     def test_abort_exits_130(self):
-        with mock.patch.object(pick, "pick", side_effect=pick.Abort):
+        with mock.patch.object(pick, "choose_many", side_effect=pick.Abort):
             self.assertEqual(pick.main(["hosts", *ITEMS]), 130)
 
     def test_needs_noun_and_items(self):
@@ -167,7 +167,7 @@ class Main(unittest.TestCase):
 class PickFrom(unittest.TestCase):
     def test_twins_numbered_and_mapped_back(self):
         items = [("a", 1), ("b", 2), ("a", 3)]
-        with mock.patch.object(pick, "pick", return_value=["a #2", "b"]) as p:
+        with mock.patch.object(pick, "choose_many", return_value=["a #2", "b"]) as p:
             chosen = pick.pick_from(items, "things", lambda t: t[0])
         p.assert_called_once_with(["a", "b", "a #2"], "things")
         self.assertEqual(chosen, [("b", 2), ("a", 3)])

@@ -140,14 +140,14 @@ def cli(opts: logins.LoginOpts, ops: tuple[str, ...], list_ops: bool,
             leaves = pssh.expand(list(ops), found.operations)
             path_list = (pssh.paths_list(found, pick_paths, path_attrs)
                          if any(op.per_path for op in leaves) else [])
-            entries, commands, skipped = op_panes(logins.logins(opts, found=found), leaves,
+            entries, commands, skipped = op_panes(logins.select(opts, found=found), leaves,
                                                  path_list, clone)
             for login in skipped:
                 print(f"xssh: {login}: no operation applies, no pane", file=sys.stderr)
             if not entries:
                 raise ToolError("no login takes part")
         else:
-            entries = logins.logins(opts)
+            entries = logins.select(opts)
             commands = pane_commands(entries)
         # A pane of either kind types the login's commands, the one place an
         # '&' or a backslash comes from, so the bash is asked only then.

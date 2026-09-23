@@ -28,7 +28,7 @@ class Abort(Exception):
 
 
 def pick_from(items: list, noun: str, label: Callable) -> list:
-    """pick() over items shown as label(item), the chosen items back. Two
+    """choose_many() over items shown as label(item), the chosen items back. Two
     items with one label are told apart by a number, so choosing one does
     not choose both."""
     seen: dict[str, int] = {}
@@ -37,7 +37,7 @@ def pick_from(items: list, noun: str, label: Callable) -> list:
         text = label(item)
         seen[text] = seen.get(text, 0) + 1
         labels.append(text if seen[text] == 1 else f"{text} #{seen[text]}")
-    chosen = set(pick(labels, noun))
+    chosen = set(choose_many(labels, noun))
     return [item for item, text in zip(items, labels) if text in chosen]
 
 
@@ -120,7 +120,7 @@ def tty_ask(prompt: str) -> str:
     return line.rstrip("\n")
 
 
-def pick(items: Iterable[str], noun: str) -> list[str]:
+def choose_many(items: Iterable[str], noun: str) -> list[str]:
     """Marked subset of items; fzf on a tty when installed, else the menu."""
     items = list(items)
     if fzf_usable():
@@ -130,7 +130,7 @@ def pick(items: Iterable[str], noun: str) -> list[str]:
 
 def choose(items: list[str], prompt: str, header: str = "",
            free_text: bool = False, query: str = "") -> str | None:
-    """One of items, the single-choice counterpart of pick(); None when the
+    """One of items, the single-choice counterpart of choose_many(); None when the
     user leaves. sshtsf's menus, which ask on stdin like its other prompts.
 
     free_text allows a value that is not in the list -- right for a remote
@@ -193,7 +193,7 @@ def choose_numbered(items: list[str], prompt: str, header: str = "",
 @click.argument("items", metavar="ITEM...", nargs=-1, required=True)
 def cli(noun: str, items: tuple[str, ...]) -> int:
     try:
-        sel = pick(items, noun)
+        sel = choose_many(items, noun)
     except Abort:
         return EXIT_ABORT
     print("\n".join(sel))

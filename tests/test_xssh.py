@@ -11,7 +11,7 @@ from curiousj_tools.lists import Login, Operation, PathInfo
 
 class Arguments(unittest.TestCase):
     def test_host_flags_anywhere_rest_passes_through_in_order(self):
-        with mock.patch.object(logins, "logins", return_value=[Login("a")]) as h, \
+        with mock.patch.object(logins, "select", return_value=[Login("a")]) as h, \
                 mock.patch("shutil.which", return_value="/usr/bin/xpanes"), \
                 mock.patch("os.execvp") as ex, \
                 mock.patch.object(logins, "confirm_new_hosts"):
@@ -20,7 +20,7 @@ class Arguments(unittest.TestCase):
         self.assertEqual(ex.call_args[0][1], ["xpanes", "--stay", "-l", "ev", "-s", "-e", "ssh a"])
 
     def test_xpanes_c_and_C_pass_through(self):
-        with mock.patch.object(logins, "logins", return_value=[Login("a")]), \
+        with mock.patch.object(logins, "select", return_value=[Login("a")]), \
                 mock.patch("shutil.which", return_value="/usr/bin/xpanes"), \
                 mock.patch("os.execvp") as ex, \
                 mock.patch.object(logins, "confirm_new_hosts"):
@@ -124,7 +124,7 @@ class Main(unittest.TestCase):
                             [PathInfo("p", attributes={"git": None})],
                             {op.name: op for op in OpPanes.OPS}, ["F"])
         with mock.patch.object(lists, "load_all", return_value=found) as load, \
-                mock.patch.object(logins, "logins", return_value=found.logins + [Login("localhost")]) as h, \
+                mock.patch.object(logins, "select", return_value=found.logins + [Login("localhost")]) as h, \
                 mock.patch("shutil.which", return_value="/usr/bin/xpanes"), \
                 mock.patch("os.execvp") as ex, \
                 mock.patch.object(logins, "confirm_new_hosts") as confirm, \
@@ -140,7 +140,7 @@ class Main(unittest.TestCase):
         self.assertEqual(err.getvalue(), "xssh: b: no operation applies, no pane\n"
                                          "xssh: localhost: no operation applies, no pane\n")
         with mock.patch.object(lists, "load_all", return_value=found), \
-                mock.patch.object(logins, "logins", return_value=[Login("b")]), \
+                mock.patch.object(logins, "select", return_value=[Login("b")]), \
                 mock.patch("shutil.which", return_value="/usr/bin/xpanes"), \
                 mock.patch("os.execvp") as ex, \
                 mock.patch("sys.stderr", new_callable=io.StringIO) as err:
@@ -154,7 +154,7 @@ class Main(unittest.TestCase):
         self.assertIn("unknown operation 'nope'", err.getvalue())
 
     def test_execs_xpanes(self):
-        with mock.patch.object(logins, "logins", return_value=[Login("a"), Login("localhost")]) as h, \
+        with mock.patch.object(logins, "select", return_value=[Login("a"), Login("localhost")]) as h, \
                 mock.patch("shutil.which", return_value="/usr/bin/xpanes"), \
                 mock.patch("os.execvp") as ex, \
                 mock.patch.object(logins, "confirm_new_hosts") as confirm:
@@ -166,7 +166,7 @@ class Main(unittest.TestCase):
 
     def test_escapes_only_when_a_host_has_commands(self):
         entries = [Login("a", ["cd x && exec zsh"]), Login("localhost")]
-        with mock.patch.object(logins, "logins", return_value=entries), \
+        with mock.patch.object(logins, "select", return_value=entries), \
                 mock.patch("shutil.which", return_value="/usr/bin/xpanes"), \
                 mock.patch("os.execvp") as ex, \
                 mock.patch.object(xssh, "xpanes_expands_ampersand", return_value=True) as bash, \
@@ -174,7 +174,7 @@ class Main(unittest.TestCase):
             xssh.main([])
         bash.assert_called_once()
         self.assertEqual(ex.call_args[0][1][-2:], ["ssh -t a 'cd x \\&\\& exec zsh'", "cd ~; exec $SHELL"])
-        with mock.patch.object(logins, "logins", return_value=[Login("a")]), \
+        with mock.patch.object(logins, "select", return_value=[Login("a")]), \
                 mock.patch("shutil.which", return_value="/usr/bin/xpanes"), \
                 mock.patch("os.execvp"), \
                 mock.patch.object(xssh, "xpanes_expands_ampersand") as bash, \
@@ -188,7 +188,7 @@ class Main(unittest.TestCase):
         found = lists.Lists([Login("a", ["cd x && exec zsh"], attributes={"mise": None})],
                             [], {"up": OpPanes.OPS[0]}, ["F"])
         with mock.patch.object(lists, "load_all", return_value=found), \
-                mock.patch.object(logins, "logins", return_value=found.logins), \
+                mock.patch.object(logins, "select", return_value=found.logins), \
                 mock.patch("shutil.which", return_value="/usr/bin/xpanes"), \
                 mock.patch("os.execvp") as ex, \
                 mock.patch.object(xssh, "xpanes_expands_ampersand", return_value=True) as bash, \
@@ -205,7 +205,7 @@ class Main(unittest.TestCase):
             self.assertEqual(xssh.main([]), 1)
         self.assertIn("xpanes not installed", err.getvalue())
         with mock.patch("shutil.which", return_value="/usr/bin/xpanes"), \
-                mock.patch.object(logins, "logins", side_effect=pick.Abort), \
+                mock.patch.object(logins, "select", side_effect=pick.Abort), \
                 mock.patch("os.execvp") as ex, \
                 mock.patch.object(logins, "confirm_new_hosts"):
             self.assertEqual(xssh.main(["-p"]), 130)

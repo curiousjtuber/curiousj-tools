@@ -50,9 +50,9 @@ class LoginOpts:
     """The login-selection flags xssh and pssh share with ssh-logins."""
 
     no_local: bool = False
-    pick: bool = False
+    choose: bool = False                  # -p: pick some interactively
     files: tuple[str, ...] = ()
-    attrs: tuple[attrs.Term, ...] = ()
+    terms: tuple[attrs.Term, ...] = ()    # -a: keep those whose attributes satisfy all
 
 
 def attr_terms(ctx, param, value) -> tuple[attrs.Term, ...]:
@@ -68,13 +68,13 @@ def login_options(f):
     as one LoginOpts named opts."""
     @click.option("-f", "files", metavar="FILE", multiple=True,
                   help="an ssh-lists file to read (repeatable; these and no other)")
-    @click.option("-p", "--pick", is_flag=True, help="choose logins interactively")
-    @click.option("-a", "--attr", "attrs", metavar="TERM", multiple=True, callback=attr_terms,
+    @click.option("-p", "--pick", "choose", is_flag=True, help="choose logins interactively")
+    @click.option("-a", "--attr", "terms", metavar="TERM", multiple=True, callback=attr_terms,
                   help="keep logins with the attribute: key, key=value, !key, key!=value (repeatable)")
     @click.option("-N", "--no-local", is_flag=True, help="leave localhost out")
     @functools.wraps(f)
-    def wrapper(no_local, attrs, pick, files, **kw):
-        return f(LoginOpts(no_local, pick, tuple(files), attrs), **kw)
+    def wrapper(no_local, terms, choose, files, **kw):
+        return f(LoginOpts(no_local, choose, tuple(files), terms), **kw)
     return wrapper
 
 
@@ -138,7 +138,7 @@ def confirm_new_hosts(entries: list[str], prog: str) -> None:
             raise ToolError(f"{entry}: host key not confirmed (answer yes, or drop it from the list)")
 
 
-def logins(opts: LoginOpts, env=None, found: lists.Lists | None = None) -> list[Login]:
+def select(opts: LoginOpts, env=None, found: lists.Lists | None = None) -> list[Login]:
     """The resolved, filtered, optionally picked list; from the lists files,
     or from 'found' when the caller has read them already. Raises ToolError
     or pick.Abort."""
@@ -146,16 +146,16 @@ def logins(opts: LoginOpts, env=None, found: lists.Lists | None = None) -> list[
         found = lists.load_all(opts.files, env)
     names, user = self_names(), sshutil.login_name()
     entries = [e for e in drop_self(found.logins, names, user)
-               if attrs.holds_all(opts.attrs, e.attributes)]
+               if attrs.holds_all(opts.terms, e.attributes)]
     if not opts.no_local:
         local = local_login(found.logins, names, user)
-        if attrs.holds_all(opts.attrs, local.attributes):
+        if attrs.holds_all(opts.terms, local.attributes):
             entries.append(local)
     if not entries:
-        why = (f"match -a {' '.join(map(str, opts.attrs))}" if opts.attrs
+        why = (f"match -a {' '.join(map(str, opts.terms))}" if opts.terms
                else "(entries naming this machine are dropped)")
         raise ToolError(f"no logins in {', '.join(found.files)} {why}")
-    if opts.pick:
+    if opts.choose:
         # Shown with their commands, since one login can be listed twice for
         # two different ones; the picker keeps such twins apart by number.
         entries = pick.pick_from(entries, "logins", label)
@@ -170,7 +170,7 @@ def label(entry: Login) -> str:
 @login_options
 def cli(opts: LoginOpts) -> int:
     try:
-        entries = logins(opts)
+        entries = select(opts)
     except ToolError as e:
         print(f"ssh-logins: {e}", file=sys.stderr)
         return EXIT_ERROR
