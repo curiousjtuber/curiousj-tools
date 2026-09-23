@@ -1100,33 +1100,34 @@ CLEAR = "-"
 
 
 def ask_text(prompt: str, current: str = "", editing: bool = False,
-             none: str = "none") -> str:
+             unset: str = "none") -> str:
     """A string field. New: blank for none. Editing: blank keeps the current
-    value and `-' clears it; the hint says which. Returns "" for none."""
+    value and `-' clears it; the hint says which, unset naming what an empty
+    field means. Returns "" for none."""
     if editing and current:
-        reply = ask("%s (- for %s)" % (prompt, none), current)
+        reply = ask("%s (- for %s)" % (prompt, unset), current)
     else:
-        reply = ask("%s (blank for %s)" % (prompt, none))
+        reply = ask("%s (blank for %s)" % (prompt, unset))
     return "" if reply.strip() == CLEAR else reply.strip()
 
 
 def ask_bool(prompt: str, current: bool | None = None, editing: bool = False,
-             absent: str = "none") -> bool | None:
+             unset: str = "none") -> bool | None:
     """A boolean field; None means "not set". New, it is a (y/N) where only a
     yes sets it, since an absent field already means no. Editing, blank
     keeps the current value and `-' unsets it, which for a session means
-    following the host; absent names what unset means there, for the hint.
+    following the host; unset names what that means there, for the hint.
     A word that is neither yes nor no is asked again rather than taken as
     no, so a typo cannot quietly turn a forward off."""
     if not editing:
         return True if said_yes(ask("%s (y/N)" % prompt)) else None
     while True:
         if current is None:
-            reply = ask("%s (y/n, blank for %s)" % (prompt, absent))
+            reply = ask("%s (y/n, blank for %s)" % (prompt, unset))
             if not reply or reply == CLEAR:
                 return None
         else:
-            reply = ask("%s (y/n, - for %s)" % (prompt, absent),
+            reply = ask("%s (y/n, - for %s)" % (prompt, unset),
                         "yes" if current else "no")
             if reply == CLEAR:
                 return None
@@ -1373,7 +1374,7 @@ def edit_session(cfg: dict, host: str, name: str = "",
     set_field(scfg, "folder", folder)
 
     set_field(scfg, "command", ask_text("  command to run", scfg.get("command", ""),
-                                        editing, none="a shell"))
+                                        editing, unset="a shell"))
 
     for field, question in (("ecf", "forward the local Emacs socket?"),
                             ("waypipe", "forward Wayland, for GUI applications?")):
@@ -1383,7 +1384,7 @@ def edit_session(cfg: dict, host: str, name: str = "",
         if editing or not hcfg.get(field):
             set_field(scfg, field, ask_bool(
                 "  " + question, scfg.get(field), editing,
-                absent="the host's (%s)" % ("on" if hcfg.get(field) else "off")))
+                unset="the host's (%s)" % ("on" if hcfg.get(field) else "off")))
 
     # Asked last, so the whole entry is visible by the time the shorthand
     # for it is chosen. A new one is offered the session name, unless that
