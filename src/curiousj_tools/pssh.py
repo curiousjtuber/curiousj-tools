@@ -219,9 +219,10 @@ def expand(names: list[str], ops: dict[str, Operation]) -> list[Operation]:
     return list(out.values())
 
 
-def describe(op: Operation, found: lists.Lists) -> list[str]:
-    """One line for an operation -- where it runs, its flags, its command
-    or members -- and one, indented, per entry with its own command for it."""
+def describe(op: Operation, found: lists.Lists) -> tuple[str, str, list[str]]:
+    """An operation as -L shows it: where it runs and its flags, its command
+    or members, and a line, indented, per entry with its own command for it.
+    Columns stay apart as values: a command may hold any character."""
     if op.group:
         where, what = "group", ", ".join(op.members)
     else:
@@ -233,13 +234,10 @@ def describe(op: Operation, found: lists.Lists) -> list[str]:
             where = "per login" + ("" if op.logins == attrs.EVERYTHING else f" {op.logins}")
         where += "".join(f", {flag}" for flag in ("clone", "serial") if getattr(op, flag))
         what = op.command or "(the entries' own commands)"
-    lines = [f"{where}\t{what}"]
     entries = found.paths if op.per_path else found.logins
-    for entry in entries:
-        own = entry.operations.get(op.name)
-        if own is not None:
-            lines.append(f"    {getattr(entry, 'path' if op.per_path else 'login')}: {own}")
-    return lines
+    own = [f"    {getattr(entry, 'path' if op.per_path else 'login')}: {entry.operations[op.name]}"
+           for entry in entries if op.name in entry.operations]
+    return where, what, own
 
 
 def list_operations(found: lists.Lists) -> str:
@@ -247,17 +245,13 @@ def list_operations(found: lists.Lists) -> str:
     in columns, for -L."""
     if not found.operations:
         return f"no operations in {', '.join(found.files)}"
-    width = max(len(name) for name in found.operations)
-    rows = []
-    for name, op in found.operations.items():
-        first, *rest = describe(op, found)
-        rows.append((name.ljust(width) + "  " + first, rest))
-    place = max(len(row.split("\t")[0]) for row, _ in rows)
+    rows = [(name, *describe(op, found)) for name, op in found.operations.items()]
+    width = max(len(name) for name, *_ in rows)
+    place = max(len(where) for _, where, _, _ in rows)
     out = []
-    for row, rest in rows:
-        head, what = row.split("\t")
-        out.append(head.ljust(place) + "  " + what)
-        out.extend(rest)
+    for name, where, what, own in rows:
+        out.append(f"{name.ljust(width)}  {where.ljust(place)}  {what}")
+        out.extend(own)
     return "\n".join(out)
 
 

@@ -332,6 +332,17 @@ class ListOperations(unittest.TestCase):
         ])
         self.assertEqual(pssh.list_operations(Lists(files=["F", "G"])), "no operations in F, G")
 
+    def test_a_tab_in_a_command_is_just_text(self):
+        # The columns used to be joined with a tab and split on it again, so
+        # a command holding one raised ValueError.
+        found = Lists([Login("a", operations={"up": "printf 'a\tb'"})], [],
+                      {"up": UP, "cut": Operation("cut", "cut -d'\t' -f1")}, ["F"])
+        self.assertEqual(pssh.list_operations(found).splitlines(), [
+            "up   per login mise  mise up",
+            "    a: printf 'a\tb'",
+            "cut  per login       cut -d'\t' -f1",
+        ])
+
     def test_flag_prints_and_exits(self):
         rc, out, err, opts = dry(["-L", "-f", "F"], ops=[UP])
         self.assertEqual((rc, err, opts), (0, "", None))
