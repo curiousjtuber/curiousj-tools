@@ -120,15 +120,20 @@ def socket_live(socket: str, real: str, env: dict) -> bool:
     return proc.returncode == 0
 
 
-def route(args: list[str], env: dict, live: bool) -> tuple[str, dict[str, str]]:
+def settings(env: dict) -> tuple[str, str]:
+    """The forwarded socket and the TRAMP prefix, as the env knobs set them."""
+    return (env.get("EMACSCLIENT_FORWARD_SOCKET") or DEFAULT_SOCKET,
+            env.get("EMACSCLIENT_TRAMP_PREFIX") or "")
+
+
+def route(args: list[str], socket: str, prefix: str,
+          live: bool) -> tuple[str, dict[str, str]]:
     """Decide the branch: ("local" | "remote" | "remote-eval", env additions).
 
     Remote only when the server answered AND a TRAMP prefix is set: without a
     prefix a file argument could not be rewritten for the far Emacs, so the
     forward is of no use to a file-visiting call.
     """
-    socket = env.get("EMACSCLIENT_FORWARD_SOCKET") or DEFAULT_SOCKET
-    prefix = env.get("EMACSCLIENT_TRAMP_PREFIX") or ""
     if live and prefix:
         if is_eval(args):
             return "remote-eval", {"EMACS_SOCKET_NAME": socket}
@@ -145,12 +150,11 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 127
 
-    socket = env.get("EMACSCLIENT_FORWARD_SOCKET") or DEFAULT_SOCKET
-    prefix = env.get("EMACSCLIENT_TRAMP_PREFIX") or ""
+    socket, prefix = settings(env)
     # The probe costs a round trip, so it is skipped when the answer could not
     # change the branch anyway.
     live = bool(prefix) and socket_live(socket, real, env)
-    branch, extra = route(args, env, live)
+    branch, extra = route(args, socket, prefix, live)
 
     if env.get("EMACSCLIENT_AUTO_DEBUG"):
         if branch == "remote-eval":

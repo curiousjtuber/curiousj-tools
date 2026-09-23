@@ -34,32 +34,30 @@ class TestDefaultSocket(unittest.TestCase):
 
 
 class TestRoute(unittest.TestCase):
+    def test_settings_default_and_knobs(self):
+        self.assertEqual(eca.settings({}), (eca.DEFAULT_SOCKET, ""))
+        self.assertEqual(eca.settings({"EMACSCLIENT_TRAMP_PREFIX": PREFIX,
+                                       "EMACSCLIENT_FORWARD_SOCKET": "/run/fwd.sock"}),
+                         ("/run/fwd.sock", PREFIX))
+
     def test_live_socket_with_prefix_routes_files_remote(self):
-        env = {"EMACSCLIENT_TRAMP_PREFIX": PREFIX}
-        branch, extra = eca.route(["-n", "notes.txt"], env, live=True)
+        branch, extra = eca.route(["-n", "notes.txt"], "/run/fwd.sock", PREFIX, live=True)
         self.assertEqual(branch, "remote")
-        self.assertEqual(extra, {"EMACS_SOCKET_NAME": eca.DEFAULT_SOCKET,
+        self.assertEqual(extra, {"EMACS_SOCKET_NAME": "/run/fwd.sock",
                                  "EMACSCLIENT_TRAMP": PREFIX})
 
-    def test_custom_socket_path(self):
-        env = {"EMACSCLIENT_TRAMP_PREFIX": PREFIX,
-               "EMACSCLIENT_FORWARD_SOCKET": "/run/fwd.sock"}
-        _, extra = eca.route(["f"], env, live=True)
-        self.assertEqual(extra["EMACS_SOCKET_NAME"], "/run/fwd.sock")
-
     def test_eval_goes_remote_without_prefix(self):
-        env = {"EMACSCLIENT_TRAMP_PREFIX": PREFIX}
         for args in (["-e", "(magit-status)"], ["--eval", "t"], ["--eval=t"]):
-            branch, extra = eca.route(args, env, live=True)
+            branch, extra = eca.route(args, eca.DEFAULT_SOCKET, PREFIX, live=True)
             self.assertEqual(branch, "remote-eval", args)
             self.assertEqual(extra, {"EMACS_SOCKET_NAME": eca.DEFAULT_SOCKET})
 
     def test_dead_socket_is_local(self):
-        branch, extra = eca.route(["f"], {"EMACSCLIENT_TRAMP_PREFIX": PREFIX}, live=False)
+        branch, extra = eca.route(["f"], eca.DEFAULT_SOCKET, PREFIX, live=False)
         self.assertEqual((branch, extra), ("local", {}))
 
     def test_no_prefix_is_local_even_when_live(self):
-        branch, extra = eca.route(["f"], {}, live=True)
+        branch, extra = eca.route(["f"], eca.DEFAULT_SOCKET, "", live=True)
         self.assertEqual((branch, extra), ("local", {}))
 
     def test_is_eval(self):
