@@ -88,7 +88,9 @@ a command line the command is run through there, handed `sh -c '...'` (or
 
 Inside, `~` is that place's home, so with the same login listed plainly as
 well, `pssh -P -c ...` keeps a container's separate home current alongside
-the host's. Entries that repeat a login with the same via are run once.
+the host's. Entries that repeat a login with the same via are run once. Run
+on the host itself, both entries give way to `localhost`, which has no via,
+so the container is reached only from the other hosts.
 
 A login whose host key is not in known_hosts yet is contacted once beforehand,
 in the foreground, so ssh's yes/no question can be answered; parallel

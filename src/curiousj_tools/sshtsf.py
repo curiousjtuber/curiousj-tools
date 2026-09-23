@@ -31,9 +31,9 @@ it and `-` clears it, or, at the name prompt, removes the entry. Connecting
 registers an unknown session on a known host the same way, but refuses an
 unknown host, pointing at `sshtsf -c HOST`. A word typed on its own -- a
 host's name or alias, a session's alias -- names one entry, and the prompts
-refuse one that is taken. Hosts to
-add are offered from the ssh-lists file xssh and pssh read (see
-`ssh-logins -h`), then from ~/.ssh/known_hosts; a name typed is fine too.
+refuse one that is taken. Hosts to add are offered from the ssh-lists
+file xssh and pssh read (see `ssh-logins -h`), then from ~/.ssh/known_hosts;
+a name typed is fine too.
 The same two lists are shown when a name does not resolve.
 
 With ecf on, the connection also reverse-forwards the local Emacs server
@@ -44,7 +44,9 @@ EMACS_REMOTE_TARGET, for the remote's TRAMP prefix. It is remembered per
 host or per session; -e / -E override for one call. If the remote runs
 SELinux (Fedora, Bazzite) and sshd is blocked from creating Unix sockets,
 give the host a TCP port to relay through (asked by -c when ecf is on; an
-`ecf_port` on a session, set by hand, wins over the host's).
+`ecf_port` on a session, set by hand, wins over the host's). The socket
+lands at /tmp/emacs-remote-socket-USER there; SSHTSF_ECF_SOCKET replaces the
+part before -USER, and the remote's EMACSCLIENT_FORWARD_SOCKET has to follow.
 
 With waypipe on, the connection is wrapped in `waypipe ssh`, so applications
 started inside the remote tmux session draw on the local Wayland desktop.
@@ -124,9 +126,11 @@ NEW_SESSION = "+ new session"
 # Where an ecf forward lands on the remote, less the `-USER' the remote
 # appends for the login it is made under, so two users on one host do not
 # fight over a file in a sticky /tmp. Shared with the remote side: its
-# `emacsclient-auto` looks under EMACSCLIENT_FORWARD_SOCKET, and the two agree
-# on the default /tmp/emacs-remote-socket-USER.
-ECF_REMOTE_SOCKET = os.environ.get("ECF_REMOTE_SOCKET") or "/tmp/emacs-remote-socket"
+# `emacsclient-auto` looks at EMACSCLIENT_FORWARD_SOCKET, a whole path, and the
+# two agree on the default /tmp/emacs-remote-socket-USER. SSHTSF_ECF_SOCKET
+# moves this end's; the remote's knob then has to name the same path, -USER
+# and all.
+ECF_REMOTE_SOCKET = os.environ.get("SSHTSF_ECF_SOCKET") or "/tmp/emacs-remote-socket"
 
 # Extra options spliced into the waypipe argv, e.g. --compress zstd, --no-gpu,
 # --xwls, or --remote-bin for a host where waypipe is not on the PATH a
@@ -150,7 +154,7 @@ REMOTE_PATH = os.environ.get("SSHTSF_REMOTE_PATH") or ":".join([
 # (flag, then session, then host) and both are written as bare TOML literals.
 BOOL_FIELDS = ("ecf", "waypipe")
 
-# Accepted spellings for the boolean fields in the config.
+# The answers a yes/no prompt takes, besides y and n.
 TRUE_WORDS = ("true", "yes", "on", "1")
 FALSE_WORDS = ("false", "no", "off", "0")
 
@@ -441,8 +445,8 @@ class Overrides(NamedTuple):
     """Per-call answers to the boolean fields; None means "use the config".
 
     Bundled rather than passed one parameter each, because they travel together
-    through connect(), every route_* and the subcommand shim, and a parameter
-    apiece would make six-argument signatures of all of them.
+    through connect() and every route_*, and a parameter apiece would make
+    six-argument signatures of all of them.
     """
     ecf: bool | None = None
     waypipe: bool | None = None
@@ -685,11 +689,15 @@ def prompt_folder(target: str, current: str = "", label: str = "") -> str:
 def remote_sh(script: str) -> list[str]:
     """`sh -c SCRIPT' as ssh command words, with REMOTE_PATH ahead of the PATH.
 
-    Every command sshtsf runs on a remote goes through this, so the probes
-    resolve the same tmux the connection will. sh rather than the login shell
-    for the script itself: the script is POSIX sh and the login shell need
-    not be (fish has no `VAR=value; cmd'). Unquoted, for the caller to quote
-    once along with its other words.
+    The connection's script, the ecf socket cleanup and the tmux probes go
+    through this, so a probe resolves the same tmux the connection will. Two
+    remote commands do not: the folder listing, which needs nothing past
+    find, sed and sort, and the waypipe probe, since `waypipe ssh' starts its
+    server on the plain non-interactive PATH, which is the one to ask about.
+
+    sh rather than the login shell for the script itself: the script is
+    POSIX sh and the login shell need not be (fish has no `VAR=value; cmd').
+    Unquoted, for the caller to quote once along with its other words.
     """
     return ["sh", "-c", 'PATH="%s:$PATH"; %s' % (REMOTE_PATH, script)]
 
@@ -838,7 +846,7 @@ def waypipe_remote_missing(target: str) -> str:
     Honours --remote-bin in SSHTSF_WAYPIPE_OPTS, the knob for exactly the host
     whose non-interactive PATH lacks waypipe. A probe that cannot answer -- a
     host that only takes a password, a timeout -- is taken as a yes, leaving
-    the real connection to be the judge, as valid_remote_name does with git.
+    the real connection to be the judge.
     """
     remote_bin = waypipe_remote_bin()
     if remote_bin:
@@ -962,13 +970,14 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
         # nothing. So `sh -c' below, with $WAYLAND_DISPLAY left for it to expand.
         session_env.append(("WAYLAND_DISPLAY", '"$WAYLAND_DISPLAY"'))
     if ecf_local:
-        # Tell the session the name this end dialed, so the remote's
-        # emacs-remote can build a TRAMP prefix the local Emacs can actually
-        # connect back through. The remote cannot work that out itself: its
+        # Tell the session the name this end dialed, so the remote's rc file
+        # can build a TRAMP prefix the local Emacs can actually connect back
+        # through (EMACSCLIENT_TRAMP_PREFIX, for emacsclient-auto; the README
+        # has the lines). The remote cannot work that out itself: its
         # `hostname' knows nothing of an mDNS `.local' suffix or an ssh_config
         # alias, and a name that resolves from the remote need not resolve from
         # here. The destination as dialed, user@ and all, since TRAMP resolves
-        # it through the same ssh_config; emacs-remote prepends the login user
+        # it through the same ssh_config; the rc lines prepend the login user
         # when there is none.
         session_env.append(("EMACS_REMOTE_TARGET", shlex.quote(target)))
 
@@ -1664,9 +1673,22 @@ def cmd_edit(dry_run: bool = False) -> int:
 # --------------------------------------------------------------------------
 
 
-def unknown_host(cfg: dict, token: str) -> None:
-    sys.exit("sshtsf: unknown host: %s (`sshtsf -c %s` registers it)\n%s"
-             % (token, token, host_hint(cfg, ssh_hosts=True)))
+def unknown_host(cfg: dict, token: str, alias: bool = False) -> None:
+    """Exit on a host name that resolves to nothing, with what is registered
+    and what could be. alias is for a word on its own, which could have
+    been a session's alias as well.
+
+    The `sshtsf -c' line only once something is registered: with nothing,
+    the hint already says to run `sshtsf', and a second, competing
+    suggestion would only muddle it.
+    """
+    hint = host_hint(cfg, ssh_hosts=True)
+    if host_names(cfg):
+        hint += "\n        `sshtsf -c %s` registers it" % token
+        if alias:
+            hint += "; `sshtsf -l` shows the sessions too"
+    sys.exit("sshtsf: unknown host%s: %s\n%s"
+             % (" or alias" if alias else "", token, hint))
 
 
 @click.command(cls=logins.Command, help=__doc__)
@@ -1758,13 +1780,7 @@ def cli(ctx: click.Context, new: bool, list_: bool, live: bool, configure: bool,
             if session:
                 return connect(cfg, host, session, dry_run, over)
             return route_pick_session(cfg, host, dry_run, over)
-        hint = host_hint(cfg, ssh_hosts=True)
-        # With nothing registered the hint already says to run `sshtsf', so
-        # the follow-up would only offer a second, competing suggestion.
-        if host_names(cfg):
-            hint += ("\n        `sshtsf -c %s` registers it; "
-                     "`sshtsf -l` shows the sessions too" % token)
-        sys.exit("sshtsf: unknown host or alias: %s\n%s" % (token, hint))
+        unknown_host(cfg, token, alias=True)
 
     host = resolve_host(cfg, positional[0])
     if not host:

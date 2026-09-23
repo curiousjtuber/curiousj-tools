@@ -5,12 +5,12 @@
 One entry per line: every login ([user@]host) in the lists files, then
 `localhost` last, which consumers turn into whatever "this machine" means
 for them (xssh: a local pane, pssh: a local run); -N/--no-local leaves it
-out. Entries that name this machine, for this user, are dropped, so one
-list can serve every host on it; `localhost` takes over the attributes and
-operations of the first such entry (one without a via). -p/--pick shows the
-list in fzf (TAB marks several) and prints only the marked entries; without
-fzf, a numbered menu (see `pick-lines -h`). Aborting the picker exits 130
-with nothing printed.
+out. Entries that name this machine, for this user, are dropped, those
+with a via too, so one list can serve every host on it; `localhost` takes
+over the attributes and operations of the first such entry without a via.
+-p/--pick shows the list in fzf (TAB marks several) and prints only the
+marked entries; without fzf, a numbered menu (see `pick-lines -h`).
+Aborting the picker exits 130 with nothing printed.
 
 -a/--attr TERM keeps the logins whose attributes satisfy TERM: `mise` has
 it, `arch=x86_64` has it with that value, `!mise` lacks it, `arch!=x86_64`

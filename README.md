@@ -9,7 +9,7 @@ as the editor on all of them. Python 3.11+, click and ruamel.yaml.
 | `xssh` | one synchronized tmux pane per login plus a local shell, so one typed line runs everywhere (interactive; needs [xpanes](https://github.com/greymd/tmux-xpanes)) |
 | `pssh` | the batch counterpart: one command on every login at once through GNU parallel, output tagged by login; `-P` repeats it in every listed path, `-c` cloning the ones a host lacks; `-o` runs an operation the lists file defines, `-s` one login at a time for commands that ask questions |
 | `ssh-logins` | the login list behind `xssh` and `pssh`, with an fzf/menu picker |
-| `pick-lines` | the multi-select picker the others use: fzf when present, else a numbered menu |
+| `pick-lines` | the multi-select picker behind `-p` and `-C`/`--pick-paths`: fzf when present, else a numbered menu (`sshtsf` has a single-choice one of its own) |
 | `emacsclient-auto` | `emacsclient` that reaches a forwarded Emacs when its socket is live, the local server otherwise; use it as `$EDITOR` on hosts you reach with `sshtsf -e` |
 | `ec-browse` | opens URLs in whichever Emacs `emacsclient-auto` reaches; use it as `$BROWSER` |
 
@@ -90,10 +90,12 @@ tab `HOST:SESSION` itself, and the name stays on the tab after the session ends.
 
 `sshtsf -e HOST` reverse-forwards the local Emacs server socket to
 `/tmp/emacs-remote-socket-USER` on the remote, USER being the login there, so two users on one
-host each get their own. With `emacsclient-auto` as the remote's `EDITOR`, `git commit`, `$EDITOR` and
-anything else that calls `emacsclient` there open in the local Emacs while the forward is
-live, and in the remote's own Emacs server otherwise. Files are opened through TRAMP, so the
-remote's rc file has to say how the local Emacs reaches it. The remote is a poor judge of
+host each get their own. `SSHTSF_ECF_SOCKET` moves it, naming the path before the `-USER`; the
+remote's `EMACSCLIENT_FORWARD_SOCKET` (below) then has to name the whole path. With
+`emacsclient-auto` as the remote's `EDITOR`, `git commit`, `$EDITOR` and anything else that
+calls `emacsclient` there open in the local Emacs while the forward is live, and in the
+remote's own Emacs server otherwise. Files are opened through TRAMP, so the remote's rc file
+has to say how the local Emacs reaches it. The remote is a poor judge of
 that on its own (`hostname` knows nothing of an mDNS `.local` suffix or an ssh_config alias),
 so `sshtsf -e` also sets `EMACS_REMOTE_TARGET` in the tmux session to the exact destination
 it dialed, and the rc file should prefer it:
@@ -127,6 +129,8 @@ ssh-logins [-N] [-a TERM]... [-p] [-f FILE]...
 xssh      [-N] [-a TERM]... [-p] [-f FILE]... [-o NAME]... [-A TERM]... [--clone] [--pick-paths] [xpanes-options...]
 pssh      [-n] [-s] [-N] [-a TERM]... [-p] [-f FILE]... [-i] [-P] [-A TERM]... [-c] [-C] [--] COMMAND [ARG...]
 pssh      [same flags] -o NAME...
+pssh      [-f FILE]... -L|--list-ops
+xssh      [-f FILE]... -L|--list-ops
 ```
 
 All three read the same lists, `~/.config/ssh-lists.toml` (or `.yaml`, `.yml`, `.json`, or several
@@ -177,11 +181,12 @@ See [examples/ssh-lists.toml](examples/ssh-lists.toml) and
 file of their own. `localhost` is appended to the logins for
 the local side unless `-N`, and entries naming the machine you are on, for your user, are
 dropped, so one file serves every host on it; `localhost` takes over the attributes and
-operations of the first such entry. `-a TERM` keeps the logins whose attributes satisfy the
-term, `mise`, `arch=x86_64`, `!mise` or `arch!=x86_64` (quote the `!` for the shell), every
-term when given several; `-A` does the same for paths. `-p` picks logins in fzf (TAB marks
-several) or a numbered menu; a login listed twice, for two sets of `commands`, is shown with
-them so the two can be told apart.
+operations of the first such entry without a `via`. The ones with a `via` go too: `pssh` run on
+devbox reaches devbox itself, not its container, which only another host's run gets into.
+`-a TERM` keeps the logins whose attributes satisfy the term, `mise`, `arch=x86_64`, `!mise` or
+`arch!=x86_64` (quote the `!` for the shell), every term when given several; `-A` does the
+same for paths. `-p` picks logins in fzf (TAB marks several) or a numbered menu; a login
+listed twice, for two sets of `commands`, is shown with them so the two can be told apart.
 
 ```sh
 xssh --stay                          # a synced pane per login; type once, runs everywhere
@@ -205,7 +210,7 @@ carrying over between calls, and no login `commands` either. `xssh` gives each o
 shell, so all of those work there. A login listed plainly and again with a `via` is run in both
 places by `pssh`, and once per place: inside `distrobox enter dev -nw -- sh -c '...'` the `~` is
 the container's own home, so a `git pull` there keeps the container's checkouts current
-alongside the host's.
+alongside the host's -- from any host but that one, which drops both entries for `localhost`.
 
 Both contact a host whose key is not in `known_hosts` yet once beforehand, in the foreground, so
 ssh's yes/no question is asked where it can be answered: inside a synchronized xpanes window the

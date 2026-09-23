@@ -844,8 +844,30 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
              mock.patch.object(sshtsf, "ssh_known_hosts", return_value=[]):
             rc, _, err = run_capture(["newbox", "api", "--dry-run"])
         self.assertEqual(rc, 1)
-        self.assertIn("unknown host: newbox (`sshtsf -c newbox` registers it)", err)
+        self.assertIn("unknown host: newbox\n", err)
+        self.assertIn("`sshtsf -c newbox` registers it", err)
         self.assertNotIn("newbox", sshtsf.load_config()["hosts"])
+
+    def test_one_wording_and_one_suggestion_for_an_unknown_host(self):
+        # Every connect path words it alike; the one-word form also says
+        # "or alias", and adds -l for the session aliases.
+        with mock.patch.object(sshtsf, "ssh_known_hosts", return_value=[]):
+            for argv in (["nowhere", "web"], ["-n", "nowhere"]):
+                rc, _, err = run_capture(argv + ["--dry-run"])
+                self.assertEqual(rc, 1)
+                self.assertTrue(err.startswith("sshtsf: unknown host: nowhere\n"), err)
+                self.assertIn("\n        `sshtsf -c nowhere` registers it\n", err)
+            rc, _, err = run_capture(["nowhere", "--dry-run"])
+            self.assertTrue(err.startswith("sshtsf: unknown host or alias: nowhere\n"), err)
+            self.assertIn("`sshtsf -c nowhere` registers it; `sshtsf -l` shows the sessions too", err)
+            # Nothing registered: only the hint's own "run `sshtsf`". This
+            # used to come with a competing `sshtsf -c` line for two words.
+            os.remove(self.cfg_path)
+            for argv in (["nowhere"], ["nowhere", "web"]):
+                rc, _, err = run_capture(argv + ["--dry-run"])
+                self.assertEqual(rc, 1)
+                self.assertIn("nothing registered yet; run `sshtsf` to add a host", err)
+                self.assertNotIn("sshtsf -c", err)
 
     def test_unknown_session_on_a_known_host_is_registered(self):
         with mock.patch.object(sshtsf, "route_add_session", return_value=0) as add:
