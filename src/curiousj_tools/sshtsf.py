@@ -819,82 +819,79 @@ def remote_user_guess(target: str) -> str:
     return sshutil.login_name()
 
 
-def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
-            over: Overrides = NO_OVERRIDES) -> int:
-    scfg = cfg["hosts"][host].get("sessions", {}).get(session, {})
-    target = ssh_target(cfg, host)
-    ecf = resolve_flag(cfg, host, session, "ecf", over.ecf)
-    waypipe = resolve_flag(cfg, host, session, "waypipe", over.waypipe)
+def waypipe_usable(target: str) -> bool:
+    """Whether a waypipe forward can go ahead; if not, says why on stderr."""
+    display, why = waypipe_local_display()
+    if display is None:
+        print(f"sshtsf: no local Wayland display ({why}); connecting without it",
+              file=sys.stderr)
+        return False
+    why = waypipe_remote_missing(target)
+    if why:
+        print(f"sshtsf: {why}; connecting without Wayland", file=sys.stderr)
+        return False
+    return True
 
-    # A forward that cannot be set up is a warning, never a refusal, whether
-    # it was asked for by flag or by config: the session is the point, and a
-    # forward is a convenience on top of it. Failing here would only send you
-    # back to retype the command without the flag. The reason is printed
-    # because it is the whole difference between "install waypipe" and "you
-    # are on a Mac".
-    if waypipe:
-        display, why = waypipe_local_display()
-        if display is None:
-            print(f"sshtsf: no local Wayland display ({why}); connecting without it",
-                  file=sys.stderr)
-            waypipe = False
-    if waypipe:
-        why = waypipe_remote_missing(target)
-        if why:
-            print(f"sshtsf: {why}; connecting without Wayland", file=sys.stderr)
-            waypipe = False
 
-    ecf_local = None
-    if ecf:
-        ecf_local = ecf_local_socket()
-        if ecf_local is None:
-            print("sshtsf: no local Emacs server socket (start Emacs first); "
-                  "connecting without the forward", file=sys.stderr)
+class EcfForward(NamedTuple):
+    """An Emacs socket forward that can go ahead: the local socket, where it
+    lands on the remote, the TCP port it is relayed through if any, and the
+    cleanup command that settled the remote path, for a dry run to print."""
+    local: str
+    remote: str
+    port: int | None
+    cleanup: list[str]
 
-    # The remote socket path is settled on a connection of its own, ahead of
-    # the real one, which does two things at once. It names the socket after
-    # the login the remote actually gives -- `id -un` there, not the user@
-    # dialed or ssh_config's User, which is the only way the path is sure to
-    # match what that login's emacsclient-auto looks for. And it clears a
-    # leftover: sshd does not honour StreamLocalBindUnlink, so after an
-    # ungraceful disconnect the file makes the -R bind fail, and the bind
-    # happens at session setup, before any remote command could remove it.
-    # One socket per login, so a second ecf connection replaces the first
-    # one's forward; harmless, since both point at the same Emacs. A file
-    # that cannot be removed would fail the bind just the same, so the
-    # forward is dropped with the reason rather than attempted. A dry run
-    # dials nothing, and guesses the login the way ssh would by default.
-    cleanup: list[str] = []
-    ecf_remote = ""
-    if ecf_local:
-        cleanup = sshutil.probe_ssh(target) + [shlex.quote(word) for word in remote_sh(
-            f'p={shlex.quote(ECF_REMOTE_SOCKET)}-$(id -un); rm -f "$p" && echo "$p"')]
-        if dry_run:
-            ecf_remote = f"{ECF_REMOTE_SOCKET}-{remote_user_guess(target)}"
-        else:
-            try:
-                proc = subprocess.run(cleanup, text=True, stdout=subprocess.PIPE,
-                                      stderr=subprocess.PIPE)
-                lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-                ecf_remote = lines[-1] if lines else ""
-                cleared = (proc.returncode == 0
-                           and ecf_remote.startswith(ECF_REMOTE_SOCKET))
-                why = " ".join(proc.stderr.split()) or f"exit {proc.returncode}"
-            except OSError as exc:
-                cleared, why = False, str(exc)
-            if not cleared:
-                print(f"sshtsf: could not clear the Emacs socket on {target} ({why}); "
-                      "connecting without the forward", file=sys.stderr)
-                ecf_local = None
-                cleanup = []
-    ecf_port = None
-    if ecf_local:
-        ecf_port = scfg.get("ecf_port") or cfg["hosts"][host].get("ecf_port")
 
-    # What the session has to be told about this connection, as (name, shell
-    # word) pairs; the word is spliced into an `sh -c` script as-is, so a
-    # literal is quoted here and a '"$VAR"' is left for the remote sh to expand.
-    session_env: list[tuple[str, str]] = []
+def ecf_forward(target: str, port: int | None, dry_run: bool) -> EcfForward | None:
+    """The Emacs socket forward, or None, with the reason on stderr, when
+    there is no local server or the remote socket cannot be cleared.
+
+    The remote socket path is settled on a connection of its own, ahead of
+    the real one, which does two things at once. It names the socket after
+    the login the remote actually gives -- `id -un` there, not the user@
+    dialed or ssh_config's User, which is the only way the path is sure to
+    match what that login's emacsclient-auto looks for. And it clears a
+    leftover: sshd does not honour StreamLocalBindUnlink, so after an
+    ungraceful disconnect the file makes the -R bind fail, and the bind
+    happens at session setup, before any remote command could remove it.
+    One socket per login, so a second ecf connection replaces the first
+    one's forward; harmless, since both point at the same Emacs. A file
+    that cannot be removed would fail the bind just the same, so the
+    forward is dropped with the reason rather than attempted. A dry run
+    dials nothing, and guesses the login the way ssh would by default.
+    """
+    local = ecf_local_socket()
+    if local is None:
+        print("sshtsf: no local Emacs server socket (start Emacs first); "
+              "connecting without the forward", file=sys.stderr)
+        return None
+    cleanup = sshutil.probe_ssh(target) + [shlex.quote(word) for word in remote_sh(
+        f'p={shlex.quote(ECF_REMOTE_SOCKET)}-$(id -un); rm -f "$p" && echo "$p"')]
+    if dry_run:
+        return EcfForward(local, f"{ECF_REMOTE_SOCKET}-{remote_user_guess(target)}",
+                          port, cleanup)
+    try:
+        proc = subprocess.run(cleanup, text=True, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE)
+        lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+        remote = lines[-1] if lines else ""
+        cleared = proc.returncode == 0 and remote.startswith(ECF_REMOTE_SOCKET)
+        why = " ".join(proc.stderr.split()) or f"exit {proc.returncode}"
+    except OSError as exc:
+        cleared, why = False, str(exc)
+    if not cleared:
+        print(f"sshtsf: could not clear the Emacs socket on {target} ({why}); "
+              "connecting without the forward", file=sys.stderr)
+        return None
+    return EcfForward(local, remote, port, cleanup)
+
+
+def session_env(target: str, waypipe: bool, ecf: bool) -> list[tuple[str, str]]:
+    """What the session has to be told about this connection, as (name, shell
+    word) pairs; the word is spliced into an `sh -c` script as-is, so a
+    literal is quoted here and a '"$VAR"' is left for the remote sh to expand."""
+    env: list[tuple[str, str]] = []
     if waypipe:
         # Teach the session waypipe's display name, rather than trusting the
         # remote's tmux to carry it: WAYLAND_DISPLAY only joined the default
@@ -908,8 +905,8 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
         # forwarded WAYLAND_DISPLAY -- the ssh login shell that parses this line
         # runs earlier and would expand it to the remote's own display, or to
         # nothing. So `sh -c` below, with $WAYLAND_DISPLAY left for it to expand.
-        session_env.append(("WAYLAND_DISPLAY", '"$WAYLAND_DISPLAY"'))
-    if ecf_local:
+        env.append(("WAYLAND_DISPLAY", '"$WAYLAND_DISPLAY"'))
+    if ecf:
         # Tell the session the name this end dialed, so the remote's rc file
         # can build a TRAMP prefix the local Emacs can actually connect back
         # through (EMACSCLIENT_TRAMP_PREFIX, for emacsclient-auto; the README
@@ -919,9 +916,16 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
         # here. The destination as dialed, user@ and all, since TRAMP resolves
         # it through the same ssh_config; the rc lines prepend the login user
         # when there is none.
-        session_env.append(("EMACS_REMOTE_TARGET", shlex.quote(target)))
+        env.append(("EMACS_REMOTE_TARGET", shlex.quote(target)))
+    return env
 
+
+def remote_script(session: str, scfg: dict, env: list[tuple[str, str]],
+                  ecf: EcfForward | None) -> str:
+    """What the connection runs on the remote: the tmux session made, told
+    env and attached, with a plain shell wherever a step of that fails."""
     folder = scfg.get("folder") or ""
+    port = ecf.port if ecf else None
 
     def shell_instead(reason: str) -> str:
         """A `{ ...; }` that gives up on tmux: warn, then the login shell.
@@ -934,10 +938,10 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
         """
         return (f'{{ echo "sshtsf: {reason}; a plain shell instead" >&2; '
                 + ('[ -z "$SOCAT_PID" ] || kill $SOCAT_PID 2>/dev/null; '
-                   if ecf_port else "")
+                   if port else "")
                 + (f"cd {shlex.quote(folder)} 2>/dev/null; " if folder else "")
                 + "".join(f"export {name}={word}; "
-                          for name, word in session_env if not word.startswith('"$'))
+                          for name, word in env if not word.startswith('"$'))
                 + 'exec "${SHELL:-sh}" -l; }')
 
     # -u because tmux is the ssh command, so the remote shell is
@@ -977,7 +981,7 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
                   f'a session without it instead" >&2; {create}; }}')
 
     relay = ""
-    if ecf_port:
+    if port:
         # socat is checked for on the remote rather than assumed: without the
         # check a missing one dies in the background with a bare "not found"
         # and the forwarded port sits there unrelayed. With it, the session is
@@ -986,7 +990,7 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
         # host without tmux never starts a relay it would leave behind.
         relay = (
             "if command -v socat >/dev/null; then "
-            f"socat UNIX-LISTEN:{shlex.quote(ecf_remote)},fork TCP:127.0.0.1:{ecf_port} & "
+            f"socat UNIX-LISTEN:{shlex.quote(ecf.remote)},fork TCP:127.0.0.1:{port} & "
             "SOCAT_PID=$!; "
             "else echo \"sshtsf: no socat on the remote; the Emacs relay is off\" >&2; fi; ")
     # The attach is not exec'd either: a session whose command died between
@@ -996,22 +1000,22 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
     # detach and a killed session both exit 0, so neither trips it.
     attach = (f"tmux -u attach-session -t {tgt} || "
               + shell_instead("could not attach to the session"))
-    script = (
+    return (
         f"command -v tmux >/dev/null || {shell_instead('no tmux on the remote')}; "
         + relay
         + f"tmux has-session -t {tgt} 2>/dev/null || {create} || "
         + shell_instead("could not create the session") + "; "
         + "".join(f"tmux set-environment -t {tgt} {name} {word}; "
-                  for name, word in session_env)
+                  for name, word in env)
         + attach
-        + ("; [ -z \"$SOCAT_PID\" ] || kill $SOCAT_PID 2>/dev/null" if ecf_port else ""))
-    remote = remote_sh(script)
+        + ("; [ -z \"$SOCAT_PID\" ] || kill $SOCAT_PID 2>/dev/null" if port else ""))
 
+
+def ssh_argv(target: str, script: str, ecf: EcfForward | None, waypipe: bool) -> list[str]:
+    """The command line that connects: ssh, or waypipe ssh, running script."""
     # No ExitOnForwardFailure: a bind that fails despite the cleanup is ssh's
     # own warning and a session without the forward, not a dead connection.
-    sshopts: list[str] = []
-    if ecf_local:
-        sshopts = ["-R", f"{ecf_port or ecf_remote}:{ecf_local}"]
+    sshopts = ["-R", f"{ecf.port or ecf.remote}:{ecf.local}"] if ecf else []
 
     # -t before the target, not after it. ssh itself accepts either, but
     # waypipe takes the first non-option word as the destination and everything
@@ -1022,7 +1026,7 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
     # the far side re-parses them, so an unquoted path with a space would
     # arrive as two arguments.
     argv = ["ssh"] + sshopts + ["-t", target] + \
-        [shlex.quote(word) for word in remote]
+        [shlex.quote(word) for word in remote_sh(script)]
 
     if waypipe:
         # waypipe takes its options before the mode word and passes everything
@@ -1035,15 +1039,40 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
         # above, and a prompt hook that re-reads `tmux show-environment` can
         # carry it into the panes that predate this connection.
         argv = ["waypipe"] + WAYPIPE_OPTS + ["ssh"] + argv[1:]
+    return argv
+
+
+def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
+            over: Overrides = NO_OVERRIDES) -> int:
+    """Connect to session on host, or with dry_run print how: the forwards
+    that can go ahead, the script, the command line, then exec.
+
+    A forward that cannot be set up is a warning, never a refusal, whether
+    it was asked for by flag or by config: the session is the point, and a
+    forward is a convenience on top of it. Failing here would only send you
+    back to retype the command without the flag. The reason is printed
+    because it is the whole difference between "install waypipe" and "you
+    are on a Mac".
+    """
+    scfg = cfg["hosts"][host].get("sessions", {}).get(session, {})
+    target = ssh_target(cfg, host)
+    waypipe = (resolve_flag(cfg, host, session, "waypipe", over.waypipe)
+               and waypipe_usable(target))
+    ecf = None
+    if resolve_flag(cfg, host, session, "ecf", over.ecf):
+        port = scfg.get("ecf_port") or cfg["hosts"][host].get("ecf_port")
+        ecf = ecf_forward(target, port, dry_run)
+    env = session_env(target, waypipe, ecf is not None)
+    argv = ssh_argv(target, remote_script(session, scfg, env, ecf), ecf, waypipe)
 
     if dry_run:
-        if cleanup:
-            print(" ".join(cleanup))
+        if ecf:
+            print(" ".join(ecf.cleanup))
         print(" ".join(argv))
         return 0
 
     remember(cfg, host, session)
-    print(f"sshtsf: {target} -> {session}{' +ecf' if sshopts else ''}"
+    print(f"sshtsf: {target} -> {session}{' +ecf' if ecf else ''}"
           f"{' +waypipe' if waypipe else ''}", file=sys.stderr)
     if waypipe and sys.stdout.isatty():
         # Konsole names a tab after its foreground process and only knows an
