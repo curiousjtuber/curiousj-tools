@@ -49,7 +49,7 @@ def default_socket() -> str:
     one host thus get two sockets in the sticky /tmp instead of a fight over
     one.
     """
-    return "%s-%s" % (SOCKET_PREFIX, login_name())
+    return f"{SOCKET_PREFIX}-{login_name()}"
 
 
 DEFAULT_SOCKET = default_socket()
@@ -158,18 +158,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if env.get("EMACSCLIENT_AUTO_DEBUG"):
         if branch == "remote-eval":
-            note = "remote eval via %s (no tramp prefix)" % socket
+            note = f"remote eval via {socket} (no tramp prefix)"
         elif branch == "remote":
-            note = "remote via %s (prefix %s)" % (socket, prefix)
+            note = f"remote via {socket} (prefix {prefix})"
         else:
-            note = "local (%s)" % real
-        print("emacsclient-auto: %s" % note, file=sys.stderr)
+            note = f"local ({real})"
+        print(f"emacsclient-auto: {note}", file=sys.stderr)
 
     env.update(extra)
     try:
         os.execvpe(real, [real] + args, env)
     except OSError as exc:
-        print("emacsclient-auto: cannot exec %s: %s" % (real, exc), file=sys.stderr)
+        print(f"emacsclient-auto: cannot exec {real}: {exc}", file=sys.stderr)
         return 126
     return 0  # pragma: no cover - exec does not return
 

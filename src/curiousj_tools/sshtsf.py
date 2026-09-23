@@ -189,7 +189,7 @@ def toml_key(key: str) -> str:
 def toml_str(value: str) -> str:
     out = value.replace("\\", "\\\\").replace('"', '\\"')
     out = out.replace("\n", "\\n").replace("\t", "\\t").replace("\r", "\\r")
-    return '"%s"' % out
+    return f'"{out}"'
 
 
 def toml_bool(value) -> str:
@@ -204,42 +204,42 @@ def dump_config(cfg: dict) -> str:
     ]
 
     if cfg.get("default_host"):
-        lines.append("default_host = %s" % toml_str(cfg["default_host"]))
+        lines.append(f"default_host = {toml_str(cfg['default_host'])}")
         lines.append("")
 
     last = cfg.get("last") or {}
     if last.get("host"):
         lines.append("[last]")
-        lines.append("host = %s" % toml_str(last["host"]))
+        lines.append(f"host = {toml_str(last['host'])}")
         if last.get("session"):
-            lines.append("session = %s" % toml_str(last["session"]))
+            lines.append(f"session = {toml_str(last['session'])}")
         lines.append("")
 
     # The booleans are keyed on presence, not truth, unlike the string fields:
     # a session's `ecf = false` is what opts it out of a host default, so it
     # has to survive a rewrite rather than be dropped as falsy.
     for host, hcfg in sorted((cfg.get("hosts") or {}).items()):
-        lines.append("[hosts.%s]" % toml_key(host))
+        lines.append(f"[hosts.{toml_key(host)}]")
         for field in ("target", "alias"):
             if hcfg.get(field):
-                lines.append("%s = %s" % (field, toml_str(hcfg[field])))
+                lines.append(f"{field} = {toml_str(hcfg[field])}")
         if hcfg.get("ecf_port"):
-            lines.append("ecf_port = %s" % hcfg["ecf_port"])
+            lines.append(f"ecf_port = {hcfg['ecf_port']}")
         for field in BOOL_FIELDS:
             if field in hcfg:
-                lines.append("%s = %s" % (field, toml_bool(hcfg[field])))
+                lines.append(f"{field} = {toml_bool(hcfg[field])}")
         lines.append("")
 
         for sess, scfg in sorted((hcfg.get("sessions") or {}).items()):
-            lines.append("[hosts.%s.sessions.%s]" % (toml_key(host), toml_key(sess)))
+            lines.append(f"[hosts.{toml_key(host)}.sessions.{toml_key(sess)}]")
             for field in ("alias", "folder", "command"):
                 if scfg.get(field):
-                    lines.append("%s = %s" % (field, toml_str(scfg[field])))
+                    lines.append(f"{field} = {toml_str(scfg[field])}")
             if scfg.get("ecf_port"):
-                lines.append("ecf_port = %s" % scfg["ecf_port"])
+                lines.append(f"ecf_port = {scfg['ecf_port']}")
             for field in BOOL_FIELDS:
                 if field in scfg:
-                    lines.append("%s = %s" % (field, toml_bool(scfg[field])))
+                    lines.append(f"{field} = {toml_bool(scfg[field])}")
             lines.append("")
 
     return "\n".join(lines).rstrip("\n") + "\n"
@@ -257,7 +257,7 @@ def read_config() -> dict:
         with open(CONFIG_PATH, "rb") as fh:
             cfg = tomllib.load(fh)
     except tomllib.TOMLDecodeError as exc:
-        raise ConfigError("%s is not valid TOML: %s" % (CONFIG_PATH, exc)) from exc
+        raise ConfigError(f"{CONFIG_PATH} is not valid TOML: {exc}") from exc
     cfg.setdefault("hosts", {})
     return cfg
 
@@ -266,7 +266,7 @@ def load_config() -> dict:
     try:
         return read_config()
     except ConfigError as exc:
-        sys.exit("sshtsf: %s" % exc)
+        sys.exit(f"sshtsf: {exc}")
 
 
 def save_config(cfg: dict) -> None:
@@ -305,9 +305,9 @@ def said_yes(reply: str) -> bool:
 
 
 def ask(prompt: str, default: str = "") -> str:
-    suffix = " [%s]" % default if default else ""
+    suffix = f" [{default}]" if default else ""
     try:
-        reply = input("%s%s: " % (prompt, suffix)).strip()
+        reply = input(f"{prompt}{suffix}: ").strip()
     except (EOFError, KeyboardInterrupt):
         print(file=sys.stderr)
         raise SystemExit(130)
@@ -364,7 +364,7 @@ def word_owners(cfg: dict, word: str) -> list[tuple[str, str]]:
 
 def describe_owner(owner: tuple[str, str]) -> str:
     host, session = owner
-    return "%s+%s" % (host, session) if session else "host %s" % host
+    return f"{host}+{session}" if session else f"host {host}"
 
 
 def word_clash(cfg: dict, word: str, own: tuple[str, str]) -> str:
@@ -409,13 +409,13 @@ def describe_host(cfg: dict, host: str) -> str:
     hcfg = cfg["hosts"].get(host, {})
     marks = []
     if hcfg.get("alias"):
-        marks.append("alias %s" % hcfg["alias"])
+        marks.append(f"alias {hcfg['alias']}")
     if hcfg.get("target") and hcfg["target"] != host:
-        marks.append("-> %s" % hcfg["target"])
+        marks.append(f"-> {hcfg['target']}")
     marks += [field for field in BOOL_FIELDS if hcfg.get(field)]
     if host == cfg.get("default_host"):
         marks.append("default")
-    return "%s%s" % (host, "  (%s)" % ", ".join(marks) if marks else "")
+    return f"{host}  ({', '.join(marks)})" if marks else host
 
 
 def ssh_known_hosts(path: str = KNOWN_HOSTS_PATH) -> list[str]:
@@ -481,7 +481,7 @@ def ssh_host_candidates(cfg: dict) -> list[tuple[str, str]]:
     dialed = dialed_names(cfg)
     known = ssh_known_hosts()
     fresh = [(host, "") for host in known if host not in dialed]
-    taken = [(host, "registered as %s" % ", ".join(sorted(set(dialed[host]))))
+    taken = [(host, f"registered as {', '.join(sorted(set(dialed[host])))}")
              for host in known if host in dialed]
     return fresh + taken
 
@@ -501,7 +501,7 @@ def host_hint(cfg: dict, ssh_hosts: bool = False) -> str:
     hosts = host_names(cfg)
     if hosts:
         out = "        registered:\n" + "\n".join(
-            "          %s" % describe_host(cfg, host) for host in hosts)
+            f"          {describe_host(cfg, host)}" for host in hosts)
     else:
         out = "        nothing registered yet; run `sshtsf` to add a host"
 
@@ -513,24 +513,23 @@ def host_hint(cfg: dict, ssh_hosts: bool = False) -> str:
             if not candidates:
                 continue
             shown = candidates[:MAX_KNOWN_HOSTS]
-            out += "\n        in %s:\n" % where + textwrap.fill(
+            out += f"\n        in {where}:\n" + textwrap.fill(
                 ", ".join(shown), width=76,
                 initial_indent="          ", subsequent_indent="          ")
             if len(candidates) > len(shown):
-                out += "\n          ... and %d more" % (
-                    len(candidates) - len(shown))
+                out += f"\n          ... and {len(candidates) - len(shown)} more"
     return out
 
 
 def describe_session(cfg: dict, host: str, name: str, scfg: dict) -> str:
     bits = [name]
     if scfg.get("alias"):
-        bits.append("(%s)" % scfg["alias"])
+        bits.append(f"({scfg['alias']})")
     if scfg.get("folder"):
-        bits.append("~/%s" % scfg["folder"])
+        bits.append(f"~/{scfg['folder']}")
     if scfg.get("command"):
-        bits.append("-> %s" % scfg["command"])
-    bits += ["+%s" % field for field in BOOL_FIELDS
+        bits.append(f"-> {scfg['command']}")
+    bits += [f"+{field}" for field in BOOL_FIELDS
              if resolve_flag(cfg, host, name, field, None)]
     return "  ".join(bits)
 
@@ -559,14 +558,13 @@ def remote_dirs(target: str, depth: int = FOLDER_DEPTH) -> list[str]:
     Heavy trees (build output, node_modules, ...) are pruned, which is what
     keeps a workspace listing in the hundreds rather than thousands.
     """
-    prunes = " -o ".join("-name %s" % shlex.quote(d) for d in PRUNE_DIRS)
+    prunes = " -o ".join(f"-name {shlex.quote(d)}" for d in PRUNE_DIRS)
     # The prune arm matches dotdirs and PRUNE_DIRS at any level; the print arm
     # emits every other directory. sed strips the leading "./".
     script = (
-        "cd ~ && find . -mindepth 1 -maxdepth %d "
-        "\\( -name '.*' -o %s \\) -prune "
+        f"cd ~ && find . -mindepth 1 -maxdepth {depth} "
+        f"\\( -name '.*' -o {prunes} \\) -prune "
         "-o -type d -print 2>/dev/null | sed 's|^\\./||' | sort"
-        % (depth, prunes)
     )
     try:
         proc = subprocess.run(logins.probe_ssh(target) + [script], text=True,
@@ -580,7 +578,7 @@ def remote_dirs(target: str, depth: int = FOLDER_DEPTH) -> list[str]:
 
 
 def show_folder(folder: str) -> None:
-    print("  folder: %s" % ("~/" + folder if folder else "~ (none)"),
+    print(f"  folder: {'~/' + folder if folder else '~ (none)'}",
           file=sys.stderr)
 
 
@@ -593,21 +591,21 @@ def prompt_folder(target: str, current: str = "", label: str = "") -> str:
     as well -- none, for a new session -- rather than end the whole walk, and
     so does a blank at the prompt that stands in for a listing that failed.
     """
-    where = " for %s" % label if label else ""
+    where = f" for {label}" if label else ""
     if current:
-        typed = ask("  folder relative to ~%s (? to browse, - for none)" % where,
+        typed = ask(f"  folder relative to ~{where} (? to browse, - for none)",
                     current)
     else:
-        typed = ask("  folder relative to ~%s (blank for none, ? to browse)" % where)
+        typed = ask(f"  folder relative to ~{where} (blank for none, ? to browse)")
     if typed == "-":
         return ""
     if typed != "?":
         return typed.strip().rstrip("/")
 
-    print("  listing %s ..." % target, file=sys.stderr)
+    print(f"  listing {target} ...", file=sys.stderr)
     dirs = remote_dirs(target)
     if not dirs:
-        print("  (could not list %s; type a path if you want one)" % target,
+        print(f"  (could not list {target}; type a path if you want one)",
               file=sys.stderr)
         if current:
             typed = ask("  folder relative to ~ (- for none)", current)
@@ -616,7 +614,7 @@ def prompt_folder(target: str, current: str = "", label: str = "") -> str:
         return "" if typed == "-" else typed.strip().rstrip("/")
 
     chosen = choose(dirs, "folder>",
-                  "remote folder (abort keeps %s)" % (current or "none"),
+                  f"remote folder (abort keeps {current or 'none'})",
                   free_text=True, query=current)
     if chosen is None:
         return current
@@ -636,7 +634,7 @@ def remote_sh(script: str) -> list[str]:
     POSIX sh and the login shell need not be (fish has no `VAR=value; cmd').
     Unquoted, for the caller to quote once along with its other words.
     """
-    return ["sh", "-c", 'PATH="%s:$PATH"; %s' % (REMOTE_PATH, script)]
+    return ["sh", "-c", f'PATH="{REMOTE_PATH}:$PATH"; {script}']
 
 
 def remote_tmux(target: str) -> str:
@@ -657,7 +655,7 @@ def remote_tmux(target: str) -> str:
     lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
     if len(lines) < 2:
         return ""
-    return "%s (%s)" % (lines[0], lines[1])
+    return f"{lines[0]} ({lines[1]})"
 
 
 def live_sessions(target: str) -> tuple[list[str], str]:
@@ -678,10 +676,10 @@ def live_sessions(target: str) -> tuple[list[str], str]:
     try:
         proc = subprocess.run(
             logins.probe_ssh(target) + [shlex.quote(word) for word in
-                                 remote_sh("tmux -u list-sessions -F %s" % shlex.quote(fmt))],
+                                 remote_sh(f"tmux -u list-sessions -F {shlex.quote(fmt)}")],
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except OSError as exc:
-        return [], "cannot run ssh: %s" % exc
+        return [], f"cannot run ssh: {exc}"
     if proc.returncode == 0:
         return [line for line in proc.stdout.splitlines() if line.strip()], ""
 
@@ -690,10 +688,10 @@ def live_sessions(target: str) -> tuple[list[str], str]:
         return [], err
     which = remote_tmux(target)
     if which:
-        return [], ("tmux exited %d without a message; `ssh %s tmux' is %s"
-                    % (proc.returncode, target, which))
-    return [], ("tmux exited %d without a message, and no tmux is on the "
-                "non-interactive PATH" % proc.returncode)
+        return [], (f"tmux exited {proc.returncode} without a message; "
+                    f"`ssh {target} tmux' is {which}")
+    return [], (f"tmux exited {proc.returncode} without a message, and no tmux is on the "
+                "non-interactive PATH")
 
 
 def ecf_local_socket() -> str | None:
@@ -740,15 +738,15 @@ def waypipe_local_display() -> tuple[str | None, str]:
     else:
         runtime = os.environ.get("XDG_RUNTIME_DIR") or ""
         if not runtime:
-            return None, ("XDG_RUNTIME_DIR is unset, so WAYLAND_DISPLAY=%s "
-                          "cannot be resolved" % display)
+            return None, (f"XDG_RUNTIME_DIR is unset, so WAYLAND_DISPLAY={display} "
+                          "cannot be resolved")
         path = os.path.join(runtime, display)
 
     try:
         if not stat.S_ISSOCK(os.stat(path).st_mode):
-            return None, "%s is not a socket" % path
+            return None, f"{path} is not a socket"
     except OSError:
-        return None, "no compositor socket at %s" % path
+        return None, f"no compositor socket at {path}"
     return path, ""
 
 
@@ -769,7 +767,7 @@ def waypipe_remote_bin() -> str:
 def tab_title(title: str) -> str:
     """The escapes that name the terminal tab: Konsole's OSC 30, then the
     generic window title (OSC 0) for terminals whose tab shows that."""
-    return "\033]30;%s\007\033]0;%s\007" % (title, title)
+    return f"\x1b]30;{title}\x07\x1b]0;{title}\x07"
 
 
 def waypipe_remote_missing(target: str) -> str:
@@ -788,11 +786,11 @@ def waypipe_remote_missing(target: str) -> str:
     """
     remote_bin = waypipe_remote_bin()
     if remote_bin:
-        check = "test -x %s" % shlex.quote(remote_bin)
-        what = "%s is not executable on %s" % (remote_bin, target)
+        check = f"test -x {shlex.quote(remote_bin)}"
+        what = f"{remote_bin} is not executable on {target}"
     else:
         check = "command -v waypipe"
-        what = "no waypipe on the non-interactive PATH of %s" % target
+        what = f"no waypipe on the non-interactive PATH of {target}"
     try:
         proc = subprocess.run(
             logins.probe_ssh(target, batch=True) + [check],
@@ -834,13 +832,13 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
     if waypipe:
         display, why = waypipe_local_display()
         if display is None:
-            print("sshtsf: no local Wayland display (%s); connecting without it"
-                  % why, file=sys.stderr)
+            print(f"sshtsf: no local Wayland display ({why}); connecting without it",
+                  file=sys.stderr)
             waypipe = False
     if waypipe:
         why = waypipe_remote_missing(target)
         if why:
-            print("sshtsf: %s; connecting without Wayland" % why, file=sys.stderr)
+            print(f"sshtsf: {why}; connecting without Wayland", file=sys.stderr)
             waypipe = False
 
     ecf_local = None
@@ -867,9 +865,9 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
     ecf_remote = ""
     if ecf_local:
         cleanup = logins.probe_ssh(target) + [shlex.quote(word) for word in remote_sh(
-            'p=%s-$(id -un); rm -f "$p" && echo "$p"' % shlex.quote(ECF_REMOTE_SOCKET))]
+            f'p={shlex.quote(ECF_REMOTE_SOCKET)}-$(id -un); rm -f "$p" && echo "$p"')]
         if dry_run:
-            ecf_remote = "%s-%s" % (ECF_REMOTE_SOCKET, remote_user_guess(target))
+            ecf_remote = f"{ECF_REMOTE_SOCKET}-{remote_user_guess(target)}"
         else:
             try:
                 proc = subprocess.run(cleanup, text=True, stdout=subprocess.PIPE,
@@ -878,13 +876,12 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
                 ecf_remote = lines[-1] if lines else ""
                 cleared = (proc.returncode == 0
                            and ecf_remote.startswith(ECF_REMOTE_SOCKET))
-                why = " ".join(proc.stderr.split()) or "exit %d" % proc.returncode
+                why = " ".join(proc.stderr.split()) or f"exit {proc.returncode}"
             except OSError as exc:
                 cleared, why = False, str(exc)
             if not cleared:
-                print("sshtsf: could not clear the Emacs socket on %s (%s); "
-                      "connecting without the forward" % (target, why),
-                      file=sys.stderr)
+                print(f"sshtsf: could not clear the Emacs socket on {target} ({why}); "
+                      "connecting without the forward", file=sys.stderr)
                 ecf_local = None
                 cleanup = []
     ecf_port = None
@@ -932,11 +929,11 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
         holds. A relay started above is stopped, so the exec'd shell leaves
         nothing behind.
         """
-        return ('{ echo "sshtsf: %s; a plain shell instead" >&2; ' % reason
+        return (f'{{ echo "sshtsf: {reason}; a plain shell instead" >&2; '
                 + ('[ -z "$SOCAT_PID" ] || kill $SOCAT_PID 2>/dev/null; '
                    if ecf_port else "")
-                + ("cd %s 2>/dev/null; " % shlex.quote(folder) if folder else "")
-                + "".join("export %s=%s; " % (name, word)
+                + (f"cd {shlex.quote(folder)} 2>/dev/null; " if folder else "")
+                + "".join(f"export {name}={word}; "
                           for name, word in session_env if not word.startswith('"$'))
                 + 'exec "${SHELL:-sh}" -l; }')
 
@@ -973,8 +970,8 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
         # with it on a fresh host; the session is then made without it.
         with_command = create + " " + " ".join(
             shlex.quote(word) for word in shlex.split(scfg["command"]))
-        create = ('%s || { echo "sshtsf: the session command failed to start; '
-                  'a session without it instead" >&2; %s; }' % (with_command, create))
+        create = (f'{with_command} || {{ echo "sshtsf: the session command failed to start; '
+                  f'a session without it instead" >&2; {create}; }}')
 
     relay = ""
     if ecf_port:
@@ -986,23 +983,22 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
         # host without tmux never starts a relay it would leave behind.
         relay = (
             "if command -v socat >/dev/null; then "
-            "socat UNIX-LISTEN:%s,fork TCP:127.0.0.1:%s & "
+            f"socat UNIX-LISTEN:{shlex.quote(ecf_remote)},fork TCP:127.0.0.1:{ecf_port} & "
             "SOCAT_PID=$!; "
-            "else echo \"sshtsf: no socat on the remote; the Emacs relay is off\" >&2; fi; "
-            % (shlex.quote(ecf_remote), ecf_port))
+            "else echo \"sshtsf: no socat on the remote; the Emacs relay is off\" >&2; fi; ")
     # The attach is not exec'd either: a session whose command died between
     # the create and the attach (tmux can report the create done first), or
     # a server that goes away mid-session, ends the attach nonzero, and that
     # is the last chance for a shell rather than a closed connection. A
     # detach and a killed session both exit 0, so neither trips it.
-    attach = "tmux -u attach-session -t %s || %s" % (
-        tgt, shell_instead("could not attach to the session"))
+    attach = (f"tmux -u attach-session -t {tgt} || "
+              + shell_instead("could not attach to the session"))
     script = (
-        "command -v tmux >/dev/null || %s; " % shell_instead("no tmux on the remote")
+        f"command -v tmux >/dev/null || {shell_instead('no tmux on the remote')}; "
         + relay
-        + "tmux has-session -t %s 2>/dev/null || %s || %s; "
-        % (tgt, create, shell_instead("could not create the session"))
-        + "".join("tmux set-environment -t %s %s %s; " % (tgt, name, word)
+        + f"tmux has-session -t {tgt} 2>/dev/null || {create} || "
+        + shell_instead("could not create the session") + "; "
+        + "".join(f"tmux set-environment -t {tgt} {name} {word}; "
                   for name, word in session_env)
         + attach
         + ("; [ -z \"$SOCAT_PID\" ] || kill $SOCAT_PID 2>/dev/null" if ecf_port else ""))
@@ -1012,7 +1008,7 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
     # own warning and a session without the forward, not a dead connection.
     sshopts: list[str] = []
     if ecf_local:
-        sshopts = ["-R", "%s:%s" % (ecf_port or ecf_remote, ecf_local)]
+        sshopts = ["-R", f"{ecf_port or ecf_remote}:{ecf_local}"]
 
     # -t before the target, not after it. ssh itself accepts either, but
     # waypipe takes the first non-option word as the destination and everything
@@ -1044,21 +1040,20 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
         return 0
 
     remember(cfg, host, session)
-    print("sshtsf: %s -> %s%s%s"
-          % (target, session, " +ecf" if sshopts else "",
-             " +waypipe" if waypipe else ""), file=sys.stderr)
+    print(f"sshtsf: {target} -> {session}{' +ecf' if sshopts else ''}"
+          f"{' +waypipe' if waypipe else ''}", file=sys.stderr)
     if waypipe and sys.stdout.isatty():
         # Konsole names a tab after its foreground process and only knows an
         # ssh session when that process is ssh itself. Behind waypipe it sees
         # waypipe, so name the tab here. Nothing runs after the exec, so the
         # name stays on the tab once the session ends; a plain session is
         # left to the terminal, which resets its own title on logout.
-        sys.stdout.write(tab_title("%s:%s" % (host, session)))
+        sys.stdout.write(tab_title(f"{host}:{session}"))
         sys.stdout.flush()
     try:
         os.execvp(argv[0], argv)
     except OSError as exc:
-        sys.exit("sshtsf: cannot exec %s: %s" % (argv[0], exc))
+        sys.exit(f"sshtsf: cannot exec {argv[0]}: {exc}")
 
 
 def remember(cfg: dict, host: str, session: str) -> None:
@@ -1067,7 +1062,7 @@ def remember(cfg: dict, host: str, session: str) -> None:
         save_config(cfg)
     except OSError as exc:
         # Not worth aborting a connection over.
-        print("sshtsf: could not save last-used (%s)" % exc, file=sys.stderr)
+        print(f"sshtsf: could not save last-used ({exc})", file=sys.stderr)
 
 
 # --------------------------------------------------------------------------
@@ -1086,9 +1081,9 @@ def ask_text(prompt: str, current: str = "", editing: bool = False,
     value and `-' clears it; the hint says which, unset naming what an empty
     field means. Returns "" for none."""
     if editing and current:
-        reply = ask("%s (- for %s)" % (prompt, unset), current)
+        reply = ask(f"{prompt} (- for {unset})", current)
     else:
-        reply = ask("%s (blank for %s)" % (prompt, unset))
+        reply = ask(f"{prompt} (blank for {unset})")
     return "" if reply.strip() == CLEAR else reply.strip()
 
 
@@ -1101,21 +1096,21 @@ def ask_bool(prompt: str, current: bool | None = None, editing: bool = False,
     A word that is neither yes nor no is asked again rather than taken as
     no, so a typo cannot quietly turn a forward off."""
     if not editing:
-        return True if said_yes(ask("%s (y/N)" % prompt)) else None
+        return True if said_yes(ask(f"{prompt} (y/N)")) else None
     while True:
         if current is None:
-            reply = ask("%s (y/n, blank for %s)" % (prompt, unset))
+            reply = ask(f"{prompt} (y/n, blank for {unset})")
             if not reply or reply == CLEAR:
                 return None
         else:
-            reply = ask("%s (y/n, - for %s)" % (prompt, unset),
+            reply = ask(f"{prompt} (y/n, - for {unset})",
                         "yes" if current else "no")
             if reply == CLEAR:
                 return None
         answer = yes_no(reply)
         if answer is not None:
             return answer
-        print("  y or n: %s" % reply, file=sys.stderr)
+        print(f"  y or n: {reply}", file=sys.stderr)
 
 
 def ask_port(prompt: str, current: int | None, editing: bool) -> int | None:
@@ -1125,7 +1120,7 @@ def ask_port(prompt: str, current: int | None, editing: bool) -> int | None:
             return None
         if reply.isdigit() and int(reply) > 0:
             return int(reply)
-        print("  not a port: %s" % reply, file=sys.stderr)
+        print(f"  not a port: {reply}", file=sys.stderr)
 
 
 def ask_word(cfg: dict, own: tuple[str, str], asker) -> str:
@@ -1136,7 +1131,7 @@ def ask_word(cfg: dict, own: tuple[str, str], asker) -> str:
         clash = word_clash(cfg, word, own) if word and word != CLEAR else ""
         if not clash:
             return word
-        print("  %s already names %s" % (word, clash), file=sys.stderr)
+        print(f"  {word} already names {clash}", file=sys.stderr)
 
 
 def set_field(holder: dict, field: str, value) -> None:
@@ -1173,7 +1168,7 @@ def host_candidates(cfg: dict) -> list[tuple[str, str, str]]:
     for login in listed:
         names = {login, login.rpartition("@")[2]}
         hosts = sorted({host for name in names for host in dialed.get(name, [])})
-        out.append((login, "registered as %s" % ", ".join(hosts) if hosts else "",
+        out.append((login, f"registered as {', '.join(hosts)}" if hosts else "",
                     "ssh-lists"))
     machines = {login.rpartition("@")[2] for login in listed}
     return out + [(host, note, "~/.ssh/known_hosts")
@@ -1183,7 +1178,7 @@ def host_candidates(cfg: dict) -> list[tuple[str, str, str]]:
 def pick_host_candidate(cfg: dict) -> str:
     """Choose a destination for a new host, or type one; "" when there is
     nothing to offer or the picker was left."""
-    labels = {"%s  (%s)" % (host, note) if note else host: host
+    labels = {f"{host}  ({note})" if note else host: host
               for host, note, _ in host_candidates(cfg)}
     if not labels:
         return ""
@@ -1231,13 +1226,13 @@ def edit_host(cfg: dict, name: str = "", existing: dict | None = None) -> str | 
             if not name:
                 sys.exit("sshtsf: a name for the [user@]host is required")
             if name in hosts:
-                print("sshtsf: %s already registered" % name, file=sys.stderr)
+                print(f"sshtsf: {name} already registered", file=sys.stderr)
                 return name
             # Not a host, but maybe another's alias or a session's.
             clash = word_clash(cfg, name, (name, ""))
             if not clash:
                 break
-            print("  %s already names %s" % (name, clash), file=sys.stderr)
+            print(f"  {name} already names {clash}", file=sys.stderr)
         new_name = name
         # The destination is what ssh dials, user and all; there is no user
         # field of its own. Asked for separately only when the destination
@@ -1247,7 +1242,7 @@ def edit_host(cfg: dict, name: str = "", existing: dict | None = None) -> str | 
         if "@" not in target:
             user = ask("  user on it (blank for ssh's default)")
             if user:
-                target = "%s@%s" % (user, target)
+                target = f"{user}@{target}"
     set_field(hcfg, "target", target if target and target != new_name else "")
 
     set_field(hcfg, "alias", ask_word(cfg, (name, ""), lambda: ask_text(
@@ -1289,17 +1284,17 @@ def edit_host(cfg: dict, name: str = "", existing: dict | None = None) -> str | 
         cfg["default_host"] = name
 
     save_config(cfg)
-    print("sshtsf: saved host %s" % name, file=sys.stderr)
+    print(f"sshtsf: saved host {name}", file=sys.stderr)
     return name
 
 
 def remove_host(cfg: dict, host: str) -> bool:
     """Drop a host after a confirmation, sessions and all. False if kept."""
     sessions = cfg["hosts"][host].get("sessions") or {}
-    what = ("%s and its %d session(s)" % (host, len(sessions)) if sessions
-            else "host %s" % host)
-    if not said_yes(ask("  remove %s? (y/N)" % what)):
-        print("sshtsf: kept %s" % host, file=sys.stderr)
+    what = (f"{host} and its {len(sessions)} session(s)" if sessions
+            else f"host {host}")
+    if not said_yes(ask(f"  remove {what}? (y/N)")):
+        print(f"sshtsf: kept {host}", file=sys.stderr)
         return False
     del cfg["hosts"][host]
     if cfg.get("default_host") == host:
@@ -1307,20 +1302,20 @@ def remove_host(cfg: dict, host: str) -> bool:
     if (cfg.get("last") or {}).get("host") == host:
         cfg.pop("last", None)
     save_config(cfg)
-    print("sshtsf: removed host %s" % host, file=sys.stderr)
+    print(f"sshtsf: removed host {host}", file=sys.stderr)
     return True
 
 
 def remove_session(cfg: dict, host: str, session: str) -> bool:
-    if not said_yes(ask("  remove session %s from %s? (y/N)" % (session, host))):
-        print("sshtsf: kept %s" % session, file=sys.stderr)
+    if not said_yes(ask(f"  remove session {session} from {host}? (y/N)")):
+        print(f"sshtsf: kept {session}", file=sys.stderr)
         return False
     del cfg["hosts"][host]["sessions"][session]
     last = cfg.get("last") or {}
     if last.get("host") == host and last.get("session") == session:
         cfg.pop("last", None)  # else `last` points at a session that is gone
     save_config(cfg)
-    print("sshtsf: removed %s from %s" % (session, host), file=sys.stderr)
+    print(f"sshtsf: removed {session} from {host}", file=sys.stderr)
     return True
 
 
@@ -1339,14 +1334,14 @@ def edit_session(cfg: dict, host: str, name: str = "",
         if new_name == CLEAR:
             return None if remove_session(cfg, host, name) else name
         if new_name != name and new_name in sessions:
-            sys.exit("sshtsf: %s already exists on %s" % (new_name, host))
+            sys.exit(f"sshtsf: {new_name} already exists on {host}")
     else:
         name = ask("  session name", name)
         if not name:
             sys.exit("sshtsf: a session name is required")
         found = resolve_session(cfg, host, name)
         if found:
-            print("sshtsf: %s already exists on %s" % (found, host), file=sys.stderr)
+            print(f"sshtsf: {found} already exists on {host}", file=sys.stderr)
             return found
         new_name = name
 
@@ -1365,7 +1360,7 @@ def edit_session(cfg: dict, host: str, name: str = "",
         if editing or not hcfg.get(field):
             set_field(scfg, field, ask_bool(
                 "  " + question, scfg.get(field), editing,
-                unset="the host's (%s)" % ("on" if hcfg.get(field) else "off")))
+                unset=f"the host's ({'on' if hcfg.get(field) else 'off'})"))
 
     # Asked last, so the whole entry is visible by the time the shorthand
     # for it is chosen. A new one is offered the session name, unless that
@@ -1375,7 +1370,7 @@ def edit_session(cfg: dict, host: str, name: str = "",
     if not editing and not word_clash(cfg, new_name, own):
         current = new_name
     set_field(scfg, "alias", ask_word(cfg, own, lambda: ask_text(
-        "  alias for %s+%s" % (host, new_name), current, True)))
+        f"  alias for {host}+{new_name}", current, True)))
 
     if editing and new_name != name:
         sessions.pop(name)
@@ -1385,7 +1380,7 @@ def edit_session(cfg: dict, host: str, name: str = "",
         name = new_name
     sessions[name] = scfg
     save_config(cfg)
-    print("sshtsf: saved %s to %s" % (name, CONFIG_PATH), file=sys.stderr)
+    print(f"sshtsf: saved {name} to {CONFIG_PATH}", file=sys.stderr)
     return name
 
 
@@ -1398,7 +1393,7 @@ def route_add_session(cfg: dict, host: str, name: str = "",
                       dry_run: bool = False,
                       over: Overrides = NO_OVERRIDES) -> int:
     """Register a session interactively, then connect to it."""
-    print("sshtsf: new session on %s" % host, file=sys.stderr)
+    print(f"sshtsf: new session on {host}", file=sys.stderr)
     session = edit_session(cfg, host, name)
     return connect(cfg, host, session, dry_run, over)
 
@@ -1420,7 +1415,7 @@ def route_pick_session(cfg: dict, host: str, dry_run: bool = False,
     """Show this host's sessions, plus an add-new option."""
     labels = session_labels(cfg, host)
     items = list(labels) + [NEW_SESSION]
-    choice = choose(items, "session>", "sessions on %s" % host)
+    choice = choose(items, "session>", f"sessions on {host}")
     if choice is None:
         return 130
     if choice == NEW_SESSION:
@@ -1475,7 +1470,7 @@ def route_configure(cfg: dict, words: list[str]) -> int:
     else:
         host = resolve_host(cfg, words[0])
         if not host:
-            print("sshtsf: new host %s" % words[0], file=sys.stderr)
+            print(f"sshtsf: new host {words[0]}", file=sys.stderr)
             edit_host(cfg, words[0])
             return 0
 
@@ -1483,7 +1478,7 @@ def route_configure(cfg: dict, words: list[str]) -> int:
     if len(words) == 2:
         session = resolve_session(cfg, host, words[1])
         if not session:
-            print("sshtsf: new session on %s" % host, file=sys.stderr)
+            print(f"sshtsf: new session on {host}", file=sys.stderr)
             edit_session(cfg, host, words[1])
         else:
             edit_session(cfg, host, session, hcfg["sessions"][session])
@@ -1491,13 +1486,13 @@ def route_configure(cfg: dict, words: list[str]) -> int:
 
     labels = session_labels(cfg, host)
     items = [HOST_SETTINGS] + list(labels) + [NEW_SESSION]
-    choice = choose(items, "edit>", "%s: its settings, or a session" % host)
+    choice = choose(items, "edit>", f"{host}: its settings, or a session")
     if choice is None:
         return 130
     if choice == HOST_SETTINGS:
         edit_host(cfg, host, hcfg)
     elif choice == NEW_SESSION:
-        print("sshtsf: new session on %s" % host, file=sys.stderr)
+        print(f"sshtsf: new session on {host}", file=sys.stderr)
         edit_session(cfg, host)
     else:
         edit_session(cfg, host, labels[choice], hcfg["sessions"][labels[choice]])
@@ -1515,7 +1510,7 @@ def hosts_named(cfg: dict, token: str | None) -> list[str]:
     if token:
         host = resolve_host(cfg, token)
         if not host:
-            sys.exit("sshtsf: unknown host: %s\n%s" % (token, host_hint(cfg)))
+            sys.exit(f"sshtsf: unknown host: {token}\n{host_hint(cfg)}")
         return [host]
     return host_names(cfg)
 
@@ -1533,8 +1528,7 @@ def cmd_list(cfg: dict, token: str | None = None) -> int:
         for name in sorted(sessions):
             here = " *" if (last.get("host") == host
                             and last.get("session") == name) else ""
-            print("    %s%s" % (describe_session(cfg, host, name, sessions[name]),
-                                here))
+            print(f"    {describe_session(cfg, host, name, sessions[name])}{here}")
     return 0
 
 
@@ -1544,16 +1538,15 @@ def cmd_live(cfg: dict, token: str | None = None) -> int:
     for host in hosts_named(cfg, token):
         target = ssh_target(cfg, host)
         rows, why = live_sessions(target)
-        print("%s:" % (host if target == host else "%s  (-> %s)" % (host, target)))
+        print(f"{host}:" if target == host else f"{host}  (-> {target}):")
         if not rows:
-            print("    (%s)" % (why or "no tmux server"))
+            print(f"    ({why or 'no tmux server'})")
             continue
         known = cfg["hosts"][host].get("sessions", {}) or {}
         for row in rows:
             name, windows, state = (row.split("\t") + ["", ""])[:3]
             mark = "" if name in known else "   [unregistered]"
-            print("    %s  %s window%s, %s%s"
-                  % (name, windows, "" if windows == "1" else "s", state, mark))
+            print(f"    {name}  {windows} window{'' if windows == '1' else 's'}, {state}{mark}")
     return 0
 
 
@@ -1587,14 +1580,14 @@ def cmd_edit(dry_run: bool = False) -> int:
     try:
         rc = subprocess.run(argv).returncode
     except OSError as exc:
-        sys.exit("sshtsf: cannot run %s: %s" % (argv[0], exc))
+        sys.exit(f"sshtsf: cannot run {argv[0]}: {exc}")
     if rc != 0:
-        print("sshtsf: %s exited %d" % (argv[0], rc), file=sys.stderr)
+        print(f"sshtsf: {argv[0]} exited {rc}", file=sys.stderr)
         return rc
     try:
         read_config()
     except ConfigError as exc:
-        print("sshtsf: %s" % exc, file=sys.stderr)
+        print(f"sshtsf: {exc}", file=sys.stderr)
         return 1
     return 0
 
@@ -1615,11 +1608,10 @@ def unknown_host(cfg: dict, token: str, alias: bool = False) -> None:
     """
     hint = host_hint(cfg, ssh_hosts=True)
     if host_names(cfg):
-        hint += "\n        `sshtsf -c %s` registers it" % token
+        hint += f"\n        `sshtsf -c {token}` registers it"
         if alias:
             hint += "; `sshtsf -l` shows the sessions too"
-    sys.exit("sshtsf: unknown host%s: %s\n%s"
-             % (" or alias" if alias else "", token, hint))
+    sys.exit(f"sshtsf: unknown host{' or alias' if alias else ''}: {token}\n{hint}")
 
 
 @click.command(cls=cmdline.Command, help=__doc__)
@@ -1654,12 +1646,11 @@ def cli(ctx: click.Context, new: bool, list_: bool, live: bool, configure: bool,
     actions = [flag for flag, on in (("-n", new), ("-l", list_), ("-L", live),
                                      ("-c", configure), ("--edit", edit)) if on]
     if len(actions) > 1:
-        ctx.fail("one of %s at a time" % ", ".join(actions))
+        ctx.fail(f"one of {', '.join(actions)} at a time")
     action = actions[0] if actions else ""
     most = {"-n": 2, "-l": 1, "-L": 1, "-c": 2, "--edit": 0, "": 2}[action]
     if len(words) > most:
-        ctx.fail("%s takes at most %d word(s): %s"
-                 % (action or "sshtsf", most, " ".join(words)))
+        ctx.fail(f"{action or 'sshtsf'} takes at most {most} word(s): {' '.join(words)}")
     if new and not words:
         ctx.fail("-n needs a host: sshtsf -n HOST [NAME]")
     # None means "no override": fall back to the session's or host's setting.
@@ -1673,9 +1664,9 @@ def cli(ctx: click.Context, new: bool, list_: bool, live: bool, configure: bool,
         # The one action that has to work on a config that will not parse,
         # since opening it is how that gets fixed.
         if edit:
-            print("sshtsf: %s" % exc, file=sys.stderr)
+            print(f"sshtsf: {exc}", file=sys.stderr)
             return cmd_edit(dry_run=dry_run)
-        sys.exit("sshtsf: %s" % exc)
+        sys.exit(f"sshtsf: {exc}")
 
     if edit:
         return cmd_edit(dry_run=dry_run)
@@ -1703,9 +1694,9 @@ def cli(ctx: click.Context, new: bool, list_: bool, live: bool, configure: bool,
         token = positional[0]
         owners = word_owners(cfg, token)
         if len(owners) > 1:
-            sys.exit("sshtsf: %s is ambiguous: it names %s\n"
-                     "        `sshtsf -c` gives all but one of them another name or alias"
-                     % (token, ", ".join(describe_owner(owner) for owner in owners)))
+            names = ", ".join(describe_owner(owner) for owner in owners)
+            sys.exit(f"sshtsf: {token} is ambiguous: it names {names}\n"
+                     "        `sshtsf -c` gives all but one of them another name or alias")
         if owners:
             host, session = owners[0]
             if session:
@@ -1720,7 +1711,7 @@ def cli(ctx: click.Context, new: bool, list_: bool, live: bool, configure: bool,
     if session:
         return connect(cfg, host, session, dry_run, over)
     # No such session -- fall into the add-new route with the name filled in.
-    print("sshtsf: no session %s on %s" % (positional[1], host), file=sys.stderr)
+    print(f"sshtsf: no session {positional[1]} on {host}", file=sys.stderr)
     return route_add_session(cfg, host, positional[1], dry_run=dry_run, over=over)
 
 

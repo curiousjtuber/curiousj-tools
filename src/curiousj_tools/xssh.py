@@ -61,7 +61,7 @@ def pane_command(entry: Login) -> str:
         return LOCAL_PANE
     if not entry.commands:
         return f"ssh {entry.login}"
-    return "ssh -t %s %s" % (entry.login, shlex.quote("; ".join(entry.commands)))
+    return f"ssh -t {entry.login} {shlex.quote('; '.join(entry.commands))}"
 
 
 def xpanes_expands_ampersand() -> bool:
@@ -97,7 +97,7 @@ def op_pane_command(entry: Login, script_text: str) -> str:
     inner = f'sh -c "$(echo {encoded} | base64 -d)"; {then}'
     if entry.login == "localhost":
         return inner
-    return "ssh -t %s %s" % (entry.login, shlex.quote(inner))
+    return f"ssh -t {entry.login} {shlex.quote(inner)}"
 
 
 def op_panes(entries: list[Login], ops: list[lists.Operation], path_list: list[lists.PathInfo],

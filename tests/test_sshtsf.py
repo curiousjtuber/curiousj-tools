@@ -52,7 +52,7 @@ def shell_instead(reason: str, folder: str = "",
     """The block that gives up on tmux and gives a login shell instead."""
     return ('{ echo "sshtsf: %s; a plain shell instead" >&2; ' % reason
             + ('[ -z "$SOCAT_PID" ] || kill $SOCAT_PID 2>/dev/null; ' if relay else "")
-            + ("cd %s 2>/dev/null; " % folder if folder else "")
+            + (f"cd {folder} 2>/dev/null; " if folder else "")
             + "".join("export %s=%s; " % pair for pair in env)
             + 'exec "${SHELL:-sh}" -l; }')
 
@@ -243,7 +243,7 @@ def scripted(answers: dict[str, str | list[str]]):
                 if isinstance(reply, list):
                     reply = reply.pop(0)
                 return reply or default
-        raise AssertionError("unexpected prompt: %r" % prompt)
+        raise AssertionError(f"unexpected prompt: {prompt!r}")
     return fake_ask
 
 

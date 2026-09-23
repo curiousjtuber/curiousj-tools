@@ -52,7 +52,7 @@ def elisp_call(function: str, url: str) -> str:
     """`(browse-url "...")` with the URL escaped as an elisp string literal:
     backslash first, then double quote."""
     escaped = url.replace("\\", "\\\\").replace('"', '\\"')
-    return '(%s "%s")' % (function, escaped)
+    return f'({function} "{escaped}")'
 
 
 @click.command(cls=cmdline.Command, help=__doc__)
@@ -72,10 +72,10 @@ def cli(urls: tuple[str, ...]) -> int:
                                   stdout=subprocess.DEVNULL)
             failed = proc.returncode != 0
         except OSError as exc:
-            print("ec-browse: cannot run %s: %s" % (ec[0], exc), file=sys.stderr)
+            print(f"ec-browse: cannot run {ec[0]}: {exc}", file=sys.stderr)
             failed = True
         if failed:
-            print("ec-browse: failed to open %s" % url, file=sys.stderr)
+            print(f"ec-browse: failed to open {url}", file=sys.stderr)
             status = 1
     return status
 

@@ -138,7 +138,7 @@ def probe_ssh(target: str, batch: bool = False) -> list[str]:
     socket cleanup ahead of a connection and the host-key check below may
     prompt, as the connection itself does.
     """
-    return (["ssh", "-o", "ConnectTimeout=%d" % PROBE_CONNECT_TIMEOUT]
+    return (["ssh", "-o", f"ConnectTimeout={PROBE_CONNECT_TIMEOUT}"]
             + (["-o", "BatchMode=yes"] if batch else []) + [target])
 
 
