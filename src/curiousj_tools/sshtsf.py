@@ -29,7 +29,9 @@ Selections use fzf when it is on PATH and fall back to a numbered menu.
 prompts it edits one with: each field shows its current value, blank keeps
 it and `-` clears it, or, at the name prompt, removes the entry. Connecting
 registers an unknown session on a known host the same way, but refuses an
-unknown host, pointing at `sshtsf -c HOST`. Hosts to
+unknown host, pointing at `sshtsf -c HOST`. A word typed on its own -- a
+host's name or alias, a session's alias -- names one entry, and the prompts
+refuse one that is taken. Hosts to
 add are offered from the ssh-lists file xssh and pssh read (see
 `ssh-logins -h`), then from ~/.ssh/known_hosts; a name typed is fine too.
 The same two lists are shown when a name does not resolve.
@@ -400,13 +402,34 @@ def resolve_session(cfg: dict, host: str, token: str) -> str | None:
     return None
 
 
-def resolve_pair_alias(cfg: dict, token: str) -> tuple[str, str] | None:
-    """(host, session) for a single-word host+session alias."""
-    for host, hcfg in cfg.get("hosts", {}).items():
-        for sess, scfg in (hcfg.get("sessions") or {}).items():
-            if scfg.get("alias") == token:
-                return host, sess
-    return None
+def word_owners(cfg: dict, word: str) -> list[tuple[str, str]]:
+    """Every entry a word typed on its own names, as (host, session): a
+    host's key or alias gives (host, ""), a session's alias (host, session).
+
+    More than one is a clash, not a choice: the editor refuses a word that
+    is taken, and the lookup reports one a hand edit made ambiguous, rather
+    than connect to whichever entry the file happens to list first.
+    """
+    owners = []
+    for host, hcfg in sorted((cfg.get("hosts") or {}).items()):
+        if word in (host, hcfg.get("alias")):
+            owners.append((host, ""))
+        for sess, scfg in sorted((hcfg.get("sessions") or {}).items()):
+            if scfg.get("alias") == word:
+                owners.append((host, sess))
+    return owners
+
+
+def describe_owner(owner: tuple[str, str]) -> str:
+    host, session = owner
+    return "%s+%s" % (host, session) if session else "host %s" % host
+
+
+def word_clash(cfg: dict, word: str, own: tuple[str, str]) -> str:
+    """What else word names, for a message; "" when it is free for own, the
+    (host, session) being edited, which may keep a word it already has."""
+    return ", ".join(describe_owner(owner) for owner in word_owners(cfg, word)
+                     if owner != own)
 
 
 def ssh_target(cfg: dict, host: str) -> str:
@@ -1158,6 +1181,17 @@ def ask_port(prompt: str, current: int | None, editing: bool) -> int | None:
         print("  not a port: %s" % reply, file=sys.stderr)
 
 
+def ask_word(cfg: dict, own: tuple[str, str], asker) -> str:
+    """asker's answer, asked again while it names another entry (see
+    word_owners). Blank and `-' pass: neither is a word anyone types."""
+    while True:
+        word = asker()
+        clash = word_clash(cfg, word, own) if word and word != CLEAR else ""
+        if not clash:
+            return word
+        print("  %s already names %s" % (word, clash), file=sys.stderr)
+
+
 def set_field(holder: dict, field: str, value) -> None:
     """Store a value, or drop the key when it is None or "": an absent
     string field is the same as an empty one, and an absent boolean is
@@ -1230,11 +1264,10 @@ def edit_host(cfg: dict, name: str = "", existing: dict | None = None) -> str | 
     hcfg = dict(existing) if editing else {}
 
     if editing:
-        new_name = ask("  name (what you will type; - removes the host)", name)
+        new_name = ask_word(cfg, (name, ""), lambda: ask(
+            "  name (what you will type; - removes the host)", name))
         if new_name == CLEAR:
             return None if remove_host(cfg, name) else name
-        if new_name != name and new_name in hosts:
-            sys.exit("sshtsf: %s already registered" % new_name)
         target = ask("  ssh destination ([user@]host; - for the name itself)",
                      hcfg.get("target") or name)
         if target == CLEAR:
@@ -1250,13 +1283,19 @@ def edit_host(cfg: dict, name: str = "", existing: dict | None = None) -> str | 
         # shortened from it, so it is the destination's default, and the
         # name's default is its machine part, sans user.
         target = name
-        name = ask("  name for this [user@]host (what you will type)",
-                   name.rpartition("@")[2])
-        if not name:
-            sys.exit("sshtsf: a name for the [user@]host is required")
-        if name in hosts:
-            print("sshtsf: %s already registered" % name, file=sys.stderr)
-            return name
+        while True:
+            name = ask("  name for this [user@]host (what you will type)",
+                       target.rpartition("@")[2])
+            if not name:
+                sys.exit("sshtsf: a name for the [user@]host is required")
+            if name in hosts:
+                print("sshtsf: %s already registered" % name, file=sys.stderr)
+                return name
+            # Not a host, but maybe another's alias or a session's.
+            clash = word_clash(cfg, name, (name, ""))
+            if not clash:
+                break
+            print("  %s already names %s" % (name, clash), file=sys.stderr)
         new_name = name
         # The destination is what ssh dials, user and all; there is no user
         # field of its own. Asked for separately only when the destination
@@ -1269,7 +1308,8 @@ def edit_host(cfg: dict, name: str = "", existing: dict | None = None) -> str | 
                 target = "%s@%s" % (user, target)
     set_field(hcfg, "target", target if target and target != new_name else "")
 
-    set_field(hcfg, "alias", ask_text("  alias", hcfg.get("alias", ""), editing))
+    set_field(hcfg, "alias", ask_word(cfg, (name, ""), lambda: ask_text(
+        "  alias", hcfg.get("alias", ""), editing)))
     # The host-wide defaults: a yes here is inherited by every session on the
     # host, and edit_session then skips the same question for a new session
     # rather than ask it again.
@@ -1387,13 +1427,15 @@ def edit_session(cfg: dict, host: str, name: str = "",
                 "  " + question, scfg.get(field), editing,
                 absent="the host's (%s)" % ("on" if hcfg.get(field) else "off")))
 
-    # Asked last, and defaulted to the session name, so the whole entry is
-    # visible by the time the shorthand for it is chosen.
-    if editing:
-        alias = ask_text("  alias for %s+%s" % (host, new_name), scfg.get("alias", ""), True)
-    else:
-        alias = ask("  alias for %s+%s (blank for none)" % (host, new_name), new_name)
-    set_field(scfg, "alias", alias)
+    # Asked last, so the whole entry is visible by the time the shorthand
+    # for it is chosen. A new one is offered the session name, unless that
+    # already names something else: `main' on a second host would be.
+    own = (host, name)
+    current = scfg.get("alias", "")
+    if not editing and not word_clash(cfg, new_name, own):
+        current = new_name
+    set_field(scfg, "alias", ask_word(cfg, own, lambda: ask_text(
+        "  alias for %s+%s" % (host, new_name), current, True)))
 
     if editing and new_name != name:
         sessions.pop(name)
@@ -1705,11 +1747,15 @@ def cli(ctx: click.Context, new: bool, list_: bool, live: bool, configure: bool,
 
     if len(positional) == 1:
         token = positional[0]
-        pair = resolve_pair_alias(cfg, token)
-        if pair:
-            return connect(cfg, pair[0], pair[1], dry_run, over)
-        host = resolve_host(cfg, token)
-        if host:
+        owners = word_owners(cfg, token)
+        if len(owners) > 1:
+            sys.exit("sshtsf: %s is ambiguous: it names %s\n"
+                     "        `sshtsf -c` gives all but one of them another name or alias"
+                     % (token, ", ".join(describe_owner(owner) for owner in owners)))
+        if owners:
+            host, session = owners[0]
+            if session:
+                return connect(cfg, host, session, dry_run, over)
             return route_pick_session(cfg, host, dry_run, over)
         hint = host_hint(cfg, ssh_hosts=True)
         # With nothing registered the hint already says to run `sshtsf', so

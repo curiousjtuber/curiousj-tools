@@ -72,7 +72,9 @@ removes the entry. A host or session named on the command line that is not regis
 goes through the same prompts under `-c`. Connecting registers only an unknown session on a
 known host, so `sshtsf devbox api` asks for `api` and then connects; an unknown host is
 refused there, as the typo it usually is, with the `sshtsf -c` line that would register it.
-A new host is offered from the `logins` of the [ssh-lists file](#hosts-and-batch-runs) first, then
+A word typed on its own names one entry: a host's name or alias, or a session's alias. The
+prompts refuse a word something else already answers to, and offer a new session its own
+name as alias only while that is free. A new host is offered from the `logins` of the [ssh-lists file](#hosts-and-batch-runs) first, then
 from `~/.ssh/known_hosts`. A host's `target` is the ssh destination, `[user@]host`, and is what
 every connection and probe dials; there is no separate user field. A login picked from the
 lists is the target as is; otherwise the user is asked for when the destination names none,

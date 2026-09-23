@@ -204,11 +204,17 @@ class TestConfigRoundTrip(ConfigDirMixin, unittest.TestCase):
         self.assertIn("not valid TOML", str(ctx.exception))
 
 
-def scripted(answers: dict[str, str]):
-    """An `ask' that answers by prompt prefix, and fails on a prompt it lacks."""
+def scripted(answers: dict[str, str | list[str]]):
+    """An `ask' that answers by prompt prefix, and fails on a prompt it lacks.
+    A list answers the same prompt asked again, in turn."""
+    answers = {prefix: list(reply) if isinstance(reply, list) else reply
+               for prefix, reply in answers.items()}
+
     def fake_ask(prompt, default=""):
         for prefix, reply in answers.items():
             if prompt.strip().startswith(prefix):
+                if isinstance(reply, list):
+                    reply = reply.pop(0)
                 return reply or default
         raise AssertionError("unexpected prompt: %r" % prompt)
     return fake_ask
@@ -487,9 +493,19 @@ class TestResolution(unittest.TestCase):
         self.assertIsNone(sshtsf.resolve_session(SAMPLE, "devbox", "zzz"))
         self.assertIsNone(sshtsf.resolve_session(SAMPLE, "build", "web"))
 
-    def test_pair_alias(self):
-        self.assertEqual(sshtsf.resolve_pair_alias(SAMPLE, "devweb"), ("devbox", "web"))
-        self.assertIsNone(sshtsf.resolve_pair_alias(SAMPLE, "web"))
+    def test_word_owners_are_every_entry_a_word_names(self):
+        self.assertEqual(sshtsf.word_owners(SAMPLE, "devweb"), [("devbox", "web")])
+        self.assertEqual(sshtsf.word_owners(SAMPLE, "c"), [("devbox", "")])
+        self.assertEqual(sshtsf.word_owners(SAMPLE, "build"), [("build", "")])
+        # A session's name is not a word of its own; only its alias is.
+        self.assertEqual(sshtsf.word_owners(SAMPLE, "web"), [])
+        cfg = {"hosts": {"alpha": {"sessions": {"main": {"alias": "main"}}},
+                         "beta": {"alias": "alpha",
+                                  "sessions": {"main": {"alias": "main"}}}}}
+        self.assertEqual(sshtsf.word_owners(cfg, "main"), [("alpha", "main"), ("beta", "main")])
+        self.assertEqual(sshtsf.word_owners(cfg, "alpha"), [("alpha", ""), ("beta", "")])
+        self.assertEqual(sshtsf.word_clash(cfg, "main", ("alpha", "main")), "beta+main")
+        self.assertEqual(sshtsf.word_clash(SAMPLE, "c", ("devbox", "")), "")
 
     def test_ssh_target_defaults_to_host_key(self):
         self.assertEqual(sshtsf.ssh_target(SAMPLE, "devbox"), "devbox")
@@ -811,6 +827,24 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         self.assertIn("no session api2 on devbox", err)
         self.assertEqual(add.call_args.args[:3], (mock.ANY, "devbox", "api2"))
 
+    def test_a_word_naming_two_entries_is_reported_not_guessed(self):
+        cfg = sshtsf.load_config()
+        cfg["hosts"]["build"].setdefault("sessions", {})["main"] = {"alias": "main"}
+        cfg["hosts"]["devbox"]["sessions"]["main"] = {"alias": "main"}
+        # A session alias that is also a host's name.
+        cfg["hosts"]["devbox"]["sessions"]["b"] = {"alias": "build"}
+        sshtsf.save_config(cfg)
+        with mock.patch.object(sshtsf, "connect") as connect, \
+             mock.patch.object(sshtsf, "route_pick_session") as pick_session:
+            rc, _, err = run_capture(["main", "--dry-run"])
+            self.assertEqual(rc, 1)
+            self.assertIn("main is ambiguous: it names build+main, devbox+main", err)
+            rc, _, err = run_capture(["build", "--dry-run"])
+            self.assertEqual(rc, 1)
+            self.assertIn("build is ambiguous: it names host build, devbox+b", err)
+        connect.assert_not_called()
+        pick_session.assert_not_called()
+
     def test_host_picker_shows_the_target(self):
         cfg = sshtsf.load_config()
         cfg["hosts"]["devbox"]["target"] = "me@devbox.local"
@@ -1036,6 +1070,55 @@ class TestConfigure(ConfigDirMixin, unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("new session on devbox", err)
         self.assertEqual(cfg["hosts"]["devbox"]["sessions"]["api2"], {"alias": "api2"})
+
+    def test_a_new_session_is_offered_its_name_as_alias_only_while_free(self):
+        # devweb is devbox+web's alias, so a session of that name on build
+        # gets no alias proposed: a blank answer leaves it without one.
+        rc, _, cfg = self.configure(["build", "devweb"], {
+            "session name": "", "command to run": "", "forward the local Emacs socket": "",
+            "forward Wayland": "", "alias for build+devweb (blank for none)": ""}, folder="")
+        self.assertEqual(rc, 0)
+        self.assertEqual(cfg["hosts"]["build"]["sessions"]["devweb"], {})
+
+    def test_a_taken_alias_is_asked_again(self):
+        rc, err, cfg = self.configure(["build", "api"], {
+            "session name": "", "command to run": "", "forward the local Emacs socket": "",
+            "forward Wayland": "", "alias for": ["c", "devbox", "bapi"]}, folder="")
+        self.assertEqual(rc, 0)
+        self.assertIn("  c already names host devbox\n", err)
+        self.assertIn("  devbox already names host devbox\n", err)
+        self.assertEqual(cfg["hosts"]["build"]["sessions"]["api"], {"alias": "bapi"})
+        rc, err, cfg = self.configure(["build"], {
+            "name": "", "ssh destination": "", "alias": ["devweb", "b"],
+            "forward the local Emacs socket": "", "relay it": "", "forward Wayland": "",
+            "offer this host first": ""}, picked=sshtsf.HOST_SETTINGS)
+        self.assertEqual(rc, 0)
+        self.assertIn("  devweb already names devbox+web\n", err)
+        self.assertEqual(cfg["hosts"]["build"]["alias"], "b")
+
+    def test_a_host_keeps_its_own_words_but_takes_no_others(self):
+        # Renaming devbox to its own alias is fine; to another host's name
+        # is asked again, where it used to end the walk.
+        rc, err, cfg = self.configure(["devbox"], {
+            "name": ["build", "c"], "ssh destination": "", "alias": "-",
+            "forward the local Emacs socket": "", "forward Wayland": "",
+            "offer this host first": ""}, picked=sshtsf.HOST_SETTINGS)
+        self.assertEqual(rc, 0)
+        self.assertIn("  build already names host build\n", err)
+        self.assertEqual(sorted(cfg["hosts"]), ["build", "c"])
+        self.assertNotIn("alias", cfg["hosts"]["c"])
+
+    def test_a_new_host_named_like_a_session_alias_is_asked_again(self):
+        with mock.patch.object(sshtsf, "ask", side_effect=scripted({
+                "name for this [user@]host": ["devweb", "dw"], "ssh destination": "",
+                "user on it": "", "alias": "", "forward the local Emacs socket": "",
+                "forward Wayland": ""})), \
+             mock.patch.object(sshtsf, "ssh_host_candidates", return_value=[]), \
+             mock.patch.object(sshtsf, "route_add_session", return_value=0), \
+             mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            sshtsf.route_add_host(sshtsf.load_config(), "devweb.local")
+        self.assertIn("  devweb already names devbox+web\n", err.getvalue())
+        self.assertEqual(sshtsf.load_config()["hosts"]["dw"], {"target": "devweb.local"})
 
     def test_picker_lists_settings_sessions_and_new(self):
         with mock.patch.object(sshtsf, "pick", return_value=None) as pick:
