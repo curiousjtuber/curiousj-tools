@@ -257,7 +257,7 @@ class TestHostCandidates(unittest.TestCase):
         }}
         known = ["build.internal", "c", "devbox", "mac.local", "other"]
         with mock.patch.object(sshtsf, "ssh_known_hosts", return_value=known):
-            got = sshtsf.ssh_host_candidates(cfg)
+            got = sshtsf.known_host_candidates(cfg)
         self.assertEqual(got, [
             ("other", ""),
             ("build.internal", "registered as build"),
@@ -338,7 +338,7 @@ class TestAddHost(ConfigDirMixin, unittest.TestCase):
 
     def add_host(self, answers, typed=""):
         with mock.patch.object(sshtsf, "ask", side_effect=scripted(answers)), \
-             mock.patch.object(sshtsf, "ssh_host_candidates", return_value=[]), \
+             mock.patch.object(sshtsf, "known_host_candidates", return_value=[]), \
              mock.patch.object(sshtsf, "route_add_session", return_value=0) as nxt:
             rc = sshtsf.route_add_host(sshtsf.load_config(), typed)
         self.assertEqual(rc, 0)
@@ -1238,7 +1238,7 @@ class TestConfigure(ConfigDirMixin, unittest.TestCase):
                 "name for this [user@]host": ["devweb", "dw"], "ssh destination": "",
                 "user on it": "", "alias": "", "forward the local Emacs socket": "",
                 "forward Wayland": ""})), \
-             mock.patch.object(sshtsf, "ssh_host_candidates", return_value=[]), \
+             mock.patch.object(sshtsf, "known_host_candidates", return_value=[]), \
              mock.patch.object(sshtsf, "route_add_session", return_value=0), \
              mock.patch("sys.stderr", new_callable=io.StringIO) as err:
             sshtsf.route_add_host(sshtsf.load_config(), "devweb.local")

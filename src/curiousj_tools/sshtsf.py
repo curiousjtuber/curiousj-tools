@@ -164,8 +164,10 @@ FALSE_WORDS = ("false", "no", "off", "0")
 # accumulates on its own, with no upkeep.
 KNOWN_HOSTS_PATH = os.path.expanduser("~/.ssh/known_hosts")
 
-# Enough to jog a memory; a long-lived known_hosts runs to hundreds.
-MAX_KNOWN_HOSTS = 24
+# How many unregistered machines a hint names from each source, the ssh-lists
+# logins and known_hosts: enough to jog a memory, where a long-lived
+# known_hosts runs to hundreds.
+MAX_CANDIDATES = 24
 
 
 # --------------------------------------------------------------------------
@@ -470,7 +472,7 @@ def dialed_names(cfg: dict) -> dict[str, list[str]]:
     return dialed
 
 
-def ssh_host_candidates(cfg: dict) -> list[tuple[str, str]]:
+def known_host_candidates(cfg: dict) -> list[tuple[str, str]]:
     """known_hosts entries as (host, note), the ones no entry dials yet first.
 
     A machine some entry already reaches is kept, after the fresh ones and
@@ -486,7 +488,7 @@ def ssh_host_candidates(cfg: dict) -> list[tuple[str, str]]:
     return fresh + taken
 
 
-def host_hint(cfg: dict, ssh_hosts: bool = False) -> str:
+def host_hint(cfg: dict, unregistered: bool = False) -> str:
     """What is registered, for the messages that reject a host name.
 
     A rejected host is nearly always a typo or a forgotten alias, and the
@@ -494,9 +496,10 @@ def host_hint(cfg: dict, ssh_hosts: bool = False) -> str:
     reader off to `sshtsf -l`. Indented to sit under the "sshtsf: " prefix
     of the line it follows.
 
-    ssh_hosts adds the unregistered machines, from the ssh-lists file and
-    then known_hosts. Right where the answer might be "add one of those",
-    wrong for -l/-L, whose subject can only ever be a host registered here.
+    unregistered adds the machines not registered here, from the ssh-lists
+    file and then known_hosts. Right where the answer might be "add one of
+    those", wrong for -l/-L, whose subject can only ever be a host
+    registered here.
     """
     hosts = host_names(cfg)
     if hosts:
@@ -505,14 +508,14 @@ def host_hint(cfg: dict, ssh_hosts: bool = False) -> str:
     else:
         out = "        nothing registered yet; run `sshtsf` to add a host"
 
-    if ssh_hosts:
+    if unregistered:
         # Only the fresh ones: the registered ones are in the list above.
         fresh = [(host, where) for host, note, where in host_candidates(cfg) if not note]
         for where in ("ssh-lists", "~/.ssh/known_hosts"):
             candidates = [host for host, src in fresh if src == where]
             if not candidates:
                 continue
-            shown = candidates[:MAX_KNOWN_HOSTS]
+            shown = candidates[:MAX_CANDIDATES]
             out += f"\n        in {where}:\n" + textwrap.fill(
                 ", ".join(shown), width=76,
                 initial_indent="          ", subsequent_indent="          ")
@@ -1160,7 +1163,7 @@ def host_candidates(cfg: dict) -> list[tuple[str, str, str]]:
     logins, then the known_hosts machines the lists do not name, the fresh
     ones first. A login is '[user@]host', exactly what a target holds, so
     it is offered as is; one an entry already dials is noted with the
-    entry's name, as the known_hosts ones are (see ssh_host_candidates).
+    entry's name, as the known_hosts ones are (see known_host_candidates).
     source says which file it came from, for a hint that groups by it."""
     dialed = dialed_names(cfg)
     listed = lists_logins()
@@ -1172,7 +1175,7 @@ def host_candidates(cfg: dict) -> list[tuple[str, str, str]]:
                     "ssh-lists"))
     machines = {login.rpartition("@")[2] for login in listed}
     return out + [(host, note, "~/.ssh/known_hosts")
-                  for host, note in ssh_host_candidates(cfg) if host not in machines]
+                  for host, note in known_host_candidates(cfg) if host not in machines]
 
 
 def pick_host_candidate(cfg: dict) -> str:
@@ -1606,7 +1609,7 @@ def unknown_host(cfg: dict, token: str, alias: bool = False) -> None:
     the hint already says to run `sshtsf`, and a second, competing
     suggestion would only muddle it.
     """
-    hint = host_hint(cfg, ssh_hosts=True)
+    hint = host_hint(cfg, unregistered=True)
     if host_names(cfg):
         hint += f"\n        `sshtsf -c {token}` registers it"
         if alias:
