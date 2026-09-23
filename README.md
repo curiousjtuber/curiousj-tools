@@ -12,6 +12,7 @@ as the editor on all of them. Python 3.11+, click and ruamel.yaml.
 | `pick-lines` | the multi-select picker behind `-p` and `-C`/`--pick-paths`: fzf when present, else a numbered menu |
 | `emacsclient-auto` | `emacsclient` that reaches a forwarded Emacs when its socket is live, the local server otherwise; use it as `$EDITOR` on hosts you reach with `sshtsf -e` |
 | `ec-browse` | opens URLs in whichever Emacs `emacsclient-auto` reaches; use it as `$BROWSER` |
+| `curiousj-tools init` | prints the shell functions that go with them, for an rc file to eval: `emacs-remote` and the `tmux-env-refresh` prompt hook; see [Shell integration](#shell-integration) |
 
 ## Install
 
@@ -98,22 +99,12 @@ remote's own Emacs server otherwise. Files are opened through TRAMP, so the remo
 has to say how the local Emacs reaches it. The remote is a poor judge of
 that on its own (`hostname` knows nothing of an mDNS `.local` suffix or an ssh_config alias),
 so `sshtsf -e` also sets `EMACS_REMOTE_TARGET` in the tmux session to the exact destination
-it dialed, and the rc file should prefer it:
-
-```sh
-# On the remote host, in .zshrc / .bashrc:
-if command -v emacsclient-auto >/dev/null; then
-    export EDITOR=emacsclient-auto
-    target="${EMACS_REMOTE_TARGET:-$(hostname -s)}"
-    [[ $target == *@* ]] || target="$USER@$target"
-    export EMACSCLIENT_TRAMP_PREFIX="/ssh:$target:"
-    export BROWSER=ec-browse
-fi
-```
+it dialed. `emacs-remote`, from [Shell integration](#shell-integration), sets all of that up
+from it, and is on by itself in an interactive ssh login.
 
 `EMACS_REMOTE_TARGET` is set on every ecf attach, so a shell that was already running in the
 session still holds the previous connection's name until it re-reads
-`tmux show-environment`; a precmd hook that does so keeps long-lived panes current.
+`tmux show-environment`; `tmux-env-refresh` does that at every prompt.
 
 `emacsclient-auto` passes every argument through to the real `emacsclient`, so `-h` shows that
 program's help. Its own knobs are environment variables: `EMACSCLIENT_TRAMP_PREFIX` (empty means
@@ -121,6 +112,27 @@ never route remote), `EMACSCLIENT_FORWARD_SOCKET` (default `/tmp/emacs-remote-so
 `EMACSCLIENT_BIN` (the real client, otherwise found on `PATH`) and `EMACSCLIENT_AUTO_DEBUG=1`
 (say which branch was taken, on stderr). `ec-browse` takes `EC_BROWSE_EMACSCLIENT` and
 `EC_BROWSE_FUNCTION` (default `browse-url`).
+
+### Shell integration
+
+`emacs-remote` and `tmux-env-refresh` are shell functions, since they change the shell they run in.
+They ship with the package, and one line in `~/.zshrc` or `~/.bashrc` loads them, once the commands'
+directory (`~/.local/bin` for `uv tool install`) is on `PATH`:
+
+```sh
+command -v curiousj-tools >/dev/null && eval "$(curiousj-tools init zsh)"   # or bash
+```
+
+| Function | What it does |
+|---|---|
+| `emacs-remote [ssh\|sshx] [user@host]` | points `EDITOR` at `emacsclient-auto`, `BROWSER` at `ec-browse`, and `emacsclient` at the former, with `EMACSCLIENT_TRAMP_PREFIX` naming this host as the far Emacs reaches it: the argument, else `EMACS_REMOTE_TARGET`, else `hostname -s`. `sshx` if TRAMP stalls on the prompt |
+| `emacs-remote off` | back to the local Emacs only |
+| `tmux-env-refresh` | a precmd / `PROMPT_COMMAND` hook: inside tmux, re-reads `WAYLAND_DISPLAY`, `DISPLAY`, `SSH_AUTH_SOCK`, `SSH_CONNECTION`, `XAUTHORITY` and `EMACS_REMOTE_TARGET` from the session at each prompt, so a shell that predates a reattach does not keep a dead connection's sockets. A new target re-runs `emacs-remote` where it is on |
+
+Loading it also runs `emacs-remote` in an interactive shell over ssh; that is harmless without a
+forward, as `emacsclient-auto` then uses the local Emacs. `TMUX_ENV_REFRESH_EXTRA` names more
+variables for `tmux-env-refresh`, separated by spaces. `curiousj-tools init --path zsh` prints
+where the file is, for an rc file that would rather `source` it than start python at every shell.
 
 ## Hosts and batch runs
 

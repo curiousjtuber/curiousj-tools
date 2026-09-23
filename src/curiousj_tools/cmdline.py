@@ -9,10 +9,9 @@ EXIT_ERROR = 1
 EXIT_USAGE = 2
 
 
-class Command(click.Command):
-    """A command whose help is its module docstring as written -- the usage
-    lines and file excerpts there are laid out by hand -- with the option
-    summary after it. -h works like --help."""
+class _HandLaidHelp:
+    """Help as written -- the usage lines and file excerpts there are laid
+    out by hand -- with the option summary after it. -h works like --help."""
 
     context_settings = {"help_option_names": ["-h", "--help"]}
 
@@ -23,6 +22,18 @@ class Command(click.Command):
     def format_help(self, ctx, formatter):
         formatter.write((self.help or "").rstrip() + "\n")
         self.format_options(ctx, formatter)
+
+
+class Command(_HandLaidHelp, click.Command):
+    """A command whose help is its module docstring as written."""
+
+
+class Group(_HandLaidHelp, click.Group):
+    """The same for a command with subcommands; the docstring lists them."""
+
+    def format_options(self, ctx, formatter):
+        # click.Group appends its own command list here; the docstring has one.
+        click.Command.format_options(self, ctx, formatter)
 
 
 def run(command: click.Command, argv: list[str] | None, prog: str) -> int:
