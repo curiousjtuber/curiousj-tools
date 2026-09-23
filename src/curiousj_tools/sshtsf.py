@@ -113,7 +113,7 @@ from typing import NamedTuple
 import click
 import tomllib
 
-from . import cmdline, emacsclient_auto, lists, logins
+from . import cmdline, emacsclient_auto, lists, sshutil
 from .pick import choose
 
 CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
@@ -570,7 +570,7 @@ def remote_dirs(target: str, depth: int = FOLDER_DEPTH) -> list[str]:
         "-o -type d -print 2>/dev/null | sed 's|^\\./||' | sort"
     )
     try:
-        proc = subprocess.run(logins.probe_ssh(target) + [script], text=True,
+        proc = subprocess.run(sshutil.probe_ssh(target) + [script], text=True,
                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                               timeout=60)
     except (subprocess.TimeoutExpired, OSError):
@@ -648,7 +648,7 @@ def remote_tmux(target: str) -> str:
     """
     try:
         proc = subprocess.run(
-            logins.probe_ssh(target, batch=True)
+            sshutil.probe_ssh(target, batch=True)
             + [shlex.quote(word) for word in remote_sh("command -v tmux && tmux -V")],
             text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except OSError:
@@ -678,7 +678,7 @@ def live_sessions(target: str) -> tuple[list[str], str]:
     fmt = "#{session_name}\t#{session_windows}\t#{?session_attached,attached,detached}"
     try:
         proc = subprocess.run(
-            logins.probe_ssh(target) + [shlex.quote(word) for word in
+            sshutil.probe_ssh(target) + [shlex.quote(word) for word in
                                  remote_sh(f"tmux -u list-sessions -F {shlex.quote(fmt)}")],
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except OSError as exc:
@@ -796,7 +796,7 @@ def waypipe_remote_missing(target: str) -> str:
         what = f"no waypipe on the non-interactive PATH of {target}"
     try:
         proc = subprocess.run(
-            logins.probe_ssh(target, batch=True) + [check],
+            sshutil.probe_ssh(target, batch=True) + [check],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
     except (subprocess.TimeoutExpired, OSError):
         return ""
@@ -816,7 +816,7 @@ def remote_user_guess(target: str) -> str:
     """
     if "@" in target:
         return target.rpartition("@")[0]
-    return emacsclient_auto.login_name()
+    return sshutil.login_name()
 
 
 def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
@@ -867,7 +867,7 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
     cleanup: list[str] = []
     ecf_remote = ""
     if ecf_local:
-        cleanup = logins.probe_ssh(target) + [shlex.quote(word) for word in remote_sh(
+        cleanup = sshutil.probe_ssh(target) + [shlex.quote(word) for word in remote_sh(
             f'p={shlex.quote(ECF_REMOTE_SOCKET)}-$(id -un); rm -f "$p" && echo "$p"')]
         if dry_run:
             ecf_remote = f"{ECF_REMOTE_SOCKET}-{remote_user_guess(target)}"

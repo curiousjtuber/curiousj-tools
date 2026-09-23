@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from curiousj_tools import attrs, lists, logins, pick
+from curiousj_tools import attrs, lists, logins, pick, sshutil
 from curiousj_tools.attrs import Term
 from curiousj_tools.lists import Login
 
@@ -148,7 +148,7 @@ class ConfirmNewHosts(unittest.TestCase):
         # The dial used to have no ConnectTimeout, so a login that was down
         # held pssh and xssh for the TCP connect timeout before they began.
         known = {"a": False, "b": True}
-        with mock.patch.object(logins, "host_known", side_effect=known.get), \
+        with mock.patch.object(sshutil, "host_known", side_effect=known.get), \
                 mock.patch.object(logins.subprocess, "run",
                                   return_value=mock.Mock(returncode=0)) as run, \
                 mock.patch("sys.stderr", new_callable=io.StringIO) as err:
@@ -157,7 +157,7 @@ class ConfirmNewHosts(unittest.TestCase):
         self.assertIn("pssh: a: host key not known yet", err.getvalue())
 
     def test_a_refused_or_unreachable_host_stops_the_run(self):
-        with mock.patch.object(logins, "host_known", return_value=False), \
+        with mock.patch.object(sshutil, "host_known", return_value=False), \
                 mock.patch.object(logins.subprocess, "run", return_value=mock.Mock(returncode=255)), \
                 mock.patch("sys.stderr", new_callable=io.StringIO), \
                 self.assertRaises(logins.ToolError) as cm:

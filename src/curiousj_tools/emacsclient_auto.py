@@ -21,24 +21,17 @@ arguments into TRAMP paths that the far Emacs can open back over ssh.
 
 from __future__ import annotations
 
-import getpass
 import os
 import stat
 import subprocess
 import sys
 
+from .sshutil import login_name
+
 
 # Where sshtsf lands its forward and this looks for it, less the -USER.
 # sshtsf imports it, so the two ends cannot drift apart.
 SOCKET_PREFIX = "/tmp/emacs-remote-socket"
-
-
-def login_name() -> str:
-    """The login this process runs as; its uid when it has no passwd entry."""
-    try:
-        return getpass.getuser()
-    except (KeyError, OSError):
-        return str(os.getuid())
 
 
 def default_socket() -> str:

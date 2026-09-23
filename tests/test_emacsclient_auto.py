@@ -6,6 +6,8 @@ import contextlib
 import io
 import os
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -22,13 +24,26 @@ def make_exe(path: str, body: str = "#!/bin/sh\nexit 0\n") -> str:
     return path
 
 
+class TestImports(unittest.TestCase):
+    def test_starts_without_click_or_the_lists(self):
+        # It runs as $EDITOR, on every commit message: the package's other
+        # modules, click and the lists readers have no business loading.
+        probe = ("import sys, curiousj_tools.emacsclient_auto; "
+                 "print(sorted(m for m in sys.modules "
+                 "if m.startswith('curiousj_tools') or m in ('click', 'tomllib', 'json')))")
+        out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True,
+                             check=True).stdout
+        self.assertEqual(out.strip(), "['curiousj_tools', 'curiousj_tools.emacsclient_auto', "
+                                      "'curiousj_tools.sshutil']")
+
+
 class TestDefaultSocket(unittest.TestCase):
     def test_named_after_the_login(self):
-        with mock.patch.object(eca.getpass, "getuser", return_value="root"):
+        with mock.patch("getpass.getuser", return_value="root"):
             self.assertEqual(eca.default_socket(), "/tmp/emacs-remote-socket-root")
 
     def test_uid_when_the_login_cannot_be_told(self):
-        with mock.patch.object(eca.getpass, "getuser", side_effect=KeyError), \
+        with mock.patch("getpass.getuser", side_effect=KeyError), \
              mock.patch.object(eca.os, "getuid", return_value=1000):
             self.assertEqual(eca.default_socket(), "/tmp/emacs-remote-socket-1000")
 

@@ -40,7 +40,7 @@ SAMPLE = {
 }
 
 
-# How every probe dials: bounded to reach the host (see logins.probe_ssh).
+# How every probe dials: bounded to reach the host (see sshutil.probe_ssh).
 PROBE = ["ssh", "-o", "ConnectTimeout=10"]
 
 REMOTE_PATH_LINE = ('PATH="/opt/homebrew/bin:/usr/local/bin:'
