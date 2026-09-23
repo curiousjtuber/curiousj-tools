@@ -11,6 +11,7 @@ import io
 import os
 import shlex
 import tempfile
+import textwrap
 import unittest
 from unittest import mock
 
@@ -160,6 +161,29 @@ class TestHelp(unittest.TestCase):
         rc, _, err = run_capture(["a", "b", "c"])
         self.assertEqual(rc, 2)
         self.assertIn("at most 2 word", err)
+
+
+class TestExampleConfig(ConfigDirMixin, unittest.TestCase):
+    """`sshtsf -h' carries the config layout, and so does the example file,
+    for a reader without the help at hand; the two stay one text."""
+
+    EXAMPLE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                           "examples", "sshtsf-config.toml")
+
+    def test_help_and_example_agree(self):
+        doc = sshtsf.__doc__
+        in_help = textwrap.dedent(doc[doc.index("    default_host"):]).strip()
+        with open(self.EXAMPLE, encoding="utf-8") as fh:
+            example = fh.read()
+        self.assertEqual(in_help, example[example.index("default_host"):].strip())
+
+    def test_example_loads(self):
+        os.makedirs(os.path.dirname(self.cfg_path))
+        with open(self.EXAMPLE, encoding="utf-8") as src, open(self.cfg_path, "w") as dst:
+            dst.write(src.read())
+        cfg = sshtsf.load_config()
+        self.assertEqual(sshtsf.word_owners(cfg, "devweb"), [("devbox", "web")])
+        self.assertEqual(cfg["hosts"]["devbox"]["ecf_port"], 41234)
 
 
 class TestConfigRoundTrip(ConfigDirMixin, unittest.TestCase):

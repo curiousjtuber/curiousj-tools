@@ -369,5 +369,42 @@ class ExampleFiles(unittest.TestCase):
         self.assertIn("unknown member", str(cm.exception))
 
 
+class ReadmeBlocks(unittest.TestCase):
+    """The README's lists excerpts, which repeat what the examples and the
+    docstrings say, stay valid: each parses and checks as a lists file on
+    its own, and the YAML says what the TOML before it does."""
+
+    def blocks(self):
+        readme = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "README.md")
+        text = open(readme, encoding="utf-8").read()
+        found = []
+        for lang in ("toml", "yaml"):
+            for chunk in text.split("```" + lang + "\n")[1:]:
+                found.append((lang, chunk.split("```", 1)[0]))
+        return found
+
+    def parsed(self, lang, body):
+        from ruamel.yaml import YAML
+        import tomllib
+        data = tomllib.loads(body) if lang == "toml" else YAML(typ="safe").load(body)
+        return lists.merge([lists.parse(data, f"README {lang} block")])
+
+    def test_every_block_is_a_valid_lists_file(self):
+        blocks = self.blocks()
+        self.assertGreaterEqual(len(blocks), 4)
+        for lang, body in blocks:
+            with self.subTest(block=body[:40]):
+                self.parsed(lang, body)
+
+    def test_the_yaml_says_what_the_toml_does(self):
+        # The first of each: the README's "The same in YAML" pair.
+        first = {}
+        for lang, body in self.blocks():
+            first.setdefault(lang, body)
+        toml, yaml = self.parsed("toml", first["toml"]), self.parsed("yaml", first["yaml"])
+        self.assertEqual((toml.logins, toml.paths), (yaml.logins, yaml.paths))
+
+
 if __name__ == "__main__":
     unittest.main()
