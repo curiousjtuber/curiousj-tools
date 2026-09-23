@@ -27,7 +27,7 @@ two-word invocation replaces a hand-written alias per session.
 Selections use fzf when it is on PATH and fall back to a numbered menu.
 -c registers a host or session that does not exist yet through the same
 prompts it edits one with: each field shows its current value, blank keeps
-it and `-` clears it, or, at the name prompt, removes the entry. Connecting
+it and "-" clears it, or, at the name prompt, removes the entry. Connecting
 registers an unknown session on a known host the same way, but refuses an
 unknown host, pointing at `sshtsf -c HOST`. A word typed on its own -- a
 host's name or alias, a session's alias -- names one entry, and the prompts
@@ -38,13 +38,13 @@ The same two lists are shown when a name does not resolve.
 
 With ecf on, the connection also reverse-forwards the local Emacs server
 socket, so emacsclient / $EDITOR / magit on the remote open in the local
-Emacs, provided the remote's EDITOR is `emacsclient-auto` (this package; see
+Emacs, provided the remote's EDITOR is 'emacsclient-auto' (this package; see
 README). The tmux session is also told the destination as dialed, as
 EMACS_REMOTE_TARGET, for the remote's TRAMP prefix. It is remembered per
 host or per session; -e / -E override for one call. If the remote runs
 SELinux (Fedora, Bazzite) and sshd is blocked from creating Unix sockets,
 give the host a TCP port to relay through (asked by -c when ecf is on; an
-`ecf_port` on a session, set by hand, wins over the host's). The socket
+'ecf_port' on a session, set by hand, wins over the host's). The socket
 lands at /tmp/emacs-remote-socket-USER there; SSHTSF_ECF_SOCKET replaces the
 part before -USER, and the remote's EMACSCLIENT_FORWARD_SOCKET has to follow.
 
@@ -73,7 +73,7 @@ colon-separated, replaces that list.
 The session is told waypipe's display name on connect, so no tmux config is
 needed on the remote -- WAYLAND_DISPLAY only joined tmux's default
 update-environment in 3.7. Panes that predate the connection still hold the
-old value; a shell prompt hook that re-reads `tmux show-environment' keeps
+old value; a shell prompt hook that re-reads `tmux show-environment` keeps
 those current.
 
 Config layout (all fields but the host key are optional):
@@ -123,10 +123,10 @@ CONFIG_PATH = os.path.join(CONFIG_DIR, "config.toml")
 NEW_HOST = "+ new host"
 NEW_SESSION = "+ new session"
 
-# Where an ecf forward lands on the remote, less the `-USER' the remote
+# Where an ecf forward lands on the remote, less the '-USER' the remote
 # appends for the login it is made under, so two users on one host do not
 # fight over a file in a sticky /tmp. Shared with the remote side: its
-# `emacsclient-auto` looks at EMACSCLIENT_FORWARD_SOCKET, a whole path, and the
+# 'emacsclient-auto' looks at EMACSCLIENT_FORWARD_SOCKET, a whole path, and the
 # two agree on the default /tmp/emacs-remote-socket-USER, from its
 # SOCKET_PREFIX. SSHTSF_ECF_SOCKET moves this end's; the remote's knob then
 # has to name the same path, -USER and all.
@@ -140,7 +140,7 @@ ECF_REMOTE_SOCKET = (os.environ.get("SSHTSF_ECF_SOCKET")
 WAYPIPE_OPTS = shlex.split(os.environ.get("SSHTSF_WAYPIPE_OPTS") or "")
 
 # Put ahead of PATH on the remote before anything is run there. A
-# non-interactive `ssh host cmd' gets the login shell's bare PATH -- zsh reads
+# non-interactive `ssh host cmd` gets the login shell's bare PATH -- zsh reads
 # only .zshenv for it, and Homebrew's shellenv line lives in .zprofile -- so
 # a brew-installed tmux on a Mac is invisible to it. These are where package
 # managers put what the panes' interactive shell finds, and they go first so
@@ -216,7 +216,7 @@ def dump_config(cfg: dict) -> str:
         lines.append("")
 
     # The booleans are keyed on presence, not truth, unlike the string fields:
-    # a session's `ecf = false` is what opts it out of a host default, so it
+    # a session's "ecf = false" is what opts it out of a host default, so it
     # has to survive a rewrite rather than be dropped as falsy.
     for host, hcfg in sorted((cfg.get("hosts") or {}).items()):
         lines.append(f"[hosts.{toml_key(host)}]")
@@ -405,7 +405,7 @@ def resolve_flag(cfg: dict, host: str, session: str, field: str,
 
 
 def describe_host(cfg: dict, host: str) -> str:
-    """`devbox  (alias c, -> target, ecf, default)` -- one host, with its marks."""
+    """"devbox  (alias c, -> target, ecf, default)" -- one host, with its marks."""
     hcfg = cfg["hosts"].get(host, {})
     marks = []
     if hcfg.get("alias"):
@@ -422,7 +422,7 @@ def ssh_known_hosts(path: str = KNOWN_HOSTS_PATH) -> list[str]:
     """Host names from ~/.ssh/known_hosts, deduplicated and sorted.
 
     A host appears once per key type, hence the dedupe. Hashed entries
-    (HashKnownHosts, `|1|...') cannot be reversed, so they are skipped, as are
+    (HashKnownHosts, "|1|...") cannot be reversed, so they are skipped, as are
     wildcard and negated patterns -- none of those is a name you could type.
     One line may list several names comma-separated, and a non-default port
     appears as [host]:port, unwrapped here to the bare host.
@@ -491,7 +491,7 @@ def host_hint(cfg: dict, ssh_hosts: bool = False) -> str:
 
     A rejected host is nearly always a typo or a forgotten alias, and the
     answer is the same list every time -- so print it rather than send the
-    reader off to `sshtsf -l`. Indented to sit under the `sshtsf: ' prefix
+    reader off to `sshtsf -l`. Indented to sit under the "sshtsf: " prefix
     of the line it follows.
 
     ssh_hosts adds the unregistered machines, from the ssh-lists file and
@@ -583,10 +583,10 @@ def show_folder(folder: str) -> None:
 
 
 def prompt_folder(target: str, current: str = "", label: str = "") -> str:
-    """Ask for a folder: type one, `?' to fuzzy-pick from a listing, blank for none.
+    """Ask for a folder: type one, "?" to fuzzy-pick from a listing, blank for none.
 
     Returns the folder relative to ~, "" for none. Updating an existing
-    folder, blank keeps it and `-' clears it, so the current one is the
+    folder, blank keeps it and "-" clears it, so the current one is the
     prompt's default and pre-fills fzf's query. Leaving the picker keeps it
     as well -- none, for a new session -- rather than end the whole walk, and
     so does a blank at the prompt that stands in for a listing that failed.
@@ -622,23 +622,23 @@ def prompt_folder(target: str, current: str = "", label: str = "") -> str:
 
 
 def remote_sh(script: str) -> list[str]:
-    """`sh -c SCRIPT' as ssh command words, with REMOTE_PATH ahead of the PATH.
+    """`sh -c SCRIPT` as ssh command words, with REMOTE_PATH ahead of the PATH.
 
     The connection's script, the ecf socket cleanup and the tmux probes go
     through this, so a probe resolves the same tmux the connection will. Two
     remote commands do not: the folder listing, which needs nothing past
-    find, sed and sort, and the waypipe probe, since `waypipe ssh' starts its
+    find, sed and sort, and the waypipe probe, since `waypipe ssh` starts its
     server on the plain non-interactive PATH, which is the one to ask about.
 
     sh rather than the login shell for the script itself: the script is
-    POSIX sh and the login shell need not be (fish has no `VAR=value; cmd').
+    POSIX sh and the login shell need not be (fish has no `VAR=value; cmd`).
     Unquoted, for the caller to quote once along with its other words.
     """
     return ["sh", "-c", f'PATH="{REMOTE_PATH}:$PATH"; {script}']
 
 
 def remote_tmux(target: str) -> str:
-    """Which tmux a non-interactive `ssh target tmux' resolves, as "PATH (VERSION)".
+    """Which tmux a non-interactive `ssh target tmux` resolves, as "PATH (VERSION)".
 
     Empty when the question cannot be answered. Costs a second connection, so
     it is asked only once list-sessions has already failed without saying why.
@@ -668,7 +668,7 @@ def live_sessions(target: str) -> tuple[list[str], str]:
     carried out instead: tmux's own words when it said any, and otherwise the
     binary an ssh command actually resolved, since that mismatch IS the failure.
 
-    Tab-separated, and `-u' for the same reason connect passes it: the ssh
+    Tab-separated, and '-u' for the same reason connect passes it: the ssh
     command's shell sets no locale, so tmux takes the client for non-UTF-8
     and sanitizes what it prints for one, the tabs to underscores included.
     """
@@ -689,7 +689,7 @@ def live_sessions(target: str) -> tuple[list[str], str]:
     which = remote_tmux(target)
     if which:
         return [], (f"tmux exited {proc.returncode} without a message; "
-                    f"`ssh {target} tmux' is {which}")
+                    f"`ssh {target} tmux` is {which}")
     return [], (f"tmux exited {proc.returncode} without a message, and no tmux is on the "
                 "non-interactive PATH")
 
@@ -753,8 +753,8 @@ def waypipe_local_display() -> tuple[str | None, str]:
 def waypipe_remote_bin() -> str:
     """The waypipe the remote will be asked to run: --remote-bin's value, or "".
 
-    waypipe reads its options with getopt_long, so both `--remote-bin PATH'
-    and `--remote-bin=PATH' spell it.
+    waypipe reads its options with getopt_long, so both '--remote-bin PATH'
+    and '--remote-bin=PATH' spell it.
     """
     for i, word in enumerate(WAYPIPE_OPTS):
         if word == "--remote-bin" and i + 1 < len(WAYPIPE_OPTS):
@@ -771,7 +771,7 @@ def tab_title(title: str) -> str:
 
 
 def waypipe_remote_missing(target: str) -> str:
-    """Why `waypipe ssh' would die on the far side, or "" when it should not.
+    """Why `waypipe ssh` would die on the far side, or "" when it should not.
 
     waypipe_local_display, one hop further out: waypipe has to exist at both
     ends, and a remote without it fails after the handshake with waypipe's own
@@ -850,7 +850,7 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
 
     # The remote socket path is settled on a connection of its own, ahead of
     # the real one, which does two things at once. It names the socket after
-    # the login the remote actually gives -- `id -un' there, not the user@
+    # the login the remote actually gives -- `id -un` there, not the user@
     # dialed or ssh_config's User, which is the only way the path is sure to
     # match what that login's emacsclient-auto looks for. And it clears a
     # leftover: sshd does not honour StreamLocalBindUnlink, so after an
@@ -889,29 +889,29 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
         ecf_port = scfg.get("ecf_port") or cfg["hosts"][host].get("ecf_port")
 
     # What the session has to be told about this connection, as (name, shell
-    # word) pairs; the word is spliced into an `sh -c' script as-is, so a
-    # literal is quoted here and a `"$VAR"' is left for the remote sh to expand.
+    # word) pairs; the word is spliced into an `sh -c` script as-is, so a
+    # literal is quoted here and a '"$VAR"' is left for the remote sh to expand.
     session_env: list[tuple[str, str]] = []
     if waypipe:
         # Teach the session waypipe's display name, rather than trusting the
         # remote's tmux to carry it: WAYLAND_DISPLAY only joined the default
         # update-environment in tmux 3.7, and on anything older the session
-        # never learns it at all -- `tmux show-environment WAYLAND_DISPLAY'
+        # never learns it at all -- `tmux show-environment WAYLAND_DISPLAY`
         # answers "unknown variable" and GUI applications quietly open on the
         # remote's own screen instead of here.
         #
         # It has to be a shell that WAYPIPE started. waypipe execs the command
-        # itself (`waypipe ... server tmux ...'), and only its children have the
+        # itself (`waypipe ... server tmux ...`), and only its children have the
         # forwarded WAYLAND_DISPLAY -- the ssh login shell that parses this line
         # runs earlier and would expand it to the remote's own display, or to
-        # nothing. So `sh -c' below, with $WAYLAND_DISPLAY left for it to expand.
+        # nothing. So `sh -c` below, with $WAYLAND_DISPLAY left for it to expand.
         session_env.append(("WAYLAND_DISPLAY", '"$WAYLAND_DISPLAY"'))
     if ecf_local:
         # Tell the session the name this end dialed, so the remote's rc file
         # can build a TRAMP prefix the local Emacs can actually connect back
         # through (EMACSCLIENT_TRAMP_PREFIX, for emacsclient-auto; the README
         # has the lines). The remote cannot work that out itself: its
-        # `hostname' knows nothing of an mDNS `.local' suffix or an ssh_config
+        # `hostname` knows nothing of an mDNS '.local' suffix or an ssh_config
         # alias, and a name that resolves from the remote need not resolve from
         # here. The destination as dialed, user@ and all, since TRAMP resolves
         # it through the same ssh_config; the rc lines prepend the login user
@@ -921,11 +921,11 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
     folder = scfg.get("folder") or ""
 
     def shell_instead(reason: str) -> str:
-        """A `{ ...; }' that gives up on tmux: warn, then the login shell.
+        """A `{ ...; }` that gives up on tmux: warn, then the login shell.
 
         The worst case is a plain ssh, not a dead connection. The shell starts
         in the session's folder with what the session would have been told
-        exported into it -- except a `"$VAR"' entry, a value the shell already
+        exported into it -- except a '"$VAR"' entry, a value the shell already
         holds. A relay started above is stopped, so the exec'd shell leaves
         nothing behind.
         """
@@ -942,20 +942,20 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
     # client then renders every non-ASCII cell as an underscore. -u asserts
     # UTF-8 without depending on the remote's locales.
     #
-    # Create, set, then attach, in three steps rather than one `-A': -A would
-    # attach before the variables could be set, `-e' applies only when tmux
+    # Create, set, then attach, in three steps rather than one '-A': -A would
+    # attach before the variables could be set, '-e' applies only when tmux
     # creates the session, never when it attaches to a live one -- and a live
     # session is exactly the one holding values from a connection that is
     # gone -- and a create that fails can only fall back when it is a step of
     # its own.
     #
-    # has-session rather than `new-session -Ad', because -A makes new-session
+    # has-session rather than `new-session -Ad`, because -A makes new-session
     # behave as attach-session and -d stops meaning detached there -- so -Ad
     # on an EXISTING session attaches anyway, and the rest of the chain never
     # runs. (-AD would work, but it also detaches whoever else is attached,
     # which is not ours to do.)
     #
-    # `=name' is an exact-match target: without it a session name that
+    # '=name' is an exact-match target: without it a session name that
     # prefixes another could resolve to the wrong one.
     tgt = shlex.quote("=" + session)
     create_words = ["tmux", "-u", "new-session", "-d"]
@@ -976,7 +976,7 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
     relay = ""
     if ecf_port:
         # socat is checked for on the remote rather than assumed: without the
-        # check a missing one dies in the background with a bare `not found'
+        # check a missing one dies in the background with a bare "not found"
         # and the forwarded port sits there unrelayed. With it, the session is
         # warned once and attached anyway -- the same generosity as the local
         # checks above, at no extra round trip. After the tmux check, so a
@@ -1013,7 +1013,7 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
     # -t before the target, not after it. ssh itself accepts either, but
     # waypipe takes the first non-option word as the destination and everything
     # past it as the command to run -- so a trailing -t becomes argv[0] of that
-    # command and it dies with `Failed to run program "-t"'.
+    # command and it dies with 'Failed to run program "-t"'.
     #
     # Quote for the remote shell: ssh joins its command words with spaces and
     # the far side re-parses them, so an unquoted path with a space would
@@ -1023,13 +1023,13 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
 
     if waypipe:
         # waypipe takes its options before the mode word and passes everything
-        # after `ssh' through, so the whole command above rides along as ssh
+        # after 'ssh' through, so the whole command above rides along as ssh
         # arguments -- which is what lets waypipe and ecf compose, as two
         # independent -R forwards on one connection. waypipe adds a -t of its
         # own; a doubled -t only means -tt, which is harmless here since there
         # is always a terminal. No --display: waypipe's randomized
         # per-connection name is fine, because the session is told the name
-        # above, and a prompt hook that re-reads `tmux show-environment' can
+        # above, and a prompt hook that re-reads `tmux show-environment` can
         # carry it into the panes that predate this connection.
         argv = ["waypipe"] + WAYPIPE_OPTS + ["ssh"] + argv[1:]
 
@@ -1078,7 +1078,7 @@ CLEAR = "-"
 def ask_text(prompt: str, current: str = "", editing: bool = False,
              unset: str = "none") -> str:
     """A string field. New: blank for none. Editing: blank keeps the current
-    value and `-' clears it; the hint says which, unset naming what an empty
+    value and "-" clears it; the hint says which, unset naming what an empty
     field means. Returns "" for none."""
     if editing and current:
         reply = ask(f"{prompt} (- for {unset})", current)
@@ -1091,7 +1091,7 @@ def ask_bool(prompt: str, current: bool | None = None, editing: bool = False,
              unset: str = "none") -> bool | None:
     """A boolean field; None means "not set". New, it is a (y/N) where only a
     yes sets it, since an absent field already means no. Editing, blank
-    keeps the current value and `-' unsets it, which for a session means
+    keeps the current value and "-" unsets it, which for a session means
     following the host; unset names what that means there, for the hint.
     A word that is neither yes nor no is asked again rather than taken as
     no, so a typo cannot quietly turn a forward off."""
@@ -1125,7 +1125,7 @@ def ask_port(prompt: str, current: int | None, editing: bool) -> int | None:
 
 def ask_word(cfg: dict, own: tuple[str, str], asker) -> str:
     """asker's answer, asked again while it names another entry (see
-    word_owners). Blank and `-' pass: neither is a word anyone types."""
+    word_owners). Blank and "-" pass: neither is a word anyone types."""
     while True:
         word = asker()
         clash = word_clash(cfg, word, own) if word and word != CLEAR else ""
@@ -1158,7 +1158,7 @@ def lists_logins() -> list[str]:
 def host_candidates(cfg: dict) -> list[tuple[str, str, str]]:
     """(destination, note, source) to offer for a new host: the ssh-lists
     logins, then the known_hosts machines the lists do not name, the fresh
-    ones first. A login is `[user@]host', exactly what a target holds, so
+    ones first. A login is '[user@]host', exactly what a target holds, so
     it is offered as is; one an entry already dials is noted with the
     entry's name, as the known_hosts ones are (see ssh_host_candidates).
     source says which file it came from, for a hint that groups by it."""
@@ -1313,7 +1313,7 @@ def remove_session(cfg: dict, host: str, session: str) -> bool:
     del cfg["hosts"][host]["sessions"][session]
     last = cfg.get("last") or {}
     if last.get("host") == host and last.get("session") == session:
-        cfg.pop("last", None)  # else `last` points at a session that is gone
+        cfg.pop("last", None)  # else 'last' points at a session that is gone
     save_config(cfg)
     print(f"sshtsf: removed {session} from {host}", file=sys.stderr)
     return True
@@ -1364,7 +1364,7 @@ def edit_session(cfg: dict, host: str, name: str = "",
 
     # Asked last, so the whole entry is visible by the time the shorthand
     # for it is chosen. A new one is offered the session name, unless that
-    # already names something else: `main' on a second host would be.
+    # already names something else: 'main' on a second host would be.
     own = (host, name)
     current = scfg.get("alias", "")
     if not editing and not word_clash(cfg, new_name, own):
@@ -1431,7 +1431,7 @@ def session_labels(cfg: dict, host: str) -> dict[str, str]:
 
 def host_labels(cfg: dict) -> dict[str, str]:
     """The registered hosts as the picker shows them, the default (or
-    last-used) first so it is one Enter away. The same line `-l' prints, so
+    last-used) first so it is one Enter away. The same line '-l' prints, so
     a target that differs from the name (user@, a .local suffix) shows
     here too, where the choice is made."""
     hosts = host_names(cfg)
@@ -1553,7 +1553,7 @@ def cmd_live(cfg: dict, token: str | None = None) -> int:
 def editor_command() -> list[str]:
     """$VISUAL, else $EDITOR, else vi: the convention git and crontab follow.
 
-    Split as a shell would, so `emacsclient -t' works as written.
+    Split as a shell would, so `emacsclient -t` works as written.
     """
     for var in ("VISUAL", "EDITOR"):
         words = shlex.split(os.environ.get(var) or "")
@@ -1568,7 +1568,7 @@ def cmd_edit(dry_run: bool = False) -> int:
     A config that does not exist yet is written first, so the editor gets a
     file in a directory that exists rather than a path it may refuse to save
     to. Afterwards the file is read back: a slip in the TOML is reported now,
-    with its line, instead of on the next `sshtsf devbox'.
+    with its line, instead of on the next `sshtsf devbox`.
     """
     argv = editor_command() + [CONFIG_PATH]
     if dry_run:
@@ -1602,8 +1602,8 @@ def unknown_host(cfg: dict, token: str, alias: bool = False) -> None:
     and what could be. alias is for a word on its own, which could have
     been a session's alias as well.
 
-    The `sshtsf -c' line only once something is registered: with nothing,
-    the hint already says to run `sshtsf', and a second, competing
+    The `sshtsf -c` line only once something is registered: with nothing,
+    the hint already says to run `sshtsf`, and a second, competing
     suggestion would only muddle it.
     """
     hint = host_hint(cfg, ssh_hosts=True)

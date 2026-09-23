@@ -59,7 +59,7 @@ class PaneCommands(unittest.TestCase):
 
     def test_ampersands_survive_xpanes_substitution(self):
         # xpanes types "${_cmd//{}/arg}" into the pane; feed the escaped
-        # command through that very expansion in a bash that expands `&`.
+        # command through that very expansion in a bash that expands '&'.
         cmd = xssh.pane_command(Login("a", ["cd src && ls a\\b", "exec zsh"]))
         escaped = xssh.for_xpanes(cmd, ampersand=True)
         self.assertEqual(xssh.for_xpanes(cmd, ampersand=False), cmd)

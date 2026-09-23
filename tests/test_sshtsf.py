@@ -167,7 +167,7 @@ class TestHelp(unittest.TestCase):
 
 
 class TestExampleConfig(ConfigDirMixin, unittest.TestCase):
-    """`sshtsf -h' carries the config layout, and so does the example file,
+    """`sshtsf -h` carries the config layout, and so does the example file,
     for a reader without the help at hand; the two stay one text."""
 
     EXAMPLE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -232,7 +232,7 @@ class TestConfigRoundTrip(ConfigDirMixin, unittest.TestCase):
 
 
 def scripted(answers: dict[str, str | list[str]]):
-    """An `ask' that answers by prompt prefix, and fails on a prompt it lacks.
+    """An 'ask' that answers by prompt prefix, and fails on a prompt it lacks.
     A list answers the same prompt asked again, in turn."""
     answers = {prefix: list(reply) if isinstance(reply, list) else reply
                for prefix, reply in answers.items()}

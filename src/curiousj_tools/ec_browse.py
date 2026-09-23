@@ -9,7 +9,7 @@ every $BROWSER consumer does when the value has no '%s' placeholder.
     ec-browse https://example.com [URL...]
 
 Env knobs:
-  EC_BROWSE_EMACSCLIENT  emacsclient to use; defaults to `emacsclient-auto`
+  EC_BROWSE_EMACSCLIENT  emacsclient to use; defaults to 'emacsclient-auto'
                          on PATH, else this package's own copy of it
   EC_BROWSE_FUNCTION     elisp function to call; default browse-url.
                          Set to browse-url-default-browser to force the
@@ -49,7 +49,7 @@ def emacsclient_command(env: dict) -> list[str]:
 
 
 def elisp_call(function: str, url: str) -> str:
-    """`(browse-url "...")` with the URL escaped as an elisp string literal:
+    """'(browse-url "...")' with the URL escaped as an elisp string literal:
     backslash first, then double quote."""
     escaped = url.replace("\\", "\\\\").replace('"', '\\"')
     return f'({function} "{escaped}")'

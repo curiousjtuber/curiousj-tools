@@ -2,7 +2,7 @@
 is live, otherwise fall back to the local Emacs server.
 
 Used both as $EDITOR (git execs it directly, so it must be a real executable,
-not a shell function) and behind an `emacsclient` shell function or alias that
+not a shell function) and behind an 'emacsclient' shell function or alias that
 points at it. The forwarded socket is what `sshtsf -e` sets up from the
 other end: it reverse-forwards the local machine's Emacs server socket to
 EMACSCLIENT_FORWARD_SOCKET on the remote, and this script, running on the
@@ -45,7 +45,7 @@ def default_socket() -> str:
     """/tmp/emacs-remote-socket-USER: per login, as sshtsf names its forward.
 
     The suffix is the login this process runs as, which is what sshtsf's
-    `id -un' on the remote answered when it set the forward up; two users on
+    `id -un` on the remote answered when it set the forward up; two users on
     one host thus get two sockets in the sticky /tmp instead of a fight over
     one.
     """
@@ -55,7 +55,7 @@ def default_socket() -> str:
 DEFAULT_SOCKET = default_socket()
 
 # Names this tool may be installed or symlinked under; a PATH entry called
-# `emacsclient` that resolves to one of these is us, not the real client.
+# 'emacsclient' that resolves to one of these is us, not the real client.
 SELF_NAMES = ("emacsclient-auto", "emacsclient_auto.py")
 
 PROBE_TIMEOUT = 2
@@ -72,7 +72,7 @@ def self_paths() -> set[str]:
 
 def find_emacsclient(env: dict, self: set[str] | None = None) -> str | None:
     """The real emacsclient: EMACSCLIENT_BIN, else the first on PATH that is
-    not this program (an `emacsclient` symlink pointing back here would
+    not this program (an 'emacsclient' symlink pointing back here would
     otherwise recurse forever)."""
     explicit = env.get("EMACSCLIENT_BIN")
     if explicit:

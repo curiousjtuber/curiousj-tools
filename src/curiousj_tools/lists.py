@@ -8,7 +8,7 @@ or .json. Three parts, all optional:
         { login = "build.example.com", commands = ["distrobox enter dev -nw"],
           via = "distrobox enter dev -nw --", attributes = ["mise", "cachyos"] },
     ]   # commands: run after login, in the pane xssh opens
-        # via: what pssh runs its command through there, given `sh -c '...'`
+        # via: what pssh runs its command through there, given `sh -c `...'`
         # attributes: flags and key=value pairs the operations select on
 
     [[paths]]
@@ -30,10 +30,10 @@ or .json. Three parts, all optional:
     [operations.system-update]              # a group: each login runs the members it matches
     operations = ["cachy-update", "brew-upgrade"]
 
-A login is a string or a table (`[[logins]]` tables work too, when none is
-a bare string); so is a path. A condition (`logins`, `paths`) is a term, a
-list of terms that all have to hold, or a table with `all`, `any`, `none`;
-a term is `key`, `key=value`, `!key` or `key!=value` (see curiousj_tools.attrs).
+A login is a string or a table ('[[logins]]' tables work too, when none is
+a bare string); so is a path. A condition ('logins', 'paths') is a term, a
+list of terms that all have to hold, or a table with 'all', 'any', 'none';
+a term is 'key', 'key=value', '!key' or 'key!=value' (see curiousj_tools.attrs).
 A login or path can carry its own command for an operation, which is then
 run there whatever the operation's condition says, and can name an
 operation no [operations.*] table defines:
@@ -70,8 +70,8 @@ Several files make one list. Which are read:
 
 Files merge in that order. An entry given twice -- a login with the same
 commands and via, a path, an operation name -- keeps its first definition,
-with a warning naming both files. (Beware that `ssh-lists-extra.yaml`
-sorts before `ssh-lists.yaml`.)
+with a warning naming both files. (Beware that 'ssh-lists-extra.yaml'
+sorts before 'ssh-lists.yaml'.)
 """
 
 from __future__ import annotations

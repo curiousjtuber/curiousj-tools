@@ -7,14 +7,14 @@
 logins = [
     "build.example.com",                 # [user@]host, as ssh takes it
     # a table where a login needs more: attributes are what operations and
-    # `-a` select on, flags or key=value
+    # '-a' select on, flags or key=value
     { login = "alice@devbox", attributes = ["cachyos", "mise"] },
     # commands run after login in the pane xssh opens; end in something
     # interactive, or the pane ends. operations: this login's own command for
     # an operation, run whatever the operation's condition says
     { login = "my-mac.local", commands = ["cd src", "exec zsh"], attributes = ["mac", "brew", "mise"], operations = { brew-upgrade = "brew update && brew upgrade --greedy" } },
     # the same login twice: one pane on the host, one inside its container;
-    # via is how pssh runs its command in there (handed `sh -c '...'`), so
+    # via is how pssh runs its command in there (handed `sh -c `...'`), so
     # `pssh -o git-pull` keeps a container's separate home current too
     { login = "alice@devbox", commands = ["distrobox enter dev -nw"], via = "distrobox enter dev -nw --" },
 ]
@@ -36,10 +36,10 @@ operations = { git-pull = "git pull --ff-only" }   # this path's own way of bein
 
 # Operations: `pssh -o NAME` runs one on every login it applies to, `xssh -o
 # NAME` opens a synchronized pane per such login instead. A condition is a
-# term (`mise`, `arch=x86_64`, `!mise`, `arch!=x86_64`), a list of terms that
+# term ('mise', 'arch=x86_64', '!mise', 'arch!=x86_64'), a list of terms that
 # all hold, or a table with all, any, none.
 
-[operations.git-pull]                    # per path: `paths` says which (true: all of them)
+[operations.git-pull]                    # per path: 'paths' says which (true: all of them)
 command = "git pull --rebase --autostash"
 paths = "git"
 clone = true                             # clone a missing path first, as -c
@@ -48,7 +48,7 @@ clone = true                             # clone a missing path first, as -c
 command = "uv tool install --force --reinstall ."
 paths = "py-project"
 
-[operations.mise-update]                 # per login: `logins` says which (absent: all of them)
+[operations.mise-update]                 # per login: 'logins' says which (absent: all of them)
 command = "mise self-update -y && mise upgrade"
 logins = "mise"
 

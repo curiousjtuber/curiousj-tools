@@ -3,23 +3,23 @@
     ssh-logins [-h] [-N|--no-local] [-a TERM]... [-p|--pick] [-f FILE]...
 
 One entry per line: every login ([user@]host) in the lists files, then
-`localhost` last, which consumers turn into whatever "this machine" means
+'localhost' last, which consumers turn into whatever "this machine" means
 for them (xssh: a local pane, pssh: a local run); -N/--no-local leaves it
 out. Entries that name this machine, for this user, are dropped, those
-with a via too, so one list can serve every host on it; `localhost` takes
+with a via too, so one list can serve every host on it; 'localhost' takes
 over the attributes and operations of the first such entry without a via.
 -p/--pick shows the list in fzf (TAB marks several) and prints only the
 marked entries; without fzf, a numbered menu (see `pick-lines -h`).
 Aborting the picker exits 130 with nothing printed.
 
--a/--attr TERM keeps the logins whose attributes satisfy TERM: `mise` has
-it, `arch=x86_64` has it with that value, `!mise` lacks it, `arch!=x86_64`
+-a/--attr TERM keeps the logins whose attributes satisfy TERM: 'mise' has
+it, 'arch=x86_64' has it with that value, '!mise' lacks it, 'arch!=x86_64'
 lacks it or has another value; given several times, every TERM has to hold.
-`localhost` is kept or dropped like any other, by the attributes it took
-over; with no entry naming this machine it has none. Quote a `!` for the
+'localhost' is kept or dropped like any other, by the attributes it took
+over; with no entry naming this machine it has none. Quote a '!' for the
 shell.
 
-The logins are the `logins` list of the ssh-lists files, TOML, YAML or JSON
+The logins are the 'logins' list of the ssh-lists files, TOML, YAML or JSON
 (see the README, or the curiousj_tools.lists docstring, for the shape).
 Which files, merged in this order:
 
@@ -80,7 +80,7 @@ def login_options(f):
 
 def self_names() -> set[str]:
     """Lowercased names this machine answers to: hostname, its first label,
-    the loopback names and, on macOS, the Bonjour name (`my-mac.local` for a
+    the loopback names and, on macOS, the Bonjour name ('my-mac.local' for a
     host called MyMac)."""
     names = {"localhost", "127.0.0.1", "::1"}
     for name in (socket.gethostname(), os.uname().nodename):
@@ -106,15 +106,15 @@ def is_self(entry: Login, names: set[str], user: str) -> bool:
 
 def drop_self(entries: list[Login], names: set[str], user: str) -> list[Login]:
     """Entries minus those naming this machine: the list is shared between
-    hosts, so each one's own name is in it, and `localhost` already stands
+    hosts, so each one's own name is in it, and 'localhost' already stands
     for it."""
     return [entry for entry in entries if not is_self(entry, names, user)]
 
 
 def local_login(entries: list[Login], names: set[str], user: str) -> Login:
-    """`localhost` as the list describes this machine: the attributes and
+    """'localhost' as the list describes this machine: the attributes and
     operations of the first entry naming it that has no via (one with a via
-    is a place inside it, not the machine). A bare `localhost` without one."""
+    is a place inside it, not the machine). A bare 'localhost' without one."""
     for entry in entries:
         if entry.via is None and is_self(entry, names, user):
             return Login("localhost", attributes=dict(entry.attributes),
@@ -130,7 +130,7 @@ PROBE_CONNECT_TIMEOUT = 10
 
 
 def probe_ssh(target: str, batch: bool = False) -> list[str]:
-    """`ssh ... TARGET' for a probe, the command words still to add.
+    """`ssh ... TARGET` for a probe, the command words still to add.
 
     Bounded to reach the host, as every probe is. batch never prompts: for
     the probes asked on the side, where a password prompt would come out of
@@ -192,7 +192,7 @@ def confirm_new_hosts(entries: list[str], prog: str) -> None:
 
 def logins(opts: LoginOpts, env=None, found: lists.Lists | None = None) -> list[Login]:
     """The resolved, filtered, optionally picked list; from the lists files,
-    or from `found` when the caller has read them already. Raises ToolError
+    or from 'found' when the caller has read them already. Raises ToolError
     or pick.Abort."""
     if found is None:
         found = lists.load_all(opts.files, env)

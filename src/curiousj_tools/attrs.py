@@ -5,7 +5,7 @@ value:
 
     attributes = ["mise", "cachyos", "arch=x86_64"]
 
-A condition (an operation's `logins` or `paths`, the -a and -A flags) is
+A condition (an operation's 'logins' or 'paths', the -a and -A flags) is
 made of terms:
 
     mise            the attribute is there
@@ -14,13 +14,13 @@ made of terms:
     arch!=x86_64    it is not there, or has another value
 
 and is a term, a list of terms (every one has to hold), or a table with any
-of `all`, `any` and `none`, each a term or a list of them:
+of 'all', 'any' and 'none', each a term or a list of them:
 
     logins = "mise"
     logins = ["mise", "cachyos"]
     logins = { any = ["mac", "brew"], none = "headless" }
 
-`true`, an empty list or an empty table match everything. Parsing errors
+'true', an empty list or an empty table match everything. Parsing errors
 are ValueError with the whole message; the lists reader turns them into
 its own error.
 """
@@ -61,7 +61,7 @@ class Condition:
                 and not any(t.holds(attrs) for t in self.none))
 
     def __str__(self) -> str:
-        """The terms as written: the all-terms bare, `any`/`none` named."""
+        """The terms as written: the all-terms bare, 'any'/'none' named."""
         parts = [(name + " " if name else "") + " ".join(map(str, terms))
                  for name, terms in (("", self.all), ("any", self.any), ("none", self.none))
                  if terms]
@@ -127,7 +127,7 @@ def condition(raw: Any, where: str) -> Condition:
 
 
 def attributes(raw: Any, where: str) -> Attributes:
-    """An entry's attributes: a list of `key` or `key=value` strings."""
+    """An entry's attributes: a list of 'key' or 'key=value' strings."""
     if raw is None:
         return {}
     if not isinstance(raw, list):

@@ -8,24 +8,24 @@ One tmux pane per login, each running `ssh LOGIN`, with synchronize-panes
 on so one line typed lands in every shell. A local shell gets a pane too, so
 the same command also hits this machine. The login list and -N, -a, -p, -f
 are ssh-logins' (see `ssh-logins -h`); any other argument is passed through
-to xpanes (`--stay`, `-l ev`, ...). pssh is the batch counterpart.
+to xpanes ('--stay', '-l ev', ...). pssh is the batch counterpart.
 
 Each pane gets a login shell, so unlike pssh the remote side reads its
-shell rc: aliases work and `cd` persists between commands. A login with
-`commands` in the lists file runs them after login instead of stopping at
+shell rc: aliases work and 'cd' persists between commands. A login with
+'commands' in the lists file runs them after login instead of stopping at
 the shell -- `ssh -t LOGIN 'cd src; exec zsh'`, or `distrobox enter dev -nw` --
 so the last one should be what you want to type into: an interactive
-shell, a container entered. The pane ends when it exits. (A login's `via`
-is pssh's business; the pane types `commands` only.)
+shell, a container entered. The pane ends when it exits. (A login's 'via'
+is pssh's business; the pane types 'commands' only.)
 
 -o/--op NAME runs an operation of the lists files instead (see `pssh -h`
 for what one is): a pane per login the operation applies to, each running
-the login's share of it as pssh would -- through its `via`, `== NAME` and
-`== DIR` announcing each step -- then dropping into a shell. The panes
+the login's share of it as pssh would -- through its 'via', "== NAME" and
+"== DIR" announcing each step -- then dropping into a shell. The panes
 being synchronized, a question every login asks is answered once, for all
 of them; where hosts ask different questions, `pssh -s` is the better
 tool. -A/--path-attr, --clone and --pick-paths are pssh's -A, -c and -C
-(the short letters are xpanes'). The pane then runs the login's `commands`,
+(the short letters are xpanes'). The pane then runs the login's 'commands',
 so it ends where a plain pane would. A login the operation does not apply
 to gets no pane. -L/--list-ops lists the operations, as `pssh -L` does.
 
@@ -50,8 +50,8 @@ from .lists import Login, ToolError
 
 # The local pane is `cd ~; exec $SHELL` rather than `cd ~ && exec $SHELL`:
 # xpanes substitutes arguments with bash's ${cmd//{}/arg}, and since bash 5.2
-# an `&` in the replacement stands for the matched text, so `&&` arrives as
-# `{}{}`. exec so it is a fresh shell at ~ like the remote ones, not the
+# an '&' in the replacement stands for the matched text, so "&&" arrives as
+# "{}{}". exec so it is a fresh shell at ~ like the remote ones, not the
 # shell xpanes typed the command into.
 LOCAL_PANE = "cd ~; exec $SHELL"
 
@@ -65,7 +65,7 @@ def pane_command(entry: Login) -> str:
 
 
 def xpanes_expands_ampersand() -> bool:
-    """Whether the bash xpanes runs under makes `&` in a substituted argument
+    """Whether the bash xpanes runs under makes '&' in a substituted argument
     stand for the matched text (patsub_replacement, on by default since
     bash 5.2). `shopt -q` fails on a bash too old to know the option."""
     try:
@@ -76,7 +76,7 @@ def xpanes_expands_ampersand() -> bool:
 
 
 def for_xpanes(cmd: str, ampersand: bool) -> str:
-    """cmd as xpanes should be handed it: with `&` and backslash escaped for
+    """cmd as xpanes should be handed it: with '&' and backslash escaped for
     the substitution described at LOCAL_PANE, when that bash expands them."""
     return cmd.replace("\\", "\\\\").replace("&", "\\&") if ampersand else cmd
 
@@ -150,7 +150,7 @@ def cli(opts: logins.LoginOpts, ops: tuple[str, ...], list_ops: bool,
             entries = logins.logins(opts)
             commands = pane_commands(entries)
         # A pane of either kind types the login's commands, the one place an
-        # `&` or a backslash comes from, so the bash is asked only then.
+        # '&' or a backslash comes from, so the bash is asked only then.
         ampersand = any(e.commands for e in entries) and xpanes_expands_ampersand()
         commands = [for_xpanes(c, ampersand) for c in commands]
         logins.confirm_new_hosts([e.login for e in entries], "xssh")

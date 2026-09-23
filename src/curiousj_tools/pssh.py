@@ -8,7 +8,7 @@
 The batch counterpart of xssh: the same login list and -N, -a, -p, -f (see
 `ssh-logins -h`), but the command runs non-interactively on each login through
 GNU parallel, all at once, every output line prefixed with its login;
-`localhost` runs it here. The exit status is the number of logins on which
+'localhost' runs it here. The exit status is the number of logins on which
 the command failed. -n prints what would run, and where, instead.
 
 A single COMMAND word is a shell command line, run as is:
@@ -18,7 +18,7 @@ quoted for you, so `pssh ls 'my dir'` lists that one directory.
 -P/--paths runs the command once per listed path on each login, from inside
 it, and reports each path before its output; a path a host does not have
 is reported and skipped, and one where the command fails marks that login
-failed. The paths are the `paths` list of the same ssh-lists files the logins
+failed. The paths are the 'paths' list of the same ssh-lists files the logins
 come from (TOML, YAML or JSON; -f names them, see `ssh-logins -h`):
 
     [[paths]]
@@ -56,40 +56,40 @@ that says itself what it runs and where:
     [operations.system-update]
     operations = ["cachy-update", "brew-upgrade"]     # a group: each login runs what it matches
 
-A condition is a term (`mise`, `arch=x86_64`, `!mise`, `arch!=x86_64`), a
-list of terms that all hold, or a table with `all`, `any`, `none`. A login
+A condition is a term ('mise', 'arch=x86_64', '!mise', 'arch!=x86_64'), a
+list of terms that all hold, or a table with 'all', 'any', 'none'. A login
 or path can carry its own command for an operation, `operations = {
 git-pull = "git pull --ff-only" }`, and then takes part with it whatever the
 condition says; the name need not be in the [operations.*] table at all.
 Given several -o, or a group, each login runs the operations that apply to
-it in order, in one shell, each announced by `== NAME` and, per path, by
-`== DIR` as -P does; a login none applies to is left alone. -A narrows the
+it in order, in one shell, each announced by "== NAME" and, per path, by
+"== DIR" as -P does; a login none applies to is left alone. -A narrows the
 paths, -C picks them, -c clones for every per-path operation, -a narrows
 the logins: `pssh -o git-pull -A py-project`, `pssh -a cachyos -o
 system-update`. -L/--list-ops lists the operations the lists files define,
 where each runs and what, the entries' own commands under it.
 
 -s/--serial runs one login at a time, in the foreground, through `ssh -t`
-(`localhost`: a local shell), each announced by `== LOGIN`, so a command
+('localhost': a local shell), each announced by "== LOGIN", so a command
 that asks questions -- a package manager, sudo -- can be answered; the
-output is not tagged. An operation with `serial = true` makes the run
+output is not tagged. An operation with "serial = true" makes the run
 serial by itself. (xssh -o runs an operation in synchronized panes instead,
 one keystroke answering every login.)
 
-A login's `commands` in the lists file are for the shells xssh opens; pssh
-runs its command as given, on every login alike. A login's `via` is pssh's:
-a command line the command is run through there, handed `sh -c '...'` (or
-`zsh -ic '...'` with -i), for a place the login shell alone does not reach:
+A login's 'commands' in the lists file are for the shells xssh opens; pssh
+runs its command as given, on every login alike. A login's 'via' is pssh's:
+a command line the command is run through there, handed `sh -c `...'` (or
+`zsh -ic `...'` with -i), for a place the login shell alone does not reach:
 
     [[logins]]
     login = "alice@devbox"
     commands = ["distrobox enter dev -nw"]      # xssh: the pane lands in the container
     via = "distrobox enter dev -nw --"          # pssh: runs its command in there too
 
-Inside, `~` is that place's home, so with the same login listed plainly as
+Inside, '~' is that place's home, so with the same login listed plainly as
 well, `pssh -P -c ...` keeps a container's separate home current alongside
 the host's. Entries that repeat a login with the same via are run once. Run
-on the host itself, both entries give way to `localhost`, which has no via,
+on the host itself, both entries give way to 'localhost', which has no via,
 so the container is reached only from the other hosts.
 
 A login whose host key is not in known_hosts yet is contacted once beforehand,
@@ -98,12 +98,12 @@ would otherwise leave that ssh stopped, waiting on a terminal it cannot
 read. Answering no, or an unreachable host, aborts the run.
 
 The remote shell reads no rc file, so aliases and shell functions are not
-there and `cd` does not carry over between calls -- put the cd in the
+there and 'cd' does not carry over between calls -- put the cd in the
 command. -i runs the command inside `zsh -ic` on each login instead, which
 brings aliases and functions back at the cost of a full shell start-up per
 login. Every run, local included, starts in the home directory, as an ssh
 login does. Flags come first: the first word that is not an option starts
-the command, so `pssh uptime -p` passes -p to uptime; `--` does the same
+the command, so `pssh uptime -p` passes -p to uptime; '--' does the same
 explicitly.
 """
 
@@ -161,7 +161,7 @@ def set_cmd(cmd: str) -> str:
 
 
 def path_calls(pairs: list[tuple[PathInfo, str]], clone: bool = False) -> list[str]:
-    """A `run` per path with its command, set whenever it changes; the url
+    """A 'run' per path with its command, set whenever it changes; the url
     and branch along when a missing path is to be cloned."""
     lines: list[str] = []
     current = None
@@ -300,7 +300,7 @@ def shell_command(cmd: str, interactive: bool = False) -> str:
     """The string parallel hands each host's shell.
 
     From ~ everywhere: an ssh login lands there, but parallel runs the local
-    `:` job in the current directory, which would make `ls` mean two things.
+    ':' job in the current directory, which would make 'ls' mean two things.
     """
     cmd = "cd ~\n" + cmd
     if interactive:
@@ -310,8 +310,8 @@ def shell_command(cmd: str, interactive: bool = False) -> str:
 
 def wrap(cmd: str, via: str | None, interactive: bool = False) -> str:
     """The string parallel hands a login's shell: shell_command, run through
-    via when the login has one -- as `zsh -ic '...'` under -i, which is
-    already a command line, else as `sh -c '...'`."""
+    via when the login has one -- as `zsh -ic `...'` under -i, which is
+    already a command line, else as `sh -c `...'`."""
     cmd = shell_command(cmd, interactive)
     if not via:
         return cmd
@@ -333,7 +333,7 @@ def runs(pairs: list[tuple[Login, str]], interactive: bool = False) -> dict[str,
 
 
 def parallel_argv(entries: list[str], cmd: str) -> list[str]:
-    logins = [":" if e == "localhost" else e for e in entries]  # `:` is parallel's "here"
+    logins = [":" if e == "localhost" else e for e in entries]  # ':' is parallel's "here"
     return ["parallel", "--nonall", "--tag", "--linebuffer", "-S", ",".join(logins), cmd]
 
 
@@ -385,9 +385,9 @@ def need_parallel() -> None:
                context_settings={"allow_interspersed_args": False})
 @click.option("-n", "--dry-run", is_flag=True, help="print the command and the hosts, run nothing")
 @click.option("-s", "--serial", is_flag=True,
-              help="one login at a time in the foreground, through `ssh -t'")
+              help="one login at a time in the foreground, through `ssh -t`")
 @logins.login_options
-@click.option("-i", "--interactive", is_flag=True, help="run through `zsh -ic'")
+@click.option("-i", "--interactive", is_flag=True, help="run through `zsh -ic`")
 @click.option("-o", "--op", "ops", metavar="NAME", multiple=True,
               help="run the lists' operation NAME instead of a COMMAND (repeatable)")
 @click.option("-L", "--list-ops", is_flag=True, help="list the operations of the lists files")

@@ -383,7 +383,7 @@ class Wrap(unittest.TestCase):
 
     def test_the_wrapped_script_runs(self):
         # `env HOME=...` standing in for a container with its own home: the
-        # paths script survives the extra layer of quoting, `~` is that
+        # paths script survives the extra layer of quoting, '~' is that
         # home, and the exit status comes back through it.
         with tempfile.TemporaryDirectory() as home:
             os.mkdir(os.path.join(home, "ok"))

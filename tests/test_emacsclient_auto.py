@@ -74,7 +74,7 @@ class TestFindEmacsclient(unittest.TestCase):
         self.real_dir = os.path.join(self.tmp.name, "real")
         os.makedirs(self.wrapper_dir)
         os.makedirs(self.real_dir)
-        # An installed wrapper, plus an `emacsclient` symlink pointing at it,
+        # An installed wrapper, plus an 'emacsclient' symlink pointing at it,
         # the way a user shadows the real client with the router.
         self.wrapper = make_exe(os.path.join(self.wrapper_dir, "emacsclient-auto"))
         os.symlink(self.wrapper, os.path.join(self.wrapper_dir, "emacsclient"))

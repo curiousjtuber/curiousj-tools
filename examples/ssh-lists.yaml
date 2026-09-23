@@ -22,14 +22,14 @@ paths:
   - path: /opt/tools/mytool              # no git_url: never cloned, skipped where absent
     operations: {git-pull: git pull --ff-only}   # this path's own way of being pulled
 operations:                              # `pssh -o NAME`, `xssh -o NAME`
-  git-pull:                              # per path: `paths` says which (true: all)
+  git-pull:                              # per path: 'paths' says which (true: all)
     command: git pull --rebase --autostash
     paths: git
     clone: true                          # clone a missing path first, as -c
   uv-tool-update:
     command: uv tool install --force --reinstall .
     paths: py-project
-  mise-update:                           # per login: `logins` says which (absent: all)
+  mise-update:                           # per login: 'logins' says which (absent: all)
     command: mise self-update -y && mise upgrade
     logins: mise
   cachy-update:

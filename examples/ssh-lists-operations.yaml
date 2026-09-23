@@ -2,7 +2,7 @@
 # ssh-lists*.toml, .yaml, .yml or .json in a directory on $SSH_LISTS_PATH is,
 # by name, as one list. So routines are added without touching the logins,
 # or kept in a file one host alone has. The name matters: only a file that
-# starts with `ssh-lists` is found (any other needs -f or $SSH_LISTS_FILE).
+# starts with 'ssh-lists' is found (any other needs -f or $SSH_LISTS_FILE).
 # An operation both files define keeps the first one's, with a warning.
 operations:
   git-status:                            # per path: `pssh -o git-status`, in the git checkouts
