@@ -642,12 +642,14 @@ def show_folder(folder: str) -> None:
           file=sys.stderr)
 
 
-def prompt_folder(target: str, current: str = "", label: str = "") -> str | None:
+def prompt_folder(target: str, current: str = "", label: str = "") -> str:
     """Ask for a folder: type one, `?' to fuzzy-pick from a listing, blank for none.
 
-    Returns the folder relative to ~, "" for none, or None if aborted. Updating
-    an existing folder, blank keeps it and `-' clears it, so the current one is
-    the prompt's default and pre-fills fzf's query.
+    Returns the folder relative to ~, "" for none. Updating an existing
+    folder, blank keeps it and `-' clears it, so the current one is the
+    prompt's default and pre-fills fzf's query. Leaving the picker keeps it
+    as well -- none, for a new session -- rather than end the whole walk, and
+    so does a blank at the prompt that stands in for a listing that failed.
     """
     where = " for %s" % label if label else ""
     if current:
@@ -665,13 +667,17 @@ def prompt_folder(target: str, current: str = "", label: str = "") -> str | None
     if not dirs:
         print("  (could not list %s; type a path if you want one)" % target,
               file=sys.stderr)
-        typed = ask("  folder relative to ~ (blank for none)")
-        return typed.strip().rstrip("/")
+        if current:
+            typed = ask("  folder relative to ~ (- for none)", current)
+        else:
+            typed = ask("  folder relative to ~ (blank for none)")
+        return "" if typed == "-" else typed.strip().rstrip("/")
 
-    chosen = pick(dirs, "folder>", "remote folder (abort for none)",
+    chosen = pick(dirs, "folder>",
+                  "remote folder (abort keeps %s)" % (current or "none"),
                   free_text=True, query=current)
     if chosen is None:
-        return None
+        return current
     return chosen.strip().rstrip("/")
 
 
@@ -1246,11 +1252,6 @@ def pick_host_candidate(cfg: dict) -> str:
     return labels.get(choice, choice)
 
 
-def aborted() -> None:
-    print("sshtsf: aborted", file=sys.stderr)
-    raise SystemExit(130)
-
-
 def edit_host(cfg: dict, name: str = "", existing: dict | None = None) -> str | None:
     """The prompt walk for a host: registers a new one (existing None), or
     edits, renames or removes the one whose entry is given. Returns the
@@ -1409,10 +1410,8 @@ def edit_session(cfg: dict, host: str, name: str = "",
         new_name = name
 
     folder = prompt_folder(ssh_target(cfg, host), scfg.get("folder", ""), label=new_name)
-    if folder is None:
-        aborted()
     show_folder(folder)
-    set_field(scfg, "folder", folder.rstrip("/"))
+    set_field(scfg, "folder", folder)
 
     set_field(scfg, "command", ask_text("  command to run", scfg.get("command", ""),
                                         editing, none="a shell"))

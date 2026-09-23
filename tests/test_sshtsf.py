@@ -407,9 +407,26 @@ class TestPromptFolder(unittest.TestCase):
         self.assertEqual(got, "src/b")
         self.assertEqual(pick.call_args.kwargs["query"], "src/old")
 
-    def test_aborted_browse_is_none(self):
-        got, _, _, _ = self.prompt("?", picked=None)
-        self.assertIsNone(got)
+    def test_leaving_the_picker_keeps_the_folder(self):
+        # It used to return None, which ended the whole walk.
+        got, _, _, pick = self.prompt("?", picked=None)
+        self.assertEqual(got, "")
+        self.assertEqual(pick.call_args.args[2], "remote folder (abort keeps none)")
+        got, _, _, pick = self.prompt("?", current="src/old", picked=None)
+        self.assertEqual(got, "src/old")
+        self.assertEqual(pick.call_args.args[2], "remote folder (abort keeps src/old)")
+
+    def test_a_failed_listing_keeps_the_current_on_a_blank(self):
+        # "?" first, then a blank at the prompt that replaces the listing:
+        # it used to have no default, so the blank cleared the folder.
+        with mock.patch.object(sshtsf, "ask", side_effect=scripted({"folder": ["?", ""]})) as ask, \
+             mock.patch.object(sshtsf, "remote_dirs", return_value=[]):
+            got = sshtsf.prompt_folder("devbox", "src/old")
+        self.assertEqual(got, "src/old")
+        self.assertEqual(ask.call_args.args, ("  folder relative to ~ (- for none)", "src/old"))
+        with mock.patch.object(sshtsf, "ask", side_effect=scripted({"folder": ["?", "-"]})), \
+             mock.patch.object(sshtsf, "remote_dirs", return_value=[]):
+            self.assertEqual(sshtsf.prompt_folder("devbox", "src/old"), "")
 
 
 class TestEdit(ConfigDirMixin, unittest.TestCase):
@@ -1129,6 +1146,18 @@ class TestConfigure(ConfigDirMixin, unittest.TestCase):
             sshtsf.route_add_host(sshtsf.load_config(), "devweb.local")
         self.assertIn("  devweb already names devbox+web\n", err.getvalue())
         self.assertEqual(sshtsf.load_config()["hosts"]["dw"], {"target": "devweb.local"})
+
+    def test_leaving_the_folder_picker_does_not_end_the_walk(self):
+        answers = {"session name": "", "folder": "?", "command to run": "",
+                   "forward the local Emacs socket": "", "forward Wayland": "",
+                   "alias for": ""}
+        with mock.patch.object(sshtsf, "ask", side_effect=scripted(answers)), \
+             mock.patch.object(sshtsf, "remote_dirs", return_value=["src/x"]), \
+             mock.patch.object(sshtsf, "pick", return_value=None):
+            rc, _, err = run_capture(["-c", "devbox", "web"])
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(sshtsf.load_config()["hosts"]["devbox"]["sessions"]["web"],
+                         SAMPLE["hosts"]["devbox"]["sessions"]["web"])
 
     def test_picker_lists_settings_sessions_and_new(self):
         with mock.patch.object(sshtsf, "pick", return_value=None) as pick:
