@@ -45,7 +45,7 @@ import sys
 
 import click
 
-from . import attrs, lists, logins, pick, pssh
+from . import attrs, cmdline, lists, logins, pick, pssh
 from .lists import Login, ToolError
 
 # The local pane is `cd ~; exec $SHELL` rather than `cd ~ && exec $SHELL`:
@@ -114,7 +114,7 @@ def op_panes(entries: list[Login], ops: list[lists.Operation], path_list: list[l
     return kept, commands, skipped
 
 
-@click.command(cls=logins.Command, help=__doc__,
+@click.command(cls=cmdline.Command, help=__doc__,
                context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
 @logins.login_options
 @click.option("-o", "--op", "ops", metavar="NAME", multiple=True,
@@ -156,7 +156,7 @@ def cli(opts: logins.LoginOpts, ops: tuple[str, ...], list_ops: bool,
         logins.confirm_new_hosts([e.login for e in entries], "xssh")
     except ToolError as e:
         print(f"xssh: {e}", file=sys.stderr)
-        return logins.EXIT_ERROR
+        return cmdline.EXIT_ERROR
     except pick.Abort:
         return pick.EXIT_ABORT
     os.execvp("xpanes", ["xpanes", *xpanes_args, "-e", *commands])
@@ -164,7 +164,7 @@ def cli(opts: logins.LoginOpts, ops: tuple[str, ...], list_ops: bool,
 
 
 def main(argv: list[str] | None = None) -> int:
-    return logins.run(cli, argv, "xssh")
+    return cmdline.run(cli, argv, "xssh")
 
 
 if __name__ == "__main__":

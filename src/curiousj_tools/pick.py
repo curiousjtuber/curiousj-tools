@@ -11,11 +11,14 @@ answer) exits 130 with nothing printed.
 
 from __future__ import annotations
 
-import argparse
 import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Iterable
+
+import click
+
+from . import cmdline
 
 EXIT_ABORT = 130
 
@@ -185,18 +188,20 @@ def choose_numbered(items: list[str], prompt: str, header: str = "",
         print(f"  not a choice: {reply}", file=sys.stderr)
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="pick-lines", description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("noun", help='what the items are, for the prompts ("hosts")')
-    parser.add_argument("item", nargs="+")
-    args = parser.parse_args(argv)
+@click.command(cls=cmdline.Command, help=__doc__)
+@click.argument("noun")
+@click.argument("items", metavar="ITEM...", nargs=-1, required=True)
+def cli(noun: str, items: tuple[str, ...]) -> int:
     try:
-        sel = pick(args.item, args.noun)
+        sel = pick(items, noun)
     except Abort:
         return EXIT_ABORT
     print("\n".join(sel))
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    return cmdline.run(cli, argv, "pick-lines")
 
 
 if __name__ == "__main__":

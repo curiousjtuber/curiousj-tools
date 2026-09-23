@@ -113,7 +113,7 @@ from typing import NamedTuple
 import click
 import tomllib
 
-from . import emacsclient_auto, lists, logins
+from . import cmdline, emacsclient_auto, lists, logins
 from .pick import choose
 
 CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
@@ -1622,7 +1622,7 @@ def unknown_host(cfg: dict, token: str, alias: bool = False) -> None:
              % (" or alias" if alias else "", token, hint))
 
 
-@click.command(cls=logins.Command, help=__doc__)
+@click.command(cls=cmdline.Command, help=__doc__)
 @click.option("-n", "--new", is_flag=True,
               help="register a new session on HOST (NAME proposed), then connect")
 @click.option("-l", "--list", "list_", is_flag=True,
@@ -1729,7 +1729,7 @@ def main(argv: list[str] | None = None) -> int:
     it lands in a prompt of ours (KeyboardInterrupt) or in click, which
     turns it into an Abort."""
     try:
-        return logins.run(cli, argv, "sshtsf")
+        return cmdline.run(cli, argv, "sshtsf")
     except (KeyboardInterrupt, click.Abort):
         print(file=sys.stderr)
         return 130

@@ -58,7 +58,16 @@ class TestMain(unittest.TestCase):
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
             self.assertEqual(ec_browse.main([]), 2)
-        self.assertIn("usage: ec-browse", err.getvalue())
+        self.assertIn("Usage: ec-browse", err.getvalue())
+
+    def test_help_is_help_not_a_url(self):
+        # -h used to be taken for a URL and handed to browse-url.
+        out = io.StringIO()
+        with mock.patch.object(ec_browse.subprocess, "run") as run, \
+             contextlib.redirect_stdout(out):
+            self.assertEqual(ec_browse.main(["-h"]), 0)
+        run.assert_not_called()
+        self.assertTrue(out.getvalue().startswith("ec-browse -- open URLs"), out.getvalue())
 
     def test_one_call_per_url(self):
         env = {"EC_BROWSE_EMACSCLIENT": "/opt/ec"}

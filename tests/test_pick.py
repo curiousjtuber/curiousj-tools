@@ -153,9 +153,15 @@ class Main(unittest.TestCase):
             self.assertEqual(pick.main(["hosts", *ITEMS]), 130)
 
     def test_needs_noun_and_items(self):
-        with self.assertRaises(SystemExit) as cm, mock.patch("sys.stderr", new_callable=io.StringIO):
-            pick.main(["hosts"])
-        self.assertEqual(cm.exception.code, 2)
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(pick.main(["hosts"]), 2)
+        self.assertIn("Missing argument 'ITEM...'", err.getvalue())
+
+    def test_help_is_the_docstring_as_written(self):
+        # Laid out like the other tools' help, not argparse's.
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(pick.main(["-h"]), 0)
+        self.assertTrue(out.getvalue().startswith(pick.__doc__.rstrip() + "\n"), out.getvalue())
 
 
 class PickFrom(unittest.TestCase):

@@ -24,6 +24,10 @@ import shutil
 import subprocess
 import sys
 
+import click
+
+from . import cmdline
+
 DEFAULT_FUNCTION = "browse-url"
 
 
@@ -51,12 +55,9 @@ def elisp_call(function: str, url: str) -> str:
     return '(%s "%s")' % (function, escaped)
 
 
-def main(argv: list[str] | None = None) -> int:
-    urls = list(sys.argv[1:] if argv is None else argv)
-    if not urls:
-        print("usage: ec-browse URL [URL...]", file=sys.stderr)
-        return 2
-
+@click.command(cls=cmdline.Command, help=__doc__)
+@click.argument("urls", metavar="URL...", nargs=-1, required=True)
+def cli(urls: tuple[str, ...]) -> int:
     env = dict(os.environ)
     ec = emacsclient_command(env)
     function = env.get("EC_BROWSE_FUNCTION") or DEFAULT_FUNCTION
@@ -77,6 +78,10 @@ def main(argv: list[str] | None = None) -> int:
             print("ec-browse: failed to open %s" % url, file=sys.stderr)
             status = 1
     return status
+
+
+def main(argv: list[str] | None = None) -> int:
+    return cmdline.run(cli, argv, "ec-browse")
 
 
 if __name__ == "__main__":

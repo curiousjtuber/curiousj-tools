@@ -118,7 +118,7 @@ import sys
 
 import click
 
-from . import attrs, lists, logins, pick
+from . import attrs, cmdline, lists, logins, pick
 from .lists import Login, Operation, PathInfo, ToolError
 
 
@@ -381,7 +381,7 @@ def need_parallel() -> None:
         raise ToolError("GNU parallel not installed (brew install parallel / pacman -S parallel)")
 
 
-@click.command(cls=logins.Command, help=__doc__,
+@click.command(cls=cmdline.Command, help=__doc__,
                context_settings={"allow_interspersed_args": False})
 @click.option("-n", "--dry-run", is_flag=True, help="print the command and the hosts, run nothing")
 @click.option("-s", "--serial", is_flag=True,
@@ -404,7 +404,7 @@ def cli(opts: logins.LoginOpts, dry_run: bool, serial: bool, interactive: bool,
             print(list_operations(lists.load_all(opts.files)))
         except ToolError as e:
             print(f"pssh: {e}", file=sys.stderr)
-            return logins.EXIT_ERROR
+            return cmdline.EXIT_ERROR
         return 0
     if not command and not ops:
         raise click.UsageError("Missing argument 'COMMAND...' (or -o NAME).", ctx)
@@ -440,7 +440,7 @@ def cli(opts: logins.LoginOpts, dry_run: bool, serial: bool, interactive: bool,
             groups = runs([(e, cmd) for e in logins.logins(opts, found=found)], interactive)
     except ToolError as e:
         print(f"pssh: {e}", file=sys.stderr)
-        return logins.EXIT_ERROR
+        return cmdline.EXIT_ERROR
     except pick.Abort:
         return pick.EXIT_ABORT
     if dry_run:
@@ -464,7 +464,7 @@ def cli(opts: logins.LoginOpts, dry_run: bool, serial: bool, interactive: bool,
                                  "pssh")
     except ToolError as e:
         print(f"pssh: {e}", file=sys.stderr)
-        return logins.EXIT_ERROR
+        return cmdline.EXIT_ERROR
     if serial:
         return serial_run(groups)
     if len(groups) == 1:
@@ -478,7 +478,7 @@ def cli(opts: logins.LoginOpts, dry_run: bool, serial: bool, interactive: bool,
 
 
 def main(argv: list[str] | None = None) -> int:
-    return logins.run(cli, argv, "pssh")
+    return cmdline.run(cli, argv, "pssh")
 
 
 if __name__ == "__main__":
