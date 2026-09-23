@@ -40,6 +40,9 @@ SAMPLE = {
 }
 
 
+# How every probe dials: bounded to reach the host (see probe_ssh).
+PROBE = ["ssh", "-o", "ConnectTimeout=10"]
+
 REMOTE_PATH_LINE = ('PATH="/opt/homebrew/bin:/usr/local/bin:'
                     '/home/linuxbrew/.linuxbrew/bin:$HOME/.local/bin:$PATH"; ')
 
@@ -634,7 +637,7 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
             rc, out, _ = run_capture(["devbox", "api", "--dry-run"])
         self.assertEqual(rc, 0)
         lines = out.strip().splitlines()
-        self.assertEqual(lines[0], "ssh devbox sh -c '" + REMOTE_PATH_LINE
+        self.assertEqual(lines[0], "ssh -o ConnectTimeout=10 devbox sh -c '" + REMOTE_PATH_LINE
                          + "p=/tmp/emacs-remote-socket-$(id -un); rm -f \"$p\" && echo \"$p\"'")
         self.assertEqual(
             lines[1],
@@ -697,7 +700,7 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
              mock.patch.object(sshtsf.subprocess, "run", return_value=rm) as run, \
              mock.patch.object(sshtsf.os, "execvp") as execvp:
             _, _, err = run_capture(["devbox", "api"])
-        self.assertEqual(run.call_args.args[0][:2], ["ssh", "devbox"])
+        self.assertEqual(run.call_args.args[0][:4], PROBE + ["devbox"])
         self.assertIn("could not clear the Emacs socket on devbox "
                       "(rm: cannot remove '/tmp/emacs-remote-socket-root': Operation not "
                       "permitted); connecting without the forward", err)
@@ -989,10 +992,10 @@ class TestRemoteSh(unittest.TestCase):
             sessions, why = sshtsf.live_sessions("devbox")
         self.assertEqual((sessions, why), (["web\t2\tdetached"], ""))
         argv = run.call_args.args[0]
-        self.assertEqual(argv[:4], ["ssh", "devbox", "sh", "-c"])
+        self.assertEqual(argv[:6], PROBE + ["devbox", "sh", "-c"])
         # Quoted once for the remote login shell; sh then sees the script.
         # -u, or a locale-less tmux turns the tabs into underscores.
-        script = shlex.split(argv[4])[0]
+        script = shlex.split(argv[6])[0]
         self.assertTrue(script.startswith(REMOTE_PATH_LINE + "tmux -u list-sessions -F "))
 
     def test_remote_tmux_probe_uses_it(self):
@@ -1000,8 +1003,57 @@ class TestRemoteSh(unittest.TestCase):
         with mock.patch.object(sshtsf.subprocess, "run", return_value=proc) as run:
             self.assertEqual(sshtsf.remote_tmux("mac"), "/opt/homebrew/bin/tmux (tmux 3.5a)")
         argv = run.call_args.args[0]
-        self.assertEqual(argv[:6], ["ssh", "-o", "BatchMode=yes", "mac", "sh", "-c"])
-        self.assertIn("command -v tmux && tmux -V", argv[6])
+        self.assertEqual(argv[:8], PROBE + ["-o", "BatchMode=yes", "mac", "sh", "-c"])
+        self.assertIn("command -v tmux && tmux -V", argv[8])
+
+
+class TestProbes(ConfigDirMixin, unittest.TestCase):
+    """What sshtsf asks a remote before or beside a connection."""
+
+    def setUp(self):
+        super().setUp()
+        sshtsf.save_config(SAMPLE)
+
+    def test_every_probe_is_bounded(self):
+        # A host that is down used to hold -L, the tmux diagnosis and the
+        # socket cleanup for the whole TCP connect timeout.
+        ok = mock.Mock(returncode=0, stdout="/tmp/emacs-remote-socket-me\n", stderr="")
+        with mock.patch.object(sshtsf.subprocess, "run", return_value=ok) as run, \
+             mock.patch.object(sshtsf, "ecf_local_socket", return_value="/x/server"), \
+             mock.patch.object(sshtsf.os, "execvp"):
+            sshtsf.live_sessions("devbox")
+            sshtsf.remote_tmux("devbox")
+            sshtsf.remote_dirs("devbox")
+            sshtsf.waypipe_remote_missing("devbox")
+            run_capture(["devbox", "api"])  # the cleanup ahead of the connection
+        argvs = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(len(argvs), 5)
+        for argv in argvs:
+            self.assertEqual(argv[:3], PROBE, argv)
+
+    def test_a_missing_ssh_is_an_answer_not_a_crash(self):
+        # These used to raise FileNotFoundError out of sshtsf.
+        gone = FileNotFoundError(2, "No such file or directory", "ssh")
+        with mock.patch.object(sshtsf.subprocess, "run", side_effect=gone):
+            self.assertEqual(sshtsf.remote_tmux("devbox"), "")
+            rows, why = sshtsf.live_sessions("devbox")
+            self.assertEqual(rows, [])
+            self.assertIn("cannot run ssh", why)
+            self.assertEqual(sshtsf.remote_dirs("devbox"), [])
+            self.assertEqual(sshtsf.waypipe_remote_missing("devbox"), "")
+            rc, out, _ = run_capture(["-L", "devbox"])
+            self.assertEqual(rc, 0)
+            self.assertIn("devbox:\n    (cannot run ssh:", out)
+
+    def test_cleanup_without_ssh_drops_the_forward_and_goes_on(self):
+        gone = FileNotFoundError(2, "No such file or directory", "ssh")
+        with mock.patch.object(sshtsf.subprocess, "run", side_effect=gone), \
+             mock.patch.object(sshtsf, "ecf_local_socket", return_value="/x/server"), \
+             mock.patch.object(sshtsf.os, "execvp") as execvp:
+            _, _, err = run_capture(["devbox", "api"])
+        self.assertIn("could not clear the Emacs socket on devbox ([Errno 2] No such file "
+                      "or directory: 'ssh'); connecting without the forward", err)
+        self.assertNotIn("-R", execvp.call_args.args[1])
 
 
 class TestWaypipeRemoteProbe(unittest.TestCase):
@@ -1015,7 +1067,7 @@ class TestWaypipeRemoteProbe(unittest.TestCase):
     def test_present(self):
         why, argv = self.probe(0)
         self.assertEqual(why, "")
-        self.assertEqual(argv, ["ssh", "-o", "BatchMode=yes", "devbox", "command -v waypipe"])
+        self.assertEqual(argv, PROBE + ["-o", "BatchMode=yes", "devbox", "command -v waypipe"])
 
     def test_missing(self):
         why, _ = self.probe(1)

@@ -551,6 +551,25 @@ PRUNE_DIRS = ("build", "node_modules", "target", "env", "cdk.out",
               "__pycache__", "dist", ".git")
 
 
+# How long a probe waits to reach a host before giving up, rather than sit
+# out the TCP connect timeout, a minute or two for a host that is down.
+# ssh's ConnectTimeout bounds only the connection and its handshake, not the
+# authentication after it, so a password prompt still waits for its answer.
+PROBE_CONNECT_TIMEOUT = 10
+
+
+def probe_ssh(target: str, batch: bool = False) -> list[str]:
+    """`ssh ... TARGET' for a probe, the command words still to add.
+
+    Bounded to reach the host, as every probe is. batch never prompts: for
+    the probes asked on the side, where a password prompt would come out of
+    nowhere. The ones a user asks for (-L, the folder listing) and the
+    socket cleanup ahead of a connection may prompt, as the connection does.
+    """
+    return (["ssh", "-o", "ConnectTimeout=%d" % PROBE_CONNECT_TIMEOUT]
+            + (["-o", "BatchMode=yes"] if batch else []) + [target])
+
+
 def remote_dirs(target: str, depth: int = FOLDER_DEPTH) -> list[str]:
     """Directories under the remote $HOME, relative, for folder selection.
 
@@ -569,10 +588,10 @@ def remote_dirs(target: str, depth: int = FOLDER_DEPTH) -> list[str]:
         % (depth, prunes)
     )
     try:
-        proc = subprocess.run(["ssh", target, script], text=True,
+        proc = subprocess.run(probe_ssh(target) + [script], text=True,
                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                               timeout=60)
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, OSError):
         return []
     if proc.returncode != 0:
         return []
@@ -645,10 +664,13 @@ def remote_tmux(target: str) -> str:
     Empty when the question cannot be answered. Costs a second connection, so
     it is asked only once list-sessions has already failed without saying why.
     """
-    proc = subprocess.run(
-        ["ssh", "-o", "BatchMode=yes", target]
-        + [shlex.quote(word) for word in remote_sh("command -v tmux && tmux -V")],
-        text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    try:
+        proc = subprocess.run(
+            probe_ssh(target, batch=True)
+            + [shlex.quote(word) for word in remote_sh("command -v tmux && tmux -V")],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    except OSError:
+        return ""
     if proc.returncode != 0:
         return ""
     lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
@@ -672,10 +694,13 @@ def live_sessions(target: str) -> tuple[list[str], str]:
     and sanitizes what it prints for one, the tabs to underscores included.
     """
     fmt = "#{session_name}\t#{session_windows}\t#{?session_attached,attached,detached}"
-    proc = subprocess.run(
-        ["ssh", target] + [shlex.quote(word) for word in
-                           remote_sh("tmux -u list-sessions -F %s" % shlex.quote(fmt))],
-        text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        proc = subprocess.run(
+            probe_ssh(target) + [shlex.quote(word) for word in
+                                 remote_sh("tmux -u list-sessions -F %s" % shlex.quote(fmt))],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except OSError as exc:
+        return [], "cannot run ssh: %s" % exc
     if proc.returncode == 0:
         return [line for line in proc.stdout.splitlines() if line.strip()], ""
 
@@ -789,9 +814,9 @@ def waypipe_remote_missing(target: str) -> str:
         what = "no waypipe on the non-interactive PATH of %s" % target
     try:
         proc = subprocess.run(
-            ["ssh", "-o", "BatchMode=yes", target, check],
+            probe_ssh(target, batch=True) + [check],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except (subprocess.TimeoutExpired, OSError):
         return ""
     # 255 is ssh itself failing to connect; anything else is the remote
     # shell's verdict.
@@ -860,17 +885,22 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
     cleanup: list[str] = []
     ecf_remote = ""
     if ecf_local:
-        cleanup = ["ssh", target] + [shlex.quote(word) for word in remote_sh(
+        cleanup = probe_ssh(target) + [shlex.quote(word) for word in remote_sh(
             'p=%s-$(id -un); rm -f "$p" && echo "$p"' % shlex.quote(ECF_REMOTE_SOCKET))]
         if dry_run:
             ecf_remote = "%s-%s" % (ECF_REMOTE_SOCKET, remote_user_guess(target))
         else:
-            proc = subprocess.run(cleanup, text=True, stdout=subprocess.PIPE,
-                                  stderr=subprocess.PIPE)
-            lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
-            ecf_remote = lines[-1] if lines else ""
-            if proc.returncode != 0 or not ecf_remote.startswith(ECF_REMOTE_SOCKET):
+            try:
+                proc = subprocess.run(cleanup, text=True, stdout=subprocess.PIPE,
+                                      stderr=subprocess.PIPE)
+                lines = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+                ecf_remote = lines[-1] if lines else ""
+                cleared = (proc.returncode == 0
+                           and ecf_remote.startswith(ECF_REMOTE_SOCKET))
                 why = " ".join(proc.stderr.split()) or "exit %d" % proc.returncode
+            except OSError as exc:
+                cleared, why = False, str(exc)
+            if not cleared:
                 print("sshtsf: could not clear the Emacs socket on %s (%s); "
                       "connecting without the forward" % (target, why),
                       file=sys.stderr)
