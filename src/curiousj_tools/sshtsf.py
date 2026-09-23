@@ -289,9 +289,19 @@ def save_config(cfg: dict) -> None:
 # --------------------------------------------------------------------------
 
 
+def yes_no(reply: str) -> bool | None:
+    """True or False for a yes/no word; None for one that is neither."""
+    word = reply.strip().lower()
+    if word in TRUE_WORDS + ("y",):
+        return True
+    if word in FALSE_WORDS + ("n",):
+        return False
+    return None
+
+
 def said_yes(reply: str) -> bool:
     """Whether a (y/N) answer was a yes; blank is the default no."""
-    return reply.strip().lower() in TRUE_WORDS + ("y",)
+    return yes_no(reply) is True
 
 
 def ask(prompt: str, default: str = "") -> str:
@@ -1076,16 +1086,6 @@ def ask_text(prompt: str, current: str = "", editing: bool = False,
     else:
         reply = ask("%s (blank for %s)" % (prompt, none))
     return "" if reply.strip() == CLEAR else reply.strip()
-
-
-def yes_no(reply: str) -> bool | None:
-    """True or False for a yes/no word; None for one that is neither."""
-    word = reply.strip().lower()
-    if word in TRUE_WORDS + ("y",):
-        return True
-    if word in FALSE_WORDS + ("n",):
-        return False
-    return None
 
 
 def ask_bool(prompt: str, current: bool | None = None, editing: bool = False,
