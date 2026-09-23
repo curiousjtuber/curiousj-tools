@@ -115,6 +115,7 @@ import click
 import tomllib
 
 from . import lists, logins
+from .pick import choose
 
 CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
 CONFIG_DIR = os.path.join(CONFIG_HOME, "sshtsf")
@@ -284,82 +285,8 @@ def save_config(cfg: dict) -> None:
 
 
 # --------------------------------------------------------------------------
-# selection helpers
+# prompts
 # --------------------------------------------------------------------------
-
-
-def have_fzf() -> bool:
-    return shutil.which("fzf") is not None
-
-
-def pick(items: list[str], prompt: str, header: str = "",
-         free_text: bool = False, query: str = "") -> str | None:
-    """Choose one of items. Returns None if the user aborted.
-
-    free_text allows a value that is not in the list -- right for a remote
-    folder, wrong for a host or session, where anything off-list is a typo and
-    would only fail a lookup later. query pre-fills fzf's search box.
-    """
-    if not items:
-        return None
-    if have_fzf() and sys.stdin.isatty():
-        cmd = ["fzf", "--prompt", prompt + " ", "--height", "60%", "--reverse"]
-        if header:
-            cmd += ["--header", header]
-        if query:
-            cmd += ["--query", query]
-        if free_text:
-            # print-query puts the typed text on line 1 and any match after it,
-            # so a value with no match still comes back.
-            cmd += ["--print-query"]
-        proc = subprocess.run(cmd, input="\n".join(items), text=True,
-                              stdout=subprocess.PIPE)
-        lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
-        if free_text:
-            # Prefer a real selection; fall back to the query when nothing
-            # matched. Exit 130 is abort; exit 1 with a query is "no match".
-            if proc.returncode == 130:
-                return None
-            return (lines[-1] if lines else None)
-        if proc.returncode != 0:
-            return None
-        return lines[-1] if lines else None
-    return pick_numbered(items, prompt, header, free_text)
-
-
-MENU_LIMIT = 40
-
-
-def pick_numbered(items: list[str], prompt: str, header: str = "",
-                  free_text: bool = False) -> str | None:
-    """Numbered fallback for when fzf is absent."""
-    if header:
-        print(header, file=sys.stderr)
-    shown = items[:MENU_LIMIT]
-    for i, item in enumerate(shown, 1):
-        print("  %2d) %s" % (i, item), file=sys.stderr)
-    if len(items) > len(shown):
-        note = "type a value to use it" if free_text else "install fzf to filter"
-        print("  ... %d more (%s)" % (len(items) - len(shown), note),
-              file=sys.stderr)
-
-    hint = "1-%d, a value, or q" % len(shown) if free_text \
-        else "1-%d, or q" % len(shown)
-    while True:
-        try:
-            reply = input("%s [%s]: " % (prompt, hint)).strip()
-        except (EOFError, KeyboardInterrupt):
-            print(file=sys.stderr)
-            return None
-        if reply in ("q", "Q", ""):
-            return None
-        if reply.isdigit() and 1 <= int(reply) <= len(shown):
-            return shown[int(reply) - 1]
-        if reply in items:
-            return reply
-        if free_text:
-            return reply
-        print("  not a choice: %s" % reply, file=sys.stderr)
 
 
 def said_yes(reply: str) -> bool:
@@ -678,7 +605,7 @@ def prompt_folder(target: str, current: str = "", label: str = "") -> str:
             typed = ask("  folder relative to ~ (blank for none)")
         return "" if typed == "-" else typed.strip().rstrip("/")
 
-    chosen = pick(dirs, "folder>",
+    chosen = choose(dirs, "folder>",
                   "remote folder (abort keeps %s)" % (current or "none"),
                   free_text=True, query=current)
     if chosen is None:
@@ -1256,7 +1183,7 @@ def pick_host_candidate(cfg: dict) -> str:
               for host, note, _ in host_candidates(cfg)}
     if not labels:
         return ""
-    choice = pick(list(labels), "host>",
+    choice = choose(list(labels), "host>",
                   "logins in ssh-lists, then ~/.ssh/known_hosts (or type a name)",
                   free_text=True) or ""
     return labels.get(choice, choice)
@@ -1489,7 +1416,7 @@ def route_pick_session(cfg: dict, host: str, dry_run: bool = False,
     """Show this host's sessions, plus an add-new option."""
     labels = session_labels(cfg, host)
     items = list(labels) + [NEW_SESSION]
-    choice = pick(items, "session>", "sessions on %s" % host)
+    choice = choose(items, "session>", "sessions on %s" % host)
     if choice is None:
         return 130
     if choice == NEW_SESSION:
@@ -1519,7 +1446,7 @@ def route_pick_host(cfg: dict, dry_run: bool = False,
                     over: Overrides = NO_OVERRIDES) -> int:
     labels = host_labels(cfg)
     items = list(labels) + [NEW_HOST]
-    choice = pick(items, "host>", "hosts")
+    choice = choose(items, "host>", "hosts")
     if choice is None:
         return 130
     if choice == NEW_HOST:
@@ -1533,7 +1460,7 @@ def route_configure(cfg: dict, words: list[str]) -> int:
     with an unknown session. Saves and exits; never connects."""
     if not words:
         labels = host_labels(cfg)
-        choice = pick(list(labels) + [NEW_HOST], "host>", "hosts to configure")
+        choice = choose(list(labels) + [NEW_HOST], "host>", "hosts to configure")
         if choice is None:
             return 130
         if choice == NEW_HOST:
@@ -1560,7 +1487,7 @@ def route_configure(cfg: dict, words: list[str]) -> int:
 
     labels = session_labels(cfg, host)
     items = [HOST_SETTINGS] + list(labels) + [NEW_SESSION]
-    choice = pick(items, "edit>", "%s: its settings, or a session" % host)
+    choice = choose(items, "edit>", "%s: its settings, or a session" % host)
     if choice is None:
         return 130
     if choice == HOST_SETTINGS:

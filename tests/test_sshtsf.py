@@ -254,7 +254,7 @@ class TestAddHost(ConfigDirMixin, unittest.TestCase):
                    "forward the local Emacs socket": "", "forward Wayland": ""}
         with mock.patch.object(sshtsf, "ssh_known_hosts",
                                return_value=["devbox.local", "other"]), \
-             mock.patch.object(sshtsf, "pick",
+             mock.patch.object(sshtsf, "choose",
                                return_value="devbox.local  (registered as devbox)") as pick, \
              mock.patch.object(sshtsf, "ask", side_effect=scripted(answers)), \
              mock.patch.object(sshtsf, "route_add_session", return_value=0):
@@ -292,7 +292,7 @@ class TestAddHost(ConfigDirMixin, unittest.TestCase):
                    "forward the local Emacs socket": "", "forward Wayland": ""}
         with mock.patch.object(sshtsf, "ssh_known_hosts",
                                return_value=["newbox", "other"]), \
-             mock.patch.object(sshtsf, "pick", return_value="alice@newbox") as pick, \
+             mock.patch.object(sshtsf, "choose", return_value="alice@newbox") as pick, \
              mock.patch.object(sshtsf, "ask", side_effect=scripted(answers)), \
              mock.patch.object(sshtsf, "route_add_session", return_value=0):
             rc = sshtsf.route_add_host(sshtsf.load_config())
@@ -375,7 +375,7 @@ class TestPromptFolder(unittest.TestCase):
     def prompt(self, typed, current="", dirs=("src/a", "src/b"), picked="src/b"):
         with mock.patch.object(sshtsf, "ask", side_effect=scripted({"folder": typed})) as ask, \
              mock.patch.object(sshtsf, "remote_dirs", return_value=list(dirs)) as ls, \
-             mock.patch.object(sshtsf, "pick", return_value=picked) as pick:
+             mock.patch.object(sshtsf, "choose", return_value=picked) as pick:
             got = sshtsf.prompt_folder("devbox", current, label="web")
         return got, ask.call_args, ls.called, pick
 
@@ -898,7 +898,7 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         cfg = sshtsf.load_config()
         cfg["hosts"]["devbox"]["target"] = "me@devbox.local"
         sshtsf.save_config(cfg)
-        with mock.patch.object(sshtsf, "pick", return_value=None) as pick:
+        with mock.patch.object(sshtsf, "choose", return_value=None) as pick:
             run_capture(["--dry-run"])
         items = pick.call_args.args[0]
         self.assertEqual(items[0], "devbox  (alias c, -> me@devbox.local, default)")
@@ -1025,7 +1025,7 @@ class TestConfigure(ConfigDirMixin, unittest.TestCase):
 
     def configure(self, argv, answers, picked=None, folder="src/webapp"):
         with mock.patch.object(sshtsf, "ask", side_effect=scripted(answers)), \
-             mock.patch.object(sshtsf, "pick", return_value=picked), \
+             mock.patch.object(sshtsf, "choose", return_value=picked), \
              mock.patch.object(sshtsf, "prompt_folder", return_value=folder), \
              mock.patch.object(sshtsf, "connect") as connect:
             rc, out, err = run_capture(["-c"] + argv)
@@ -1175,21 +1175,21 @@ class TestConfigure(ConfigDirMixin, unittest.TestCase):
                    "alias for": ""}
         with mock.patch.object(sshtsf, "ask", side_effect=scripted(answers)), \
              mock.patch.object(sshtsf, "remote_dirs", return_value=["src/x"]), \
-             mock.patch.object(sshtsf, "pick", return_value=None):
+             mock.patch.object(sshtsf, "choose", return_value=None):
             rc, _, err = run_capture(["-c", "devbox", "web"])
         self.assertEqual(rc, 0, err)
         self.assertEqual(sshtsf.load_config()["hosts"]["devbox"]["sessions"]["web"],
                          SAMPLE["hosts"]["devbox"]["sessions"]["web"])
 
     def test_picker_lists_settings_sessions_and_new(self):
-        with mock.patch.object(sshtsf, "pick", return_value=None) as pick:
+        with mock.patch.object(sshtsf, "choose", return_value=None) as pick:
             rc, _, _ = run_capture(["-c", "devbox"])
         self.assertEqual(rc, 130)
         items = pick.call_args.args[0]
         self.assertEqual(items[0], sshtsf.HOST_SETTINGS)
         self.assertEqual(items[-1], sshtsf.NEW_SESSION)
         self.assertEqual(len(items), 5)
-        with mock.patch.object(sshtsf, "pick", return_value=None) as pick:
+        with mock.patch.object(sshtsf, "choose", return_value=None) as pick:
             rc, _, _ = run_capture(["-c"])
         self.assertEqual(rc, 130)
         self.assertEqual(pick.call_args.args[0][-1], sshtsf.NEW_HOST)

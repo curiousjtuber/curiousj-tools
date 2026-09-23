@@ -73,7 +73,8 @@ class FzfPick(unittest.TestCase):
     def test_feeds_items_and_returns_marked(self):
         sel, argv, kwargs = self.run_fzf(0, "gamma\nalpha\n")
         self.assertEqual(sel, ["gamma", "alpha"])
-        self.assertEqual(argv[:2], ["fzf", "--multi"])
+        self.assertEqual(argv[0], "fzf")
+        self.assertIn("--multi", argv)
         self.assertIn("hosts> ", argv)
         self.assertEqual(kwargs["input"], "alpha\nbeta\ngamma\nlocalhost\n")
 
@@ -82,6 +83,62 @@ class FzfPick(unittest.TestCase):
             self.run_fzf(130, "")
         with self.assertRaises(pick.Abort):
             self.run_fzf(0, "")
+
+
+class Choose(unittest.TestCase):
+    """The single-choice picker sshtsf's menus use."""
+
+    def run_fzf(self, returncode, stdout, **kw):
+        with mock.patch.object(pick, "fzf_usable", return_value=True), \
+                mock.patch("subprocess.run") as run:
+            run.return_value = mock.Mock(returncode=returncode, stdout=stdout)
+            result = pick.choose(ITEMS, "host>", **kw)
+        return result, run.call_args[0][0]
+
+    def test_fzf_returns_the_selection_or_none(self):
+        got, argv = self.run_fzf(0, "beta\n", header="hosts", query="be")
+        self.assertEqual(got, "beta")
+        self.assertEqual(argv[:3], ["fzf", "--prompt", "host> "])
+        self.assertEqual(argv[argv.index("--header") + 1], "hosts")
+        self.assertEqual(argv[argv.index("--query") + 1], "be")
+        self.assertNotIn("--multi", argv)
+        self.assertEqual(self.run_fzf(1, "")[0], None)
+        self.assertEqual(self.run_fzf(130, "")[0], None)
+
+    def test_fzf_free_text_falls_back_to_the_query(self):
+        # --print-query: the query on line 1, a match (if any) after it.
+        got, argv = self.run_fzf(1, "src/new\n", free_text=True)
+        self.assertEqual(got, "src/new")
+        self.assertIn("--print-query", argv)
+        self.assertEqual(self.run_fzf(0, "src/\nsrc/app\n", free_text=True)[0], "src/app")
+        self.assertIsNone(self.run_fzf(130, "src/\n", free_text=True)[0])
+
+    def menu(self, replies, items=ITEMS, **kw):
+        with mock.patch.object(pick, "fzf_usable", return_value=False), \
+                mock.patch("builtins.input", side_effect=list(replies)), \
+                mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            got = pick.choose(items, "host>", **kw)
+        return got, err.getvalue()
+
+    def test_menu_takes_a_number_a_listed_value_or_q(self):
+        got, err = self.menu(["9", "x", "2"], header="hosts")
+        self.assertEqual(got, "beta")
+        self.assertTrue(err.startswith("hosts\n   1) alpha\n"), err)
+        self.assertIn("  not a choice: 9\n  not a choice: x\n", err)
+        self.assertEqual(self.menu(["gamma"])[0], "gamma")
+        self.assertIsNone(self.menu(["q"])[0])
+        self.assertIsNone(self.menu([""])[0])
+
+    def test_menu_free_text_and_the_limit(self):
+        items = ["d%d" % i for i in range(pick.MENU_LIMIT + 5)]
+        got, err = self.menu(["src/new"], items=items, free_text=True)
+        self.assertEqual(got, "src/new")
+        self.assertIn("  ... 5 more (type a value to use it)\n", err)
+        self.assertNotIn("d%d" % pick.MENU_LIMIT, err)
+        self.assertIn("... 5 more (install fzf to filter)", self.menu(["q"], items=items)[1])
+
+    def test_nothing_to_choose_from(self):
+        self.assertIsNone(pick.choose([], "host>"))
 
 
 class Main(unittest.TestCase):

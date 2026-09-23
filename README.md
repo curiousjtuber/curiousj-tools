@@ -9,7 +9,7 @@ as the editor on all of them. Python 3.11+, click and ruamel.yaml.
 | `xssh` | one synchronized tmux pane per login plus a local shell, so one typed line runs everywhere (interactive; needs [xpanes](https://github.com/greymd/tmux-xpanes)) |
 | `pssh` | the batch counterpart: one command on every login at once through GNU parallel, output tagged by login; `-P` repeats it in every listed path, `-c` cloning the ones a host lacks; `-o` runs an operation the lists file defines, `-s` one login at a time for commands that ask questions |
 | `ssh-logins` | the login list behind `xssh` and `pssh`, with an fzf/menu picker |
-| `pick-lines` | the multi-select picker behind `-p` and `-C`/`--pick-paths`: fzf when present, else a numbered menu (`sshtsf` has a single-choice one of its own) |
+| `pick-lines` | the multi-select picker behind `-p` and `-C`/`--pick-paths`: fzf when present, else a numbered menu |
 | `emacsclient-auto` | `emacsclient` that reaches a forwarded Emacs when its socket is live, the local server otherwise; use it as `$EDITOR` on hosts you reach with `sshtsf -e` |
 | `ec-browse` | opens URLs in whichever Emacs `emacsclient-auto` reaches; use it as `$BROWSER` |
 

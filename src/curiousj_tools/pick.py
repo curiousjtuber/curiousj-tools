@@ -38,11 +38,26 @@ def pick_from(items: list, noun: str, label: Callable) -> list:
     return [item for item, text in zip(items, labels) if text in chosen]
 
 
+def fzf_usable() -> bool:
+    """Whether fzf is installed and has a terminal to draw on."""
+    return bool(shutil.which("fzf")) and sys.stdin.isatty()
+
+
+def fzf_argv(prompt: str, header: str = "") -> list[str]:
+    """fzf as every picker here runs it, under the cursor rather than full screen."""
+    return (["fzf", "--prompt", prompt, "--height", "60%", "--reverse"]
+            + (["--header", header] if header else []))
+
+
+def print_menu(items: list[str], out) -> None:
+    for i, item in enumerate(items, 1):
+        print(f"  {i:2d}) {item}", file=out)
+
+
 def fzf_pick(items: list[str], noun: str) -> list[str]:
     """Run fzf over items; its UI goes to the tty, the marked lines come back."""
     proc = subprocess.run(
-        ["fzf", "--multi", "--prompt", f"{noun}> ", "--height", "60%", "--reverse",
-         "--header", f"TAB marks {noun}, ENTER confirms"],
+        fzf_argv(f"{noun}> ", f"TAB marks {noun}, ENTER confirms") + ["--multi"],
         input="".join(f"{i}\n" for i in items), stdout=subprocess.PIPE, text=True,
     )
     sel = proc.stdout.splitlines()
@@ -73,8 +88,7 @@ def menu_pick(items: list[str], noun: str, ask: Callable[[str], str],
               out=None) -> list[str]:
     """Numbered menu: print items to out, ask until an answer names some."""
     out = out or sys.stderr
-    for i, item in enumerate(items, 1):
-        print(f"  {i:2d}) {item}", file=out)
+    print_menu(items, out)
     while True:
         try:
             reply = ask(f"{noun} [1-{len(items)}, e.g. 1 3, a=all, q]: ")
@@ -106,9 +120,69 @@ def tty_ask(prompt: str) -> str:
 def pick(items: Iterable[str], noun: str) -> list[str]:
     """Marked subset of items; fzf on a tty when installed, else the menu."""
     items = list(items)
-    if shutil.which("fzf") and sys.stdin.isatty():
+    if fzf_usable():
         return fzf_pick(items, noun)
     return menu_pick(items, noun, tty_ask)
+
+
+def choose(items: list[str], prompt: str, header: str = "",
+           free_text: bool = False, query: str = "") -> str | None:
+    """One of items, the single-choice counterpart of pick(); None when the
+    user leaves. sshtsf's menus, which ask on stdin like its other prompts.
+
+    free_text allows a value that is not in the list -- right for a remote
+    folder, wrong for a host or session, where anything off-list is a typo and
+    would only fail a lookup later. query pre-fills fzf's search box.
+    """
+    if not items:
+        return None
+    if fzf_usable():
+        cmd = fzf_argv(prompt + " ", header)
+        if query:
+            cmd += ["--query", query]
+        if free_text:
+            # print-query puts the typed text on line 1 and any match after it,
+            # so a value with no match still comes back.
+            cmd += ["--print-query"]
+        proc = subprocess.run(cmd, input="\n".join(items), text=True,
+                              stdout=subprocess.PIPE)
+        lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+        # Prefer a real selection; with free_text fall back to the query when
+        # nothing matched. Exit 130 is abort; exit 1 with a query is "no match".
+        if proc.returncode == 130 or (proc.returncode != 0 and not free_text):
+            return None
+        return lines[-1] if lines else None
+    return choose_numbered(items, prompt, header, free_text)
+
+
+MENU_LIMIT = 40
+
+
+def choose_numbered(items: list[str], prompt: str, header: str = "",
+                    free_text: bool = False) -> str | None:
+    """choose() without fzf: a numbered menu of the first MENU_LIMIT items."""
+    if header:
+        print(header, file=sys.stderr)
+    shown = items[:MENU_LIMIT]
+    print_menu(shown, sys.stderr)
+    if len(items) > len(shown):
+        note = "type a value to use it" if free_text else "install fzf to filter"
+        print(f"  ... {len(items) - len(shown)} more ({note})", file=sys.stderr)
+
+    hint = f"1-{len(shown)}, a value, or q" if free_text else f"1-{len(shown)}, or q"
+    while True:
+        try:
+            reply = input(f"{prompt} [{hint}]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print(file=sys.stderr)
+            return None
+        if reply in ("q", "Q", ""):
+            return None
+        if reply.isdigit() and 1 <= int(reply) <= len(shown):
+            return shown[int(reply) - 1]
+        if reply in items or free_text:
+            return reply
+        print(f"  not a choice: {reply}", file=sys.stderr)
 
 
 def main(argv: list[str] | None = None) -> int:
