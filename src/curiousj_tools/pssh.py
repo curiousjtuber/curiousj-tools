@@ -421,24 +421,24 @@ def cli(opts: logins.LoginOpts, dry_run: bool, serial: bool, interactive: bool,
     paths = paths or clone or pick_paths or bool(path_attrs)
     skipped: list[str] = []
     try:
-        if not dry_run and not serial and not ops:
-            need_parallel()
         found = lists.load_all(opts.files) if paths or ops else None
+        leaves = expand(list(ops), found.operations) if ops else []
+        askers = [op.name for op in leaves if op.serial]
+        if askers and not serial:
+            serial = True
+            print(f"pssh: {', '.join(askers)} asks questions: one login at a time",
+                  file=sys.stderr)
+        # Once serial is settled, and before any picker: a run parallel is
+        # missing for asks nothing first.
+        if not dry_run and not serial:
+            need_parallel()
         if ops:
-            leaves = expand(list(ops), found.operations)
             path_list = (paths_list(found, pick_paths, path_attrs)
                          if any(op.per_path for op in leaves) else [])
             entries = logins.logins(opts, found=found)
             scripts = [(e, login_script(e, leaves, path_list, clone)) for e in entries]
             skipped = list(dict.fromkeys(e.login for e, s in scripts if s is None))
             groups = runs([(e, s) for e, s in scripts if s], interactive)
-            askers = [op.name for op in leaves if op.serial]
-            if askers and not serial:
-                serial = True
-                print(f"pssh: {', '.join(askers)} asks questions: one login at a time",
-                      file=sys.stderr)
-            if not dry_run and not serial:
-                need_parallel()
         else:
             cmd = command_line(list(command))
             if paths:

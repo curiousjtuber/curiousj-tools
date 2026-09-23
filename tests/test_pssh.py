@@ -471,6 +471,23 @@ class Main(unittest.TestCase):
         self.assertIn("parallel not installed", err.getvalue())
         self.assertIn("cannot read", err.getvalue())
 
+    def test_missing_parallel_stops_an_op_before_any_login_is_picked(self):
+        found = Lists([Login("a")], [], OPS, ["F"])
+        with mock.patch.object(lists, "load_all", return_value=found), \
+                mock.patch.object(logins, "logins") as h, \
+                mock.patch("shutil.which", return_value=None), \
+                mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(pssh.main(["-p", "-o", "up"]), 1)
+            h.assert_not_called()
+            self.assertIn("parallel not installed", err.getvalue())
+            # A serial op needs no parallel, and says so before the picker.
+            h.return_value = [Login("a", attributes={"cachyos": None})]
+            with mock.patch.object(logins, "confirm_new_hosts"), \
+                    mock.patch.object(pssh.subprocess, "run", return_value=mock.Mock(returncode=0)), \
+                    mock.patch("sys.stdout", new_callable=io.StringIO):
+                self.assertEqual(pssh.main(["-o", "ask"]), 0)
+        self.assertIn("pssh: ask asks questions: one login at a time", err.getvalue())
+
     def test_ops_group_identical_scripts_and_report_the_skipped(self):
         entries = [Login("a", attributes={"mise": None}), Login("b", attributes={"mise": None}),
                    Login("c"), Login("localhost")]
