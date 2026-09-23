@@ -903,42 +903,55 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         self.assertIn("no session api2 on devbox", err)
         self.assertEqual(add.call_args.args[:3], (mock.ANY, "devbox", "api2"))
 
-    def test_a_word_naming_two_entries_is_reported_not_guessed(self):
+    def test_a_word_naming_two_entries_is_picked_not_guessed(self):
         cfg = sshtsf.load_config()
         cfg["hosts"]["build"].setdefault("sessions", {})["main"] = {"alias": "main"}
         cfg["hosts"]["devbox"]["sessions"]["main"] = {"alias": "main"}
         # A session alias that is also a host's name.
         cfg["hosts"]["devbox"]["sessions"]["b"] = {"alias": "build"}
         sshtsf.save_config(cfg)
-        with mock.patch.object(sshtsf, "connect") as connect, \
-             mock.patch.object(sshtsf, "route_pick_session") as pick_session:
-            rc, _, err = run_capture(["main", "--dry-run"])
-            self.assertEqual(rc, 1)
-            self.assertIn("main is ambiguous: it names build+main, devbox+main", err)
-            rc, _, err = run_capture(["build", "--dry-run"])
-            self.assertEqual(rc, 1)
-            self.assertIn("build is ambiguous: it names host build, devbox+b", err)
-        connect.assert_not_called()
-        pick_session.assert_not_called()
+        with mock.patch.object(sshtsf, "connect", return_value=0) as connect, \
+             mock.patch.object(sshtsf, "route_pick_session", return_value=0) as pick_session, \
+             mock.patch.object(sshtsf, "choose",
+                               side_effect=["devbox+main", "host build", None]) as choose:
+            rc, _, _ = run_capture(["main", "--dry-run"])
+            self.assertEqual(rc, 0)
+            self.assertEqual(choose.call_args.args[:2], (["build+main", "devbox+main"], "main>"))
+            self.assertEqual(connect.call_args.args[1:3], ("devbox", "main"))
+            rc, _, _ = run_capture(["build", "--dry-run"])
+            self.assertEqual(rc, 0)
+            self.assertEqual(choose.call_args.args[0], ["host build", "devbox+b"])
+            self.assertEqual(pick_session.call_args.args[1], "build")
+            # Aborting the pick connects nowhere.
+            rc, _, _ = run_capture(["main", "--dry-run"])
+            self.assertEqual(rc, 130)
+        self.assertEqual(connect.call_count, 1)
+        self.assertIn("`sshtsf -c` gives all but one", choose.call_args.args[2])
 
-    def test_a_host_name_that_is_another_hosts_alias_is_reported(self):
+    def test_a_host_name_that_is_another_hosts_alias_is_picked(self):
         # A hand edit gives build the alias devbox, the other host's name.
         # The name used to win without a word, on every path through
-        # resolve_host; now each reports both, as a lone word does.
+        # resolve_host; now each has the user pick, as a lone word does.
         cfg = sshtsf.load_config()
         cfg["hosts"]["build"]["alias"] = "devbox"
         sshtsf.save_config(cfg)
-        with mock.patch.object(sshtsf, "connect") as connect, \
-             mock.patch.object(sshtsf, "route_add_session") as add, \
-             mock.patch.object(sshtsf, "choose") as choose:
-            for argv in (["devbox", "web"], ["-n", "devbox"], ["-l", "devbox"],
-                         ["-c", "devbox"]):
-                rc, _, err = run_capture(argv + ["--dry-run"] if argv[0] != "-c" else argv)
-                self.assertEqual(rc, 1, argv)
-                self.assertIn("devbox is ambiguous: it names host build, host devbox", err)
+        with mock.patch.object(sshtsf, "choose", return_value="host build") as choose:
+            self.assertEqual(sshtsf.resolve_host(cfg, "devbox"), "build")
+            self.assertEqual(choose.call_args.args[0], ["host build", "host devbox"])
+            choose.return_value = "host devbox"
+            self.assertEqual(sshtsf.resolve_host(cfg, "devbox"), "devbox")
+        with mock.patch.object(sshtsf, "connect", return_value=0) as connect, \
+             mock.patch.object(sshtsf, "choose", return_value="host devbox"):
+            rc, _, _ = run_capture(["devbox", "web", "--dry-run"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(connect.call_args.args[1:3], ("devbox", "web"))
+        with mock.patch.object(sshtsf, "choose", return_value=None) as choose, \
+             mock.patch.object(sshtsf, "connect") as connect:
+            for argv in (["devbox", "web", "--dry-run"], ["-n", "devbox", "--dry-run"],
+                         ["-l", "devbox"], ["-c", "devbox"]):
+                rc, _, _ = run_capture(argv)
+                self.assertEqual(rc, 130, argv)
         connect.assert_not_called()
-        add.assert_not_called()
-        choose.assert_not_called()
         # The other names still resolve.
         self.assertEqual(sshtsf.resolve_host(cfg, "c"), "devbox")
         self.assertEqual(sshtsf.resolve_host(cfg, "build"), "build")
