@@ -1637,12 +1637,13 @@ def cmd_edit(dry_run: bool = False) -> int:
     to. Afterwards the file is read back: a slip in the TOML is reported now,
     with its line, instead of on the next `sshtsf devbox'.
     """
-    if not os.path.exists(CONFIG_PATH):
-        save_config({"hosts": {}})
     argv = editor_command() + [CONFIG_PATH]
     if dry_run:
+        # Before the config is written: a dry run touches nothing.
         print(" ".join(shlex.quote(word) for word in argv))
         return 0
+    if not os.path.exists(CONFIG_PATH):
+        save_config({"hosts": {}})
     try:
         rc = subprocess.run(argv).returncode
     except OSError as exc:

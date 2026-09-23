@@ -433,11 +433,21 @@ class TestEdit(ConfigDirMixin, unittest.TestCase):
 
     def test_missing_config_is_created_first(self):
         os.remove(self.cfg_path)
-        with mock.patch.dict(os.environ, {"VISUAL": "ed"}):
-            rc, _, _ = run_capture(["--edit", "--dry-run"])
+        with mock.patch.dict(os.environ, {"VISUAL": "ed"}), \
+             mock.patch.object(sshtsf.subprocess, "run",
+                               return_value=mock.Mock(returncode=0)) as run:
+            rc, _, _ = run_capture(["--edit"])
         self.assertEqual(rc, 0)
-        self.assertTrue(os.path.exists(self.cfg_path))
+        run.assert_called_once_with(["ed", self.cfg_path])
         self.assertEqual(sshtsf.load_config(), {"hosts": {}})
+
+    def test_dry_run_writes_nothing(self):
+        # It used to create the missing config before printing the command.
+        os.remove(self.cfg_path)
+        with mock.patch.dict(os.environ, {"VISUAL": "ed"}):
+            rc, out, _ = run_capture(["--edit", "--dry-run"])
+        self.assertEqual((rc, out.strip()), (0, "ed " + self.cfg_path))
+        self.assertFalse(os.path.exists(self.cfg_path))
 
     def test_runs_editor_and_reports_a_slip(self):
         def scribble(argv, **kw):
