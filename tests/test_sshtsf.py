@@ -921,6 +921,28 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         connect.assert_not_called()
         pick_session.assert_not_called()
 
+    def test_a_host_name_that_is_another_hosts_alias_is_reported(self):
+        # A hand edit gives build the alias devbox, the other host's name.
+        # The name used to win without a word, on every path through
+        # resolve_host; now each reports both, as a lone word does.
+        cfg = sshtsf.load_config()
+        cfg["hosts"]["build"]["alias"] = "devbox"
+        sshtsf.save_config(cfg)
+        with mock.patch.object(sshtsf, "connect") as connect, \
+             mock.patch.object(sshtsf, "route_add_session") as add, \
+             mock.patch.object(sshtsf, "choose") as choose:
+            for argv in (["devbox", "web"], ["-n", "devbox"], ["-l", "devbox"],
+                         ["-c", "devbox"]):
+                rc, _, err = run_capture(argv + ["--dry-run"] if argv[0] != "-c" else argv)
+                self.assertEqual(rc, 1, argv)
+                self.assertIn("devbox is ambiguous: it names host build, host devbox", err)
+        connect.assert_not_called()
+        add.assert_not_called()
+        choose.assert_not_called()
+        # The other names still resolve.
+        self.assertEqual(sshtsf.resolve_host(cfg, "c"), "devbox")
+        self.assertEqual(sshtsf.resolve_host(cfg, "build"), "build")
+
     def test_host_picker_shows_the_target(self):
         cfg = sshtsf.load_config()
         cfg["hosts"]["devbox"]["target"] = "me@devbox.local"

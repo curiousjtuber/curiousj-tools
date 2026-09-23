@@ -326,14 +326,16 @@ def host_names(cfg: dict) -> list[str]:
 
 
 def resolve_host(cfg: dict, token: str) -> str | None:
-    """Host key for a token that may be the key itself or a host alias."""
-    hosts = cfg.get("hosts", {})
-    if token in hosts:
-        return token
-    for name, hcfg in hosts.items():
-        if hcfg.get("alias") == token:
-            return name
-    return None
+    """Host key for a token that may be the key itself or a host alias.
+
+    A token naming two hosts -- one's key and another's alias, which only a
+    hand edit makes -- exits as ambiguous, as a lone word does, rather than
+    let the key win without a word.
+    """
+    hosts = [owner for owner in word_owners(cfg, token) if not owner[1]]
+    if len(hosts) > 1:
+        ambiguous(token, hosts)
+    return hosts[0][0] if hosts else None
 
 
 def resolve_session(cfg: dict, host: str, token: str) -> str | None:
@@ -367,6 +369,13 @@ def word_owners(cfg: dict, word: str) -> list[tuple[str, str]]:
 def describe_owner(owner: tuple[str, str]) -> str:
     host, session = owner
     return f"{host}+{session}" if session else f"host {host}"
+
+
+def ambiguous(token: str, owners: list[tuple[str, str]]) -> None:
+    """Exit on a word that names more than one entry, naming them all."""
+    names = ", ".join(describe_owner(owner) for owner in owners)
+    sys.exit(f"sshtsf: {token} is ambiguous: it names {names}\n"
+             "        `sshtsf -c` gives all but one of them another name or alias")
 
 
 def word_clash(cfg: dict, word: str, own: tuple[str, str]) -> str:
@@ -1726,9 +1735,7 @@ def cli(ctx: click.Context, new: bool, list_: bool, live: bool, configure: bool,
         token = positional[0]
         owners = word_owners(cfg, token)
         if len(owners) > 1:
-            names = ", ".join(describe_owner(owner) for owner in owners)
-            sys.exit(f"sshtsf: {token} is ambiguous: it names {names}\n"
-                     "        `sshtsf -c` gives all but one of them another name or alias")
+            ambiguous(token, owners)
         if owners:
             host, session = owners[0]
             if session:
