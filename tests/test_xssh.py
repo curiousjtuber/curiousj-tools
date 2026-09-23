@@ -182,6 +182,23 @@ class Main(unittest.TestCase):
             xssh.main([])
         bash.assert_not_called()
 
+    def test_op_panes_escape_the_logins_commands_too(self):
+        # The op pane ends in the login's commands, typed through the same
+        # xpanes substitution as a plain pane's; it used to go unescaped.
+        found = lists.Lists([Login("a", ["cd x && exec zsh"], attributes={"mise": None})],
+                            [], {"up": OpPanes.OPS[0]}, ["F"])
+        with mock.patch.object(lists, "load_all", return_value=found), \
+                mock.patch.object(logins, "logins", return_value=found.logins), \
+                mock.patch("shutil.which", return_value="/usr/bin/xpanes"), \
+                mock.patch("os.execvp") as ex, \
+                mock.patch.object(xssh, "xpanes_expands_ampersand", return_value=True) as bash, \
+                mock.patch.object(logins, "confirm_new_hosts"):
+            self.assertEqual(xssh.main(["-o", "up"]), 0)
+        bash.assert_called_once()
+        pane = ex.call_args[0][1][-1]
+        self.assertTrue(pane.endswith(" | base64 -d)\"; cd x \\&\\& exec zsh'"), pane)
+        self.assertIn("== up", decoded(pane))
+
     def test_missing_xpanes_and_abort(self):
         with mock.patch("shutil.which", return_value=None), \
                 mock.patch("sys.stderr", new_callable=io.StringIO) as err:

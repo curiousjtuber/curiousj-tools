@@ -81,8 +81,8 @@ def for_xpanes(cmd: str, ampersand: bool) -> str:
     return cmd.replace("\\", "\\\\").replace("&", "\\&") if ampersand else cmd
 
 
-def pane_commands(entries: list[Login], ampersand: bool = False) -> list[str]:
-    return [for_xpanes(pane_command(e), ampersand) for e in entries]
+def pane_commands(entries: list[Login]) -> list[str]:
+    return [pane_command(e) for e in entries]
 
 
 def op_pane_command(entry: Login, script_text: str) -> str:
@@ -148,8 +148,11 @@ def cli(opts: logins.LoginOpts, ops: tuple[str, ...], list_ops: bool,
                 raise ToolError("no login takes part")
         else:
             entries = logins.logins(opts)
-            ampersand = any(e.commands for e in entries) and xpanes_expands_ampersand()
-            commands = pane_commands(entries, ampersand)
+            commands = pane_commands(entries)
+        # A pane of either kind types the login's commands, the one place an
+        # `&` or a backslash comes from, so the bash is asked only then.
+        ampersand = any(e.commands for e in entries) and xpanes_expands_ampersand()
+        commands = [for_xpanes(c, ampersand) for c in commands]
         logins.confirm_new_hosts([e.login for e in entries], "xssh")
     except ToolError as e:
         print(f"xssh: {e}", file=sys.stderr)
