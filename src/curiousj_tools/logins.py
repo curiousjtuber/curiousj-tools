@@ -155,6 +155,26 @@ def local_login(entries: list[Login], names: set[str], user: str) -> Login:
     return Login("localhost")
 
 
+# How long a probe waits to reach a host before giving up, rather than sit
+# out the TCP connect timeout, a minute or two for a host that is down.
+# ssh's ConnectTimeout bounds only the connection and its handshake, not the
+# authentication after it, so a password prompt still waits for its answer.
+PROBE_CONNECT_TIMEOUT = 10
+
+
+def probe_ssh(target: str, batch: bool = False) -> list[str]:
+    """`ssh ... TARGET' for a probe, the command words still to add.
+
+    Bounded to reach the host, as every probe is. batch never prompts: for
+    the probes asked on the side, where a password prompt would come out of
+    nowhere. The ones a user asks for (sshtsf -L, its folder listing), the
+    socket cleanup ahead of a connection and the host-key check below may
+    prompt, as the connection itself does.
+    """
+    return (["ssh", "-o", "ConnectTimeout=%d" % PROBE_CONNECT_TIMEOUT]
+            + (["-o", "BatchMode=yes"] if batch else []) + [target])
+
+
 def ssh_config(entry: str) -> dict[str, str]:
     """What `ssh -G` resolves for entry after ~/.ssh/config: keyword -> value,
     keywords lowercased. Empty if ssh is missing or refuses the name."""
@@ -199,7 +219,7 @@ def confirm_new_hosts(entries: list[str], prog: str) -> None:
             continue
         print(f"{prog}: {entry}: host key not known yet, connecting once to confirm it",
               file=sys.stderr)
-        if subprocess.run(["ssh", entry, "true"]).returncode != 0:
+        if subprocess.run(probe_ssh(entry) + ["true"]).returncode != 0:
             raise ToolError(f"{entry}: host key not confirmed (answer yes, or drop it from the list)")
 
 

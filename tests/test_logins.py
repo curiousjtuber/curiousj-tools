@@ -143,6 +143,28 @@ class Hosts(unittest.TestCase):
             self.assertEqual(logins.main(["-p", "-f", self.file]), 130)
 
 
+class ConfirmNewHosts(unittest.TestCase):
+    def test_only_unknown_hosts_are_dialed_and_the_dial_is_bounded(self):
+        # The dial used to have no ConnectTimeout, so a login that was down
+        # held pssh and xssh for the TCP connect timeout before they began.
+        known = {"a": False, "b": True}
+        with mock.patch.object(logins, "host_known", side_effect=known.get), \
+                mock.patch.object(logins.subprocess, "run",
+                                  return_value=mock.Mock(returncode=0)) as run, \
+                mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            logins.confirm_new_hosts(["a", "b", "localhost"], "pssh")
+        run.assert_called_once_with(["ssh", "-o", "ConnectTimeout=10", "a", "true"])
+        self.assertIn("pssh: a: host key not known yet", err.getvalue())
+
+    def test_a_refused_or_unreachable_host_stops_the_run(self):
+        with mock.patch.object(logins, "host_known", return_value=False), \
+                mock.patch.object(logins.subprocess, "run", return_value=mock.Mock(returncode=255)), \
+                mock.patch("sys.stderr", new_callable=io.StringIO), \
+                self.assertRaises(logins.ToolError) as cm:
+            logins.confirm_new_hosts(["a"], "xssh")
+        self.assertIn("a: host key not confirmed", str(cm.exception))
+
+
 class CommandLine(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
