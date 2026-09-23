@@ -71,10 +71,6 @@ class Condition:
 EVERYTHING = Condition()
 
 
-def matches(cond: Condition, attrs: Mapping[str, str | None]) -> bool:
-    return cond.matches(attrs)
-
-
 def holds_all(terms: tuple[Term, ...], attrs: Mapping[str, str | None]) -> bool:
     """Whether every term holds: what a list of -a or -A flags asks."""
     return all(t.holds(attrs) for t in terms)

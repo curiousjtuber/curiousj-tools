@@ -54,6 +54,14 @@ class Hosts(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
 
+    def test_a_user_without_a_passwd_entry_is_its_uid(self):
+        # getuser() raising used to take the whole list down with it. The
+        # uid names no entry's user@, so alice@my-mac.local is someone else.
+        with mock.patch("getpass.getuser", side_effect=KeyError("uid 1000")), \
+                mock.patch("os.getuid", return_value=1000):
+            got = logins.logins(logins.LoginOpts(files=(self.file,)))
+        self.assertEqual([e.login for e in got], ["a", "alice@my-mac.local", "b", "c", "localhost"])
+
     def test_default_adds_localhost_last(self):
         self.assertEqual(logins.logins(logins.LoginOpts(files=(self.file,))), H("a", "b", "c", "localhost"))
 

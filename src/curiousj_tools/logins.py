@@ -32,7 +32,6 @@ Which files, merged in this order:
 from __future__ import annotations
 
 import functools
-import getpass
 import os
 import shutil
 import socket
@@ -42,8 +41,8 @@ from dataclasses import dataclass
 
 import click
 
-from . import attrs, lists, pick
-from .lists import Login, ToolError  # noqa: F401  (re-exported)
+from . import attrs, emacsclient_auto, lists, pick
+from .lists import Login, ToolError
 
 EXIT_ERROR = 1
 EXIT_USAGE = 2
@@ -210,7 +209,7 @@ def logins(opts: LoginOpts, env=None, found: lists.Lists | None = None) -> list[
     or pick.Abort."""
     if found is None:
         found = lists.load_all(opts.files, env)
-    names, user = self_names(), getpass.getuser()
+    names, user = self_names(), emacsclient_auto.login_name()
     entries = [e for e in drop_self(found.logins, names, user)
                if attrs.holds_all(opts.attrs, e.attributes)]
     if not opts.no_local:

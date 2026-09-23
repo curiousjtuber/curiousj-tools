@@ -56,7 +56,7 @@ DEFAULT_SOCKET = default_socket()
 
 # Names this tool may be installed or symlinked under; a PATH entry called
 # `emacsclient` that resolves to one of these is us, not the real client.
-SELF_NAMES = ("emacsclient-auto", "emacsclient-auto.sh", "emacsclient_auto.py")
+SELF_NAMES = ("emacsclient-auto", "emacsclient_auto.py")
 
 PROBE_TIMEOUT = 2
 
