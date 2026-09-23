@@ -28,19 +28,28 @@ import subprocess
 import sys
 
 
+# Where sshtsf lands its forward and this looks for it, less the -USER.
+# sshtsf imports it, so the two ends cannot drift apart.
+SOCKET_PREFIX = "/tmp/emacs-remote-socket"
+
+
+def login_name() -> str:
+    """The login this process runs as; its uid when it has no passwd entry."""
+    try:
+        return getpass.getuser()
+    except (KeyError, OSError):
+        return str(os.getuid())
+
+
 def default_socket() -> str:
     """/tmp/emacs-remote-socket-USER: per login, as sshtsf names its forward.
 
     The suffix is the login this process runs as, which is what sshtsf's
     `id -un' on the remote answered when it set the forward up; two users on
     one host thus get two sockets in the sticky /tmp instead of a fight over
-    one. A USER that cannot be told (no passwd entry) falls back to the uid.
+    one.
     """
-    try:
-        user = getpass.getuser()
-    except (KeyError, OSError):
-        user = str(os.getuid())
-    return "/tmp/emacs-remote-socket-%s" % user
+    return "%s-%s" % (SOCKET_PREFIX, login_name())
 
 
 DEFAULT_SOCKET = default_socket()
@@ -88,7 +97,7 @@ def is_eval(args: list[str]) -> bool:
     return any(a in ("-e", "--eval") or a.startswith("--eval=") for a in args)
 
 
-def socket_is_socket(path: str) -> bool:
+def is_socket(path: str) -> bool:
     try:
         return stat.S_ISSOCK(os.stat(path).st_mode)
     except OSError:
@@ -98,7 +107,7 @@ def socket_is_socket(path: str) -> bool:
 def socket_live(socket: str, real: str, env: dict) -> bool:
     """Whether an Emacs actually answers on socket. An ungraceful disconnect
     leaves a stale socket file behind, so existence alone is not enough."""
-    if not socket_is_socket(socket):
+    if not is_socket(socket):
         return False
     probe_env = dict(env)
     probe_env["EMACS_SOCKET_NAME"] = socket

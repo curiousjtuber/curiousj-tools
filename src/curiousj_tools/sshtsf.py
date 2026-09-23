@@ -100,7 +100,6 @@ Config layout (all fields but the host key are optional):
 
 from __future__ import annotations
 
-import getpass
 import os
 import shlex
 import shutil
@@ -114,7 +113,7 @@ from typing import NamedTuple
 import click
 import tomllib
 
-from . import lists, logins
+from . import emacsclient_auto, lists, logins
 from .pick import choose
 
 CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
@@ -128,10 +127,11 @@ NEW_SESSION = "+ new session"
 # appends for the login it is made under, so two users on one host do not
 # fight over a file in a sticky /tmp. Shared with the remote side: its
 # `emacsclient-auto` looks at EMACSCLIENT_FORWARD_SOCKET, a whole path, and the
-# two agree on the default /tmp/emacs-remote-socket-USER. SSHTSF_ECF_SOCKET
-# moves this end's; the remote's knob then has to name the same path, -USER
-# and all.
-ECF_REMOTE_SOCKET = os.environ.get("SSHTSF_ECF_SOCKET") or "/tmp/emacs-remote-socket"
+# two agree on the default /tmp/emacs-remote-socket-USER, from its
+# SOCKET_PREFIX. SSHTSF_ECF_SOCKET moves this end's; the remote's knob then
+# has to name the same path, -USER and all.
+ECF_REMOTE_SOCKET = (os.environ.get("SSHTSF_ECF_SOCKET")
+                     or emacsclient_auto.SOCKET_PREFIX)
 
 # Extra options spliced into the waypipe argv, e.g. --compress zstd, --no-gpu,
 # --xwls, or --remote-bin for a host where waypipe is not on the PATH a
@@ -706,12 +706,7 @@ def ecf_local_socket() -> str | None:
     if proc.returncode != 0:
         return None
     path = proc.stdout.strip().strip('"')
-    if not path:
-        return None
-    try:
-        if not stat.S_ISSOCK(os.stat(path).st_mode):
-            return None
-    except OSError:
+    if not path or not emacsclient_auto.is_socket(path):
         return None
     return path
 
@@ -814,10 +809,7 @@ def remote_user_guess(target: str) -> str:
     """
     if "@" in target:
         return target.rpartition("@")[0]
-    try:
-        return getpass.getuser()
-    except (KeyError, OSError):
-        return str(os.getuid())
+    return emacsclient_auto.login_name()
 
 
 def connect(cfg: dict, host: str, session: str, dry_run: bool = False,

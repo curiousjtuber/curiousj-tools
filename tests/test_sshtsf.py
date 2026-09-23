@@ -115,7 +115,7 @@ class ConfigDirMixin:
             self.addCleanup(patcher.stop)
         # The login a dry run guesses for the remote socket, when the target
         # names none: pinned, so expectations do not depend on who runs this.
-        patcher = mock.patch.object(sshtsf.getpass, "getuser", return_value="me")
+        patcher = mock.patch("getpass.getuser", return_value="me")
         patcher.start()
         self.addCleanup(patcher.stop)
         # No ssh-lists file unless a test writes one: the real one would
