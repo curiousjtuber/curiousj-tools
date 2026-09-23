@@ -391,7 +391,9 @@ def table(raw: Any, main: str, allowed: tuple[str, ...], where: str) -> dict:
 
 def merge(parts: Sequence[Lists]) -> Lists:
     """The parts as one, in order, first definition of anything kept with a
-    warning for the others; then checked as a whole. Raises ToolError."""
+    warning for the others; then checked as a whole, and a name only entries
+    define given a table entry of its own, without a command, so every
+    operation a run can name is in the table. Raises ToolError."""
     out = Lists()
     seen: dict[tuple, str] = {}
     for part in parts:
@@ -406,7 +408,8 @@ def merge(parts: Sequence[Lists]) -> Lists:
         for name, op in part.operations.items():
             if keep(seen, ("operation", name), op.file, f"operation {name}"):
                 out.operations[name] = op
-    check(out)
+    for name, scope in check(out).items():
+        out.operations[name] = Operation(name, paths=EVERYTHING if scope == "path" else None)
     return out
 
 
@@ -418,10 +421,11 @@ def keep(seen: dict[tuple, str], key: tuple, file: str, what: str) -> bool:
     return True
 
 
-def check(found: Lists) -> None:
+def check(found: Lists) -> dict[str, str]:
     """The operations as a whole: members that exist, no cycles, an entry's
-    own operations agreeing with the table's on where they run; names only
-    entries define get a table entry of their own, without a command."""
+    own operations agreeing with the table's on where they run. Changes
+    nothing; returns the names only entries define, each with "login" or
+    "path" for where it runs. Raises ToolError."""
     ops = found.operations
     for op in ops.values():
         for member in op.members:
@@ -445,8 +449,7 @@ def check(found: Lists) -> None:
                 if op.per_path != (scope == "path"):
                     raise ToolError(f"{where}: operations {name!r} runs per "
                                     f"{'path' if op.per_path else 'login'}, not per {scope}")
-    for name, scope in entry_defined.items():
-        ops[name] = Operation(name, paths=EVERYTHING if scope == "path" else None)
+    return entry_defined
 
 
 def cycle(op: Operation, ops: dict[str, Operation], trail: list[str]) -> None:

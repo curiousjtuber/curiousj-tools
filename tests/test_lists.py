@@ -132,6 +132,9 @@ class Parse(unittest.TestCase):
                                                 operations={"git-pull": "git pull"})])
         # names only entries define become operations without a command, once merged
         self.assertEqual(found.operations, {})
+        # check() reports them and changes nothing; it used to add them itself
+        self.assertEqual(lists.check(found), {"sys": "login", "git-pull": "path"})
+        self.assertEqual(found.operations, {})
         self.assertEqual(lists.merge([found]).operations,
                          {"sys": Operation("sys"), "git-pull": Operation("git-pull", paths=attrs.EVERYTHING)})
         empty = lists.parse({"logins": [{"login": "a", "attributes": None, "operations": None}]})
