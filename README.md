@@ -13,6 +13,7 @@ as the editor on all of them. Python 3.11+, click and ruamel.yaml.
 | `emacsclient-auto` | `emacsclient` that reaches a forwarded Emacs when its socket is live, the local server otherwise; use it as `$EDITOR` on hosts you reach with `sshtsf -e` |
 | `ec-browse` | opens URLs in whichever Emacs `emacsclient-auto` reaches; use it as `$BROWSER` |
 | `distbuild hosts` | points `DISTCC_HOSTS`, `MAKEFLAGS`, `NINJAFLAGS` and `BUILDENV` in the same file at the `distccd` logins of the lists, each with its nproc plus a few jobs, by their wired address |
+| `distbuild distccd` | runs distccd on this host as a systemd user unit instead of the system one, doing the one-time root steps with sudo only where needed |
 | `distbuild makepkg` | writes the system makepkg.conf's `CFLAGS` and `RUSTFLAGS` into the user's with the CPU named instead of `native`, so every distcc host compiles for the same one; see [Distributed builds](#distributed-builds) |
 | `curiousj-tools init` | prints the shell functions that go with them, for an rc file to eval: `emacs-remote` and the `tmux-env-refresh` prompt hook; see [Shell integration](#shell-integration) |
 
@@ -385,6 +386,25 @@ bounded by memory more than by cores: a C++ compile can take a gigabyte.
 plus this machine's `nproc` (`-j` replaces the sum): a compile beyond the slots only waits for one,
 as distcc takes a slot before it preprocesses, but linking, `configure` checks and code generation
 run here and would otherwise leave a slot idle. `BUILDENV` gets `distcc` on. It warns when `CFLAGS` still say `-march=native`.
+
+```
+distbuild distccd [-n|--dry-run]
+```
+
+`distbuild distccd` moves this host's distccd from the system unit, which runs it as `distcc`, to a
+systemd user unit, `~/.config/systemd/user/distccd.service`, running it as you: its settings then
+live with your other files, and changing them needs no root. `DISTCC_ARGS` go in
+`~/.config/distccd.conf`, written once from `/etc/conf.d/distccd` without `--listen`, so distccd
+answers on every address and can start before the network is up; one that exists is yours and is
+kept. Compiles then run as you, able to read what you can; `--allow-private` admits only machines
+on private networks.
+
+The one-time root steps are checked first, and only those still needed run, with `sudo`, after a
+single password prompt: installing `distcc`, turning off the system unit (it holds the port),
+letting port 3632 through `ufw` when it is active, and `loginctl enable-linger`, so the unit runs
+with nobody logged in. Then the unit is enabled and started, or restarted when it changed. `-n`
+prints the files and commands instead. It sets up the host it runs on; for the others, run it
+there.
 
 ## Development
 

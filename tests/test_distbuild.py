@@ -405,5 +405,130 @@ class TestHostsCli(unittest.TestCase):
         self.assertEqual(self.probed, ["alice@my-mac.local"])
 
 
+class TestDistccdArgs(unittest.TestCase):
+    def test_listen_dropped_in_either_form(self):
+        for args in ("--allow-private --listen 10.0.0.5", "--listen=10.0.0.5 --allow-private"):
+            self.assertEqual(distbuild.distccd_args(f'DISTCC_ARGS="{args}"\n'), "--allow-private")
+
+    def test_other_args_kept(self):
+        conf = '#DISTCC_ARGS="--jobs 2"\nDISTCC_ARGS="--allow 10.0.0.0/8 --jobs 20 --listen=10.0.0.5"\n'
+        self.assertEqual(distbuild.distccd_args(conf), "--allow 10.0.0.0/8 --jobs 20")
+
+    def test_none_admits_private_networks(self):
+        for conf in ("", 'DISTCC_ARGS="--listen 10.0.0.5"\n'):
+            self.assertEqual(distbuild.distccd_args(conf), "--allow-private")
+
+
+class TestDistccdCli(unittest.TestCase):
+    RULE = "### tuple ### allow tcp 3632 0.0.0.0/0 any 0.0.0.0/0 in\n-A ufw-user-input -p tcp --dport 3632 -j ACCEPT\n"
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = pathlib.Path(tmp.name)
+        (self.root / "distccd").write_text('DISTCC_ARGS="--allow-private --listen=10.0.0.5"\n')
+        (self.root / "user.rules").write_text("")
+        self.config = self.root / "config"
+        # What the checks print: a machine with the system unit on, ufw on
+        # without the rule, and no linger.
+        self.state = {
+            ("pacman", "-Q", "distcc"): "distcc 3.4-15",
+            ("systemctl", "is-enabled", "distccd.service"): "enabled",
+            ("systemctl", "is-active", "distccd.service"): "active",
+            ("systemctl", "is-active", "ufw.service"): "active",
+            ("loginctl", "show-user", "alice", "-p", "Linger", "--value"): "no",
+            ("systemctl", "--user", "is-enabled", "distccd.service"): "disabled",
+            ("systemctl", "--user", "is-active", "distccd.service"): "inactive",
+        }
+        self.ran = []
+        self.fail = set()
+
+        def run(argv):
+            self.ran.append(argv)
+            if argv[:3] == ["systemctl", "--user", "enable"] or argv[:3] == ["systemctl", "--user", "restart"]:
+                self.state[("systemctl", "--user", "is-active", "distccd.service")] = "active"
+                self.state[("systemctl", "--user", "is-enabled", "distccd.service")] = "enabled"
+            return 1 if argv[0] in self.fail else 0
+        for patch in (mock.patch.object(distbuild, "DISTCCD_CONF", str(self.root / "distccd")),
+                      mock.patch.object(distbuild, "UFW_RULES", str(self.root / "user.rules")),
+                      mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.config)}),
+                      mock.patch.object(distbuild.sshutil, "login_name", return_value="alice"),
+                      mock.patch.object(distbuild, "output", side_effect=lambda argv: self.state.get(tuple(argv), "")),
+                      mock.patch.object(distbuild, "run", side_effect=run)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def run_cli(self, *argv: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = distbuild.main(["distccd", *argv])
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_sets_up_in_order(self):
+        rc, out, err = self.run_cli()
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.ran, [
+            ["sudo", "-v"],
+            ["sudo", "systemctl", "disable", "--now", "distccd.service"],
+            ["sudo", "ufw", "allow", "3632/tcp"],
+            ["sudo", "loginctl", "enable-linger", "alice"],
+            ["systemctl", "--user", "daemon-reload"],
+            ["systemctl", "--user", "enable", "--now", "distccd.service"],
+        ])
+        self.assertEqual((self.config / "distccd.conf").read_text(), 'DISTCC_ARGS="--allow-private"\n')
+        unit = (self.config / "systemd" / "user" / "distccd.service").read_text()
+        self.assertIn(f"EnvironmentFile={self.config / 'distccd.conf'}\n", unit)
+        self.assertIn("the system distccd holds the port: sudo systemctl disable", err)
+
+    def test_nothing_left_to_do(self):
+        self.run_cli()
+        self.state.update({("systemctl", "is-enabled", "distccd.service"): "disabled",
+                           ("systemctl", "is-active", "distccd.service"): "inactive",
+                           ("loginctl", "show-user", "alice", "-p", "Linger", "--value"): "yes"})
+        (self.root / "user.rules").write_text(self.RULE)
+        self.ran.clear()
+        rc, out, _ = self.run_cli()
+        self.assertEqual((rc, self.ran), (0, []))
+        self.assertIn("(unchanged)", out)
+
+    def test_missing_distcc_is_installed_first(self):
+        del self.state[("pacman", "-Q", "distcc")]
+        self.run_cli()
+        self.assertEqual(self.ran[1], ["sudo", "pacman", "-S", "--needed", "distcc"])
+
+    def test_the_users_args_are_kept(self):
+        (self.config).mkdir()
+        (self.config / "distccd.conf").write_text('DISTCC_ARGS="--allow 10.0.0.0/8"\n')
+        self.run_cli()
+        self.assertEqual((self.config / "distccd.conf").read_text(), 'DISTCC_ARGS="--allow 10.0.0.0/8"\n')
+
+    def test_changed_unit_restarts_a_running_one(self):
+        self.run_cli()
+        (self.config / "systemd" / "user" / "distccd.service").write_text("old\n")
+        self.ran.clear()
+        self.run_cli()
+        self.assertEqual(self.ran[-2:], [["systemctl", "--user", "daemon-reload"],
+                                         ["systemctl", "--user", "restart", "distccd.service"]])
+
+    def test_dry_run_changes_nothing(self):
+        rc, out, _ = self.run_cli("-n")
+        self.assertEqual((rc, self.ran), (0, []))
+        self.assertFalse(self.config.exists())
+        self.assertIn("sudo systemctl disable --now distccd.service    # the system distccd holds the port", out)
+        self.assertIn('DISTCC_ARGS="--allow-private"', out)
+
+    def test_sudo_refused_changes_nothing(self):
+        self.fail.add("sudo")
+        rc, _, err = self.run_cli()
+        self.assertEqual((rc, self.ran), (1, [["sudo", "-v"]]))
+        self.assertIn("nothing changed", err)
+        self.assertFalse(self.config.exists())
+
+    def test_unreadable_ufw_rules_run_the_step(self):
+        (self.root / "user.rules").unlink()
+        self.run_cli()
+        self.assertIn(["sudo", "ufw", "allow", "3632/tcp"], self.ran)
+
+
 if __name__ == "__main__":
     unittest.main()

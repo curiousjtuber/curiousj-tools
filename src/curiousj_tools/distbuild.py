@@ -3,6 +3,7 @@
     distbuild makepkg [-n|--dry-run] [--rust-cpu CPU] [--lto|--no-lto] [TARGET]
     distbuild hosts [-n|--dry-run] [-e|--extra N] [-j|--jobs N] [-l|--local] [--localslots N]
                     [-a TERM]... [-p] [-f FILE]...
+    distbuild distccd [-n|--dry-run]
 
 'makepkg' writes the compiler flags of the system makepkg.conf into the
 user's, ~/.config/pacman/makepkg.conf (under XDG_CONFIG_HOME when set), with
@@ -56,6 +57,23 @@ with every job slot counted, plus this machine's nproc (-j replaces the sum):
 a compile beyond the slots only waits for one, but linking, configure checks
 and code generation run here and would otherwise leave a slot idle. BUILDENV gets 'distcc' turned on, from the system file
 if the user's does not set it. The other lines are kept as they are.
+
+'distccd' runs distccd on this machine as a systemd user unit, as the user
+running this, in place of the system unit that runs it as 'distcc': its
+settings then live with the user's other files, and changing them needs no
+root. The unit is ~/.config/systemd/user/distccd.service (under
+XDG_CONFIG_HOME when set) and its DISTCC_ARGS are in ~/.config/distccd.conf,
+written once from /etc/conf.d/distccd without --listen, so distccd answers
+on every address and starts before the network is up; an existing one is
+the user's and kept. Compiles then run as the user, able to read what the
+user can; --allow-private admits only machines on private networks.
+
+The one-time root steps are checked first and only those still needed are
+run, with sudo, after one password prompt: installing distcc, turning the
+system unit off (it holds the port), letting port 3632 through ufw when it
+is active, and lingering, so the unit runs with nobody logged in. Then the
+unit is enabled and started, or restarted when it changed. -n prints the
+files and commands instead.
 """
 
 from __future__ import annotations
@@ -78,6 +96,21 @@ from .lists import Login, ToolError
 
 SYSTEM_CONF = pathlib.Path("/etc/makepkg.conf")
 DISTCCD_CONF = "/etc/conf.d/distccd"
+UFW_RULES = "/etc/ufw/user.rules"
+USER_UNIT = """\
+[Unit]
+Description=Distributed C, C++ and Objective-C compiler, as the user
+Documentation=man:distccd(1)
+
+[Service]
+EnvironmentFile={args}
+ExecStart=/usr/bin/distccd --no-detach --daemon $DISTCC_ARGS
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+"""
 DISTCCD_PORT = 3632
 DEFAULT_TERM = "distccd"
 
@@ -454,6 +487,125 @@ def hosts(opts: logins.LoginOpts, extra: int, jobs: int | None, local: bool, loc
     jobs = jobs or slots(line) + local_nproc()
     return write(path, old, apply(old, host_overrides(old, confs, line, jobs)), dry_run,
                  f'DISTCC_HOSTS="{line}", -j{jobs}')
+
+
+@cli.command(cls=cmdline.Command, help=__doc__)
+@click.option("-n", "--dry-run", is_flag=True, help="Print the files and commands; change nothing.")
+def distccd(dry_run: bool) -> int:
+    config_home = pathlib.Path(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"))
+    args_path = config_home / "distccd.conf"
+    unit_path = config_home / "systemd" / "user" / "distccd.service"
+
+    writes = []
+    if not args_path.exists():
+        try:
+            system = pathlib.Path(DISTCCD_CONF).read_text()
+        except OSError:
+            system = ""
+        writes.append((args_path, f'DISTCC_ARGS="{distccd_args(system)}"\n'))
+    unit = USER_UNIT.format(args=args_path)
+    if not unit_path.exists() or unit_path.read_text() != unit:
+        writes.append((unit_path, unit))
+
+    steps = root_steps(sshutil.login_name())
+    user = [["systemctl", "--user", "daemon-reload"]] if writes else []
+    running = output(["systemctl", "--user", "is-active", "distccd.service"]) == "active"
+    if output(["systemctl", "--user", "is-enabled", "distccd.service"]) != "enabled" or not running:
+        user.append(["systemctl", "--user", "enable", "--now", "distccd.service"])
+    if running and writes:
+        user.append(["systemctl", "--user", "restart", "distccd.service"])
+
+    if dry_run:
+        for path, text in writes:
+            click.echo(f"--- {path}\n{text}", nl=False)
+        for why, argv in steps:
+            click.echo(f"{shlex.join(argv)}    # {why}")
+        for argv in user:
+            click.echo(shlex.join(argv))
+        return 0
+
+    if steps:
+        for why, argv in steps:
+            click.echo(f"distbuild: {why}: {shlex.join(argv)}", err=True)
+        if run(["sudo", "-v"]) != 0:
+            raise click.ClickException("sudo refused; nothing changed")
+        for why, argv in steps:
+            if run(argv) != 0:
+                raise click.ClickException(f"failed: {shlex.join(argv)}")
+    for path, text in writes:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+        click.echo(f"wrote {path}")
+    for argv in user:
+        if run(argv) != 0:
+            raise click.ClickException(f"failed: {shlex.join(argv)}")
+    state = output(["systemctl", "--user", "is-active", "distccd.service"])
+    if state != "active":
+        raise click.ClickException(f"distccd is {state or 'not running'}; "
+                                   "see `journalctl --user -u distccd`")
+    click.echo(f"distccd runs as {sshutil.login_name()}"
+               + ("" if writes or steps or user else " (unchanged)"))
+    return 0
+
+
+def distccd_args(system_conf: str) -> str:
+    """DISTCC_ARGS for the user unit: the system file's without --listen, or
+    --allow-private when that leaves none (distccd admits no one by default)."""
+    found = [a for a in assignments(system_conf) if a.name == "DISTCC_ARGS"]
+    words = " ".join(shlex.split(found[-1].text.split("=", 1)[1])).split() if found else []
+    kept, skip = [], False
+    for word in words:
+        if skip:
+            skip = False
+        elif word == "--listen":
+            skip = True
+        elif not word.startswith("--listen="):
+            kept.append(word)
+    return " ".join(kept) or "--allow-private"
+
+
+def output(argv: list[str]) -> str:
+    """argv's stdout, stripped; what it printed even when it failed, as
+    `systemctl is-enabled` does for "disabled". "" when it cannot run."""
+    try:
+        return subprocess.run(argv, capture_output=True, text=True).stdout.strip()
+    except OSError:
+        return ""
+
+
+def run(argv: list[str]) -> int:
+    """argv on this terminal, so sudo and pacman can ask."""
+    try:
+        return subprocess.run(argv).returncode
+    except OSError:
+        return 127
+
+
+def ufw_allows_distccd() -> bool | None:
+    """Whether ufw's rules let DISTCCD_PORT in; None when they cannot be read."""
+    try:
+        rules = pathlib.Path(UFW_RULES).read_text()
+    except OSError:
+        return None
+    return re.search(rf"^### tuple ### allow tcp {DISTCCD_PORT} ", rules, re.M) is not None
+
+
+def root_steps(user: str) -> list[tuple[str, list[str]]]:
+    """(why, command) for each one-time root step still needed, in the order
+    they have to run: the system unit is off before the user unit starts."""
+    steps = []
+    if not output(["pacman", "-Q", "distcc"]):
+        steps.append(("distcc is not installed", ["sudo", "pacman", "-S", "--needed", "distcc"]))
+    if (output(["systemctl", "is-enabled", "distccd.service"]) == "enabled"
+            or output(["systemctl", "is-active", "distccd.service"]) == "active"):
+        steps.append(("the system distccd holds the port",
+                      ["sudo", "systemctl", "disable", "--now", "distccd.service"]))
+    if output(["systemctl", "is-active", "ufw.service"]) == "active" and not ufw_allows_distccd():
+        steps.append(("ufw is on", ["sudo", "ufw", "allow", f"{DISTCCD_PORT}/tcp"]))
+    if output(["loginctl", "show-user", user, "-p", "Linger", "--value"]) != "yes":
+        steps.append(("the unit should run with nobody logged in",
+                      ["sudo", "loginctl", "enable-linger", user]))
+    return steps
 
 
 def read_confs() -> tuple[pathlib.Path, str, list[tuple[pathlib.Path, str]]]:
