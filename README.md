@@ -12,6 +12,7 @@ as the editor on all of them. Python 3.11+, click and ruamel.yaml.
 | `pick-lines` | the multi-select picker behind `-p` and `-C`/`--pick-paths`: fzf when present, else a numbered menu |
 | `emacsclient-auto` | `emacsclient` that reaches a forwarded Emacs when its socket is live, the local server otherwise; use it as `$EDITOR` on hosts you reach with `sshtsf -e` |
 | `ec-browse` | opens URLs in whichever Emacs `emacsclient-auto` reaches; use it as `$BROWSER` |
+| `distbuild makepkg` | writes the system makepkg.conf's `CFLAGS` and `RUSTFLAGS` into the user's with the CPU named instead of `native`, so every distcc host compiles for the same one; see [Distributed builds](#distributed-builds) |
 | `curiousj-tools init` | prints the shell functions that go with them, for an rc file to eval: `emacs-remote` and the `tmux-env-refresh` prompt hook; see [Shell integration](#shell-integration) |
 
 ## Install
@@ -34,6 +35,7 @@ Optional dependencies, by command:
 | `fzf` | pickers everywhere; without it they fall back to a numbered menu |
 | `waypipe`, `socat` | `sshtsf -w` (Wayland forwarding) and `sshtsf` `ecf_port` relays |
 | `emacsclient` | `emacsclient-auto`, `ec-browse`, `sshtsf -e` |
+| `gcc`, `rustc` | `distbuild makepkg` without a `TARGET`, to learn what `native` is here |
 
 `sshtsf` treats every tool but `ssh` as optional: a missing `waypipe` (here or on the remote),
 a missing `socat` on the remote or no running Emacs server is a warning on stderr, and the
@@ -323,6 +325,29 @@ export SSH_LISTS_PATH=~/src/my-lists     # holds ssh-lists.yaml, and ssh-lists-l
 
 The extension names the format. YAML is read with ruamel.yaml, TOML and JSON with the standard
 library.
+
+## Distributed builds
+
+```
+distbuild makepkg [-n|--dry-run] [--rust-cpu CPU] [TARGET]
+```
+
+A distcc host told `-march=native` compiles for its own CPU, so a package built across several is
+a mix. `distbuild makepkg` copies the flags of `/etc/makepkg.conf` and `/etc/makepkg.conf.d/*.conf`
+into `~/.config/pacman/makepkg.conf` (under `XDG_CONFIG_HOME` when set) with the CPU named:
+`-march=TARGET` in `CFLAGS`, where an `-mtune=native` becomes `-mtune=TARGET` too, and
+`target-cpu=CPU` in `RUSTFLAGS`. `TARGET` defaults to what `gcc -march=native` resolves to here;
+`CPU` to `TARGET`, or to rustc's own reading of `native` when `TARGET` is not given.
+
+An assignment built on those flags, such as `CXXFLAGS="$CFLAGS ..."`, is copied along with them:
+the system file expanded it with the native `CFLAGS` before the user's file is read, so
+overriding `CFLAGS` alone leaves C++ built for `native`. Each assignment replaces its setting in
+the user's file, or is added after the one before it, else at the end; `MAKEFLAGS`, `BUILDENV`,
+`DISTCC_HOSTS` and the rest stay as they are. Run it again after a system update changes the flags.
+`-n` prints the change as a diff.
+
+makepkg reads `~/.makepkg.conf` only while `~/.config/pacman/makepkg.conf` is missing, so with
+the former present and the latter not, `distbuild makepkg` stops and asks for the file to be moved.
 
 ## Development
 
