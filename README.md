@@ -329,7 +329,7 @@ library.
 ## Distributed builds
 
 ```
-distbuild makepkg [-n|--dry-run] [--rust-cpu CPU] [TARGET]
+distbuild makepkg [-n|--dry-run] [--rust-cpu CPU] [--lto|--no-lto] [TARGET]
 ```
 
 A distcc host told `-march=native` compiles for its own CPU, so a package built across several is
@@ -345,6 +345,12 @@ overriding `CFLAGS` alone leaves C++ built for `native`. Each assignment replace
 the user's file, or is added after the one before it, else at the end; `MAKEFLAGS`, `BUILDENV`,
 `DISTCC_HOSTS` and the rest stay as they are. Run it again after a system update changes the flags.
 `-n` prints the change as a diff.
+
+`--no-lto` turns `lto` off in `OPTIONS` (from the user's file if it sets them, else the system's),
+`--lto` back on; without either, `OPTIONS` is left alone. With LTO, optimizing and code generation
+move to the link, which runs on this machine, so a distcc host does only the parsing half of each
+compile; and GCC's `-flto=auto` joins make's jobserver, so a big link can start as many processes
+as `-j` allows. A PKGBUILD's own `options=(lto)` or `options=(!lto)` still wins.
 
 makepkg reads `~/.makepkg.conf` only while `~/.config/pacman/makepkg.conf` is missing, so with
 the former present and the latter not, `distbuild makepkg` stops and asks for the file to be moved.

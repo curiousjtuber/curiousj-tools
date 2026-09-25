@@ -1,6 +1,6 @@
 """distbuild -- set up builds shared across hosts with distcc.
 
-    distbuild makepkg [-n|--dry-run] [--rust-cpu CPU] [TARGET]
+    distbuild makepkg [-n|--dry-run] [--rust-cpu CPU] [--lto|--no-lto] [TARGET]
 
 'makepkg' writes the compiler flags of the system makepkg.conf into the
 user's, ~/.config/pacman/makepkg.conf (under XDG_CONFIG_HOME when set), with
@@ -13,6 +13,11 @@ TARGET defaults to what `gcc -march=native` resolves to here, and CPU to
 TARGET, or to what rustc resolves "native" to when TARGET is not given.
 Whatever -march the system file has is replaced, and an "-mtune=native"
 becomes "-mtune=TARGET" alongside it.
+
+--no-lto turns 'lto' off in OPTIONS, --lto back on; without either, OPTIONS
+is left alone. With LTO the optimizing and code generation happen when
+linking, on this machine, so a distcc host does only the parsing half of a
+compile. A PKGBUILD's own options=(lto) or options=(!lto) still wins.
 
 The flags are taken from /etc/makepkg.conf and /etc/makepkg.conf.d/*.conf,
 the last setting of each winning as it does for makepkg. An assignment built
@@ -111,7 +116,7 @@ def _references(text: str, name: str) -> bool:
 class Override:
     name: str
     text: str
-    source: pathlib.Path
+    note: str  # the comment over it when it is added at the end
 
 
 def overrides(confs: list[tuple[pathlib.Path, str]], march: str, rust_cpu: str) -> list[Override]:
@@ -125,7 +130,7 @@ def overrides(confs: list[tuple[pathlib.Path, str]], march: str, rust_cpu: str) 
     for path, text in confs:
         for a in assignments(text):
             last.pop(a.name, None)  # re-inserted, so the order is the last setting's
-            last[a.name] = Override(a.name, a.text, path)
+            last[a.name] = Override(a.name, a.text, f"from {path}")
     picked = []
     for key in ("CFLAGS", "RUSTFLAGS"):
         if key in last:
@@ -139,9 +144,9 @@ def overrides(confs: list[tuple[pathlib.Path, str]], march: str, rust_cpu: str) 
 
 def apply(user_text: str, wanted: list[Override]) -> str:
     """user_text with each wanted assignment in place of its last setting
-    there. One it lacks follows the one before it from the same system file,
-    as CXXFLAGS follows CFLAGS; failing that it is added at the end, under
-    the file it came from."""
+    there. One it lacks follows the one before it with the same note, as
+    CXXFLAGS follows CFLAGS; failing that it is added at the end, under
+    its note."""
     text = user_text
     appended: list[Override] = []
     after, prev = None, None  # where the previous one ended in text, and it
@@ -151,22 +156,39 @@ def apply(user_text: str, wanted: list[Override]) -> str:
             a = mine[-1]
             text = text[:a.start] + o.text + text[a.end:]
             after = a.start + len(o.text)
-        elif after is not None and prev.source == o.source:
+        elif after is not None and prev.note == o.note:
             text = text[:after] + "\n" + o.text + text[after:]
             after += 1 + len(o.text)
         else:
             appended.append(o)
             after = None
         prev = o
-    source = None
+    note = None
     for o in appended:
         if text and not text.endswith("\n"):
             text += "\n"
-        if o.source != source:
-            text += ("" if not text or text.endswith("\n\n") else "\n") + f"#-- from {o.source}\n"
-            source = o.source
+        if o.note != note:
+            text += ("" if not text or text.endswith("\n\n") else "\n") + f"#-- {o.note}\n"
+            note = o.note
         text += o.text + "\n"
     return text
+
+
+def set_option(array: str, word: str, on: bool) -> str:
+    """An OPTIONS=(...) or BUILDENV=(...) assignment with word on, or off
+    ("!word"), added at the front when the array lacks it either way."""
+    have = re.compile(rf"(?<![\w!-])!?{re.escape(word)}(?![\w-])")
+    want = word if on else f"!{word}"
+    if have.search(array):
+        return have.sub(want, array)
+    return array.replace("(", f"({want} ", 1)
+
+
+def last_array(user_text: str, confs: list[tuple[pathlib.Path, str]], name: str) -> str:
+    """The user's setting of the array name, else the system files' last."""
+    return ([a.text for a in assignments(user_text) if a.name == name]
+            or [a.text for _, text in confs for a in assignments(text) if a.name == name]
+            or [f"{name}=()"])[-1]
 
 
 def native_march() -> str | None:
@@ -199,8 +221,9 @@ def cli() -> None:
 @cli.command(cls=cmdline.Command, help=__doc__)
 @click.option("-n", "--dry-run", is_flag=True, help="Print the change as a diff; write nothing.")
 @click.option("--rust-cpu", metavar="CPU", help="The target-cpu for RUSTFLAGS; default TARGET.")
+@click.option("--lto/--no-lto", default=None, help="Turn 'lto' on or off in OPTIONS; default leave it.")
 @click.argument("target", required=False)
-def makepkg(target: str | None, rust_cpu: str | None, dry_run: bool) -> int:
+def makepkg(target: str | None, rust_cpu: str | None, lto: bool | None, dry_run: bool) -> int:
     march = target or native_march()
     if not march:
         raise click.ClickException("cannot tell what -march=native is here; name the TARGET")
@@ -223,6 +246,11 @@ def makepkg(target: str | None, rust_cpu: str | None, dry_run: bool) -> int:
         raise click.ClickException(f"no CFLAGS in {SYSTEM_CONF}")
 
     old = path.read_text() if path.exists() else ""
+    what = f"{', '.join(o.name for o in wanted)} with -march={march}, target-cpu={rust_cpu}"
+    if lto is not None:
+        options = set_option(last_array(old, confs, "OPTIONS"), "lto", lto)
+        wanted.append(Override("OPTIONS", options, "set by `distbuild makepkg`"))
+        what += ", OPTIONS with " + ("lto" if lto else "!lto")
     new = apply(old, wanted)
     if dry_run:
         sys.stdout.writelines(difflib.unified_diff(
@@ -232,9 +260,7 @@ def makepkg(target: str | None, rust_cpu: str | None, dry_run: bool) -> int:
     if new != old:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(new)
-    names = ", ".join(o.name for o in wanted)
-    click.echo(f"{path}: {names} with -march={march}, target-cpu={rust_cpu}"
-               + ("" if new != old else " (unchanged)"))
+    click.echo(f"{path}: {what}" + ("" if new != old else " (unchanged)"))
     return 0
 
 

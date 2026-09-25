@@ -82,8 +82,8 @@ class TestOverrides(unittest.TestCase):
     def test_a_later_file_wins(self):
         later = (pathlib.Path("/etc/makepkg.conf.d/zz.conf"), 'CFLAGS="-march=native -O2"\n')
         got = distbuild.overrides(confs() + [later], "znver4", "znver4")
-        self.assertEqual([(o.name, str(o.source)) for o in got][:1],
-                         [("CFLAGS", "/etc/makepkg.conf.d/zz.conf")])
+        self.assertEqual([(o.name, o.note) for o in got][:1],
+                         [("CFLAGS", "from /etc/makepkg.conf.d/zz.conf")])
 
     def test_without_rust_conf(self):
         got = distbuild.overrides(confs(rust=None), "znver4", "znver4")
@@ -151,6 +151,16 @@ class TestApply(unittest.TestCase):
         ])
 
 
+class TestSetOption(unittest.TestCase):
+    def test_set_option(self):
+        cases = {("OPTIONS=(strip !debug lto !autodeps)", "lto", False): "OPTIONS=(strip !debug !lto !autodeps)",
+                 ("OPTIONS=(strip !lto)", "lto", True): "OPTIONS=(strip lto)",
+                 ("OPTIONS=(!lto-extra lto)", "lto", False): "OPTIONS=(!lto-extra !lto)",
+                 ("OPTIONS=(strip)", "lto", False): "OPTIONS=(!lto strip)"}
+        for (before, word, on), after in cases.items():
+            self.assertEqual(distbuild.set_option(before, word, on), after)
+
+
 class TestCli(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -204,6 +214,18 @@ class TestCli(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("move it to", err)
         self.assertFalse(self.user.exists())
+
+    def test_no_lto_from_the_system_options(self):
+        (self.root / "etc" / "makepkg.conf").write_text(SYSTEM + "OPTIONS=(strip lto !debug)\n")
+        self.run_cli("--no-lto")
+        self.assertIn("OPTIONS=(strip !lto !debug)", self.user.read_text())
+        self.run_cli("--lto")
+        self.assertIn("OPTIONS=(strip lto !debug)", self.user.read_text())
+
+    def test_options_left_alone_by_default(self):
+        (self.root / "etc" / "makepkg.conf").write_text(SYSTEM + "OPTIONS=(strip lto !debug)\n")
+        self.run_cli()
+        self.assertNotIn("OPTIONS", self.user.read_text())
 
     def test_no_native_march(self):
         with mock.patch.object(distbuild, "native_march", return_value=None):
