@@ -63,18 +63,27 @@ def attr_terms(ctx, param, value) -> tuple[attrs.Term, ...]:
         raise click.BadParameter(str(e).removeprefix("term: "))
 
 
-def login_options(f):
+def login_options(f=None, *, no_local: bool = True):
     """The -N, -a, -p and -f every login tool takes; the callback gets them
-    as one LoginOpts named opts."""
-    @click.option("-f", "files", metavar="FILE", multiple=True,
-                  help="an ssh-lists file to read (repeatable; these and no other)")
-    @click.option("-p", "--pick", "choose", is_flag=True, help="choose logins interactively")
-    @click.option("-a", "--attr", "terms", metavar="TERM", multiple=True, callback=attr_terms,
-                  help="keep logins with the attribute: key, key=value, !key, key!=value (repeatable)")
-    @click.option("-N", "--no-local", is_flag=True, help="leave localhost out")
+    as one LoginOpts named opts. no_local=False leaves -N out, for a tool
+    without localhost unless asked."""
+    if f is None:
+        return functools.partial(login_options, no_local=no_local)
+    options = [
+        click.option("-f", "files", metavar="FILE", multiple=True,
+                     help="an ssh-lists file to read (repeatable; these and no other)"),
+        click.option("-p", "--pick", "choose", is_flag=True, help="choose logins interactively"),
+        click.option("-a", "--attr", "terms", metavar="TERM", multiple=True, callback=attr_terms,
+                     help="keep logins with the attribute: key, key=value, !key, key!=value (repeatable)"),
+    ]
+    if no_local:
+        options.append(click.option("-N", "--no-local", is_flag=True, help="leave localhost out"))
+
     @functools.wraps(f)
-    def wrapper(no_local, terms, choose, files, **kw):
+    def wrapper(terms, choose, files, no_local=False, **kw):
         return f(LoginOpts(no_local, choose, tuple(files), terms), **kw)
+    for option in reversed(options):  # as decorators stack: the first listed is outermost
+        wrapper = option(wrapper)
     return wrapper
 
 

@@ -12,6 +12,7 @@ as the editor on all of them. Python 3.11+, click and ruamel.yaml.
 | `pick-lines` | the multi-select picker behind `-p` and `-C`/`--pick-paths`: fzf when present, else a numbered menu |
 | `emacsclient-auto` | `emacsclient` that reaches a forwarded Emacs when its socket is live, the local server otherwise; use it as `$EDITOR` on hosts you reach with `sshtsf -e` |
 | `ec-browse` | opens URLs in whichever Emacs `emacsclient-auto` reaches; use it as `$BROWSER` |
+| `distbuild hosts` | points `DISTCC_HOSTS`, `MAKEFLAGS`, `NINJAFLAGS` and `BUILDENV` in the same file at the `distccd` logins of the lists, each with its nproc plus a few jobs, by their wired address |
 | `distbuild makepkg` | writes the system makepkg.conf's `CFLAGS` and `RUSTFLAGS` into the user's with the CPU named instead of `native`, so every distcc host compiles for the same one; see [Distributed builds](#distributed-builds) |
 | `curiousj-tools init` | prints the shell functions that go with them, for an rc file to eval: `emacs-remote` and the `tmux-env-refresh` prompt hook; see [Shell integration](#shell-integration) |
 
@@ -354,6 +355,36 @@ as `-j` allows. A PKGBUILD's own `options=(lto)` or `options=(!lto)` still wins.
 
 makepkg reads `~/.makepkg.conf` only while `~/.config/pacman/makepkg.conf` is missing, so with
 the former present and the latter not, `distbuild makepkg` stops and asks for the file to be moved.
+
+```
+distbuild hosts [-n|--dry-run] [-e|--extra N] [-j|--jobs N] [-l|--local] [--localslots N]
+                [-a TERM]... [-p] [-f FILE]...
+```
+
+`distbuild hosts` fills in the distcc side of the same file from the [ssh-lists](#hosts-and-batch-runs)
+logins with the `distccd` attribute (`-a` replaces that term; `-p` and `-f` as for
+`ssh-logins`). This machine is added as `localhost` only with `-l`/`--local`: it already
+preprocesses every job and links, and with LTO off, a git and a cmake build each ran faster
+without it than with a `localhost` slot per core. Each login is asked over ssh, without a prompt,
+for its `nproc`, its `/etc/conf.d/distccd` and its addresses, and gets `nproc + N` jobs (`-e`,
+default 4) in `DISTCC_HOSTS`. distcc takes a first slot on every host, in list order, before a second
+on any, so the limits set each host's share and the order only breaks ties: most cores first,
+`localhost` after its equals since it also preprocesses and links. A login is
+named by the first address its distccd answers on, wired before wifi; a `--listen` in
+`/etc/conf.d/distccd` is the only one it answers on, and is reported when it is the wifi address
+of a host that has a wired one. A login that cannot be asked, or whose distccd does not answer on
+port 3632, is left out with a warning.
+
+`--localslots N` (default 8) ends `DISTCC_HOSTS`: how many compiles run here at once when distcc does
+not distribute them, among them the ones that failed on a host and are retried here. distcc's own
+default is 4, and a host that fails a compile is passed over for a minute, so without `localhost` a
+package whose compiles cannot be distributed (C++20 modules, for one) would build 4 wide. `N` is
+bounded by memory more than by cores: a C++ compile can take a gigabyte.
+
+`MAKEFLAGS` and `NINJAFLAGS` get `-j` with every slot counted,
+plus this machine's `nproc` (`-j` replaces the sum): a compile beyond the slots only waits for one,
+as distcc takes a slot before it preprocesses, but linking, `configure` checks and code generation
+run here and would otherwise leave a slot idle. `BUILDENV` gets `distcc` on. It warns when `CFLAGS` still say `-march=native`.
 
 ## Development
 
