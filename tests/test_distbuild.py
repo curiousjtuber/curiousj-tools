@@ -395,6 +395,19 @@ class TestHostsCli(unittest.TestCase):
     def test_slots(self):
         self.assertEqual(distbuild.slots("10.0.0.5/20 localhost/12 --localslots=8"), 32)
 
+    def test_distcc_hosts_file(self):
+        rc, out, _ = self.run_cli()
+        text = (self.root / ".distcc" / "hosts").read_text()
+        self.assertTrue(text.startswith("# written by `distbuild hosts`"))
+        self.assertTrue(text.endswith("\n10.0.0.5/20 --localslots=8\n"))
+        self.assertIn("for distcc outside makepkg: -j28 there", out)
+
+    def test_distcc_hosts_file_under_distcc_dir(self):
+        with mock.patch.dict(os.environ, {"DISTCC_DIR": str(self.root / "dd")}):
+            self.run_cli()
+        self.assertTrue((self.root / "dd" / "hosts").exists())
+        self.assertFalse((self.root / ".distcc").exists())
+
     def test_localslots(self):
         self.run_cli("--localslots", "4")
         self.assertIn('DISTCC_HOSTS="10.0.0.5/20 --localslots=4"', self.user.read_text())

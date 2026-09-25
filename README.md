@@ -387,6 +387,10 @@ plus this machine's `nproc` (`-j` replaces the sum): a compile beyond the slots 
 as distcc takes a slot before it preprocesses, but linking, `configure` checks and code generation
 run here and would otherwise leave a slot idle. `BUILDENV` gets `distcc` on. It warns when `CFLAGS` still say `-march=native`.
 
+The same `DISTCC_HOSTS` goes to `~/.distcc/hosts` (under `DISTCC_DIR` when set), replacing it, for
+distcc run outside makepkg: `make -jN CC="distcc gcc"`, or with `/usr/lib/distcc/bin` first on `PATH`.
+`MAKEFLAGS` is makepkg's, so the `-j` to use there is printed.
+
 ```
 distbuild distccd [-n|--dry-run]
 ```

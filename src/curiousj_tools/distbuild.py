@@ -57,6 +57,9 @@ with every job slot counted, plus this machine's nproc (-j replaces the sum):
 a compile beyond the slots only waits for one, but linking, configure checks
 and code generation run here and would otherwise leave a slot idle. BUILDENV gets 'distcc' turned on, from the system file
 if the user's does not set it. The other lines are kept as they are.
+The same DISTCC_HOSTS goes to ~/.distcc/hosts (under DISTCC_DIR when set),
+replacing it, for distcc run outside makepkg, which has no MAKEFLAGS of its
+own: the -j to use there is printed.
 
 'distccd' runs distccd on this machine as a systemd user unit, as the user
 running this, in place of the system unit that runs it as 'distcc': its
@@ -485,8 +488,22 @@ def hosts(opts: logins.LoginOpts, extra: int, jobs: int | None, local: bool, loc
 
     line = distcc_hosts(helpers, extra, localslots)
     jobs = jobs or slots(line) + local_nproc()
-    return write(path, old, apply(old, host_overrides(old, confs, line, jobs)), dry_run,
-                 f'DISTCC_HOSTS="{line}", -j{jobs}')
+    write(path, old, apply(old, host_overrides(old, confs, line, jobs)), dry_run,
+          f'DISTCC_HOSTS="{line}", -j{jobs}')
+    hosts_file = distcc_hosts_file()
+    old_hosts = hosts_file.read_text() if hosts_file.exists() else ""
+    return write(hosts_file, old_hosts, hosts_file_text(line, path), dry_run,
+                 f"the same, for distcc outside makepkg: -j{jobs} there")
+
+
+def distcc_hosts_file() -> pathlib.Path:
+    """Where distcc looks for its hosts when DISTCC_HOSTS is unset."""
+    return pathlib.Path(os.environ.get("DISTCC_DIR") or os.path.expanduser("~/.distcc")) / "hosts"
+
+
+def hosts_file_text(line: str, makepkg_conf: pathlib.Path) -> str:
+    return (f"# written by `distbuild hosts`, as DISTCC_HOSTS in {makepkg_conf},\n"
+            f"# which makepkg exports in place of this file\n{line}\n")
 
 
 @cli.command(cls=cmdline.Command, help=__doc__)
