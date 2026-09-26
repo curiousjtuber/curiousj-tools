@@ -4,6 +4,8 @@
     distbuild hosts [-n|--dry-run] [-e|--extra N] [-j|--jobs N] [-l|--local] [--localslots N]
                     [-a TERM]... [-p] [-f FILE]...
     distbuild distccd [-n|--dry-run]
+    distbuild sccache-secrets [--secrets FILE] [--force] [-f FILE]...
+    distbuild sccache [-n|--dry-run] [--secrets FILE] [-f FILE]...
 
 'makepkg' writes the compiler flags of the system makepkg.conf into the
 user's, ~/.config/pacman/makepkg.conf (under XDG_CONFIG_HOME when set), with
@@ -77,6 +79,26 @@ system unit off (it holds the port), letting port 3632 through ufw when it
 is active, and lingering, so the unit runs with nobody logged in. Then the
 unit is enabled and started, or restarted when it changed. -n prints the
 files and commands instead.
+
+'sccache-secrets' writes what the sccache-dist hosts share: the scheduler's
+URL, the wired address of the login with the 'sccache-scheduler' attribute
+(found over ssh as 'hosts' finds its hosts, or this machine), a client token
+and the key the servers' tokens are made from. The file is FILE with
+--secrets, else $DISTBUILD_SCCACHE_SECRETS, else
+~/.config/distbuild/sccache-secrets.toml; an existing one is kept unless
+--force. -f names the ssh-lists files, as for `ssh-logins`.
+
+'sccache' sets this machine up for what its entry in the ssh-lists files
+says, from the secrets file: with 'sccache-scheduler', the sccache-dist
+scheduler (port 10600); with 'sccache-server', a build server (port 10501,
+on its wired address); and in any case the client, ~/.config/sccache/config,
+with RUSTC_WRAPPER exported in the user's makepkg.conf, so makepkg's rust
+builds go through it. The scheduler and server run as systemd user units,
+as 'distccd' runs distccd, with the same root steps for sccache, podman and
+their ports. A build server runs each compile in a podman container through
+sccache-dist's docker builder, with a `docker` that runs podman_docker; the
+builder's base image is pulled first. Rust crates that link -- bin, dylib,
+cdylib, proc-macro -- are never distributed, nor cached.
 """
 
 from __future__ import annotations
@@ -87,14 +109,17 @@ import difflib
 import os
 import pathlib
 import re
+import secrets
 import shlex
+import shutil
 import socket
 import subprocess
 import sys
+import tomllib
 
 import click
 
-from . import attrs, cmdline, logins, pick, sshutil
+from . import attrs, cmdline, lists, logins, pick, sshutil
 from .lists import Login, ToolError
 
 SYSTEM_CONF = pathlib.Path("/etc/makepkg.conf")
@@ -115,9 +140,26 @@ RestartSec=5
 WantedBy=default.target
 """
 DISTCCD_PORT = 3632
+SCHEDULER_PORT = 10600
+BUILD_SERVER_PORT = 10501
+BASE_IMAGE = "docker.io/aidanhs/busybox"
+SCCACHE_DIST_UNIT = """\
+[Unit]
+Description=sccache-dist {role}, as the user
+Documentation=https://github.com/mozilla/sccache/blob/main/docs/Distributed.md
+
+[Service]
+Environment=SCCACHE_NO_DAEMON=1
+{env}ExecStart=/usr/bin/sccache-dist {role} --config {conf}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+"""
 DEFAULT_TERM = "distccd"
 
-_NAME = re.compile(r"^[ \t]*([A-Za-z_][A-Za-z0-9_]*)=", re.M)
+_NAME = re.compile(r"^[ \t]*(?:export[ \t]+)?([A-Za-z_][A-Za-z0-9_]*)=", re.M)
 # A flag value stops at a closing quote or a line continuation, not only at a space.
 _VALUE = r"""[^\s"'\\]+"""
 
@@ -509,9 +551,8 @@ def hosts_file_text(line: str, makepkg_conf: pathlib.Path) -> str:
 @cli.command(cls=cmdline.Command, help=__doc__)
 @click.option("-n", "--dry-run", is_flag=True, help="Print the files and commands; change nothing.")
 def distccd(dry_run: bool) -> int:
-    config_home = pathlib.Path(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"))
-    args_path = config_home / "distccd.conf"
-    unit_path = config_home / "systemd" / "user" / "distccd.service"
+    args_path = config_home() / "distccd.conf"
+    unit_path = config_home() / "systemd" / "user" / "distccd.service"
 
     writes = []
     if not args_path.exists():
@@ -519,51 +560,16 @@ def distccd(dry_run: bool) -> int:
             system = pathlib.Path(DISTCCD_CONF).read_text()
         except OSError:
             system = ""
-        writes.append((args_path, f'DISTCC_ARGS="{distccd_args(system)}"\n'))
-    unit = USER_UNIT.format(args=args_path)
-    if not unit_path.exists() or unit_path.read_text() != unit:
-        writes.append((unit_path, unit))
+        writes.append(Write(args_path, f'DISTCC_ARGS="{distccd_args(system)}"\n'))
+    unit_w = changed(unit_path, USER_UNIT.format(args=args_path))
+    if unit_w:
+        writes.append(unit_w)
 
-    steps = root_steps(sshutil.login_name())
-    user = [["systemctl", "--user", "daemon-reload"]] if writes else []
-    running = output(["systemctl", "--user", "is-active", "distccd.service"]) == "active"
-    if output(["systemctl", "--user", "is-enabled", "distccd.service"]) != "enabled" or not running:
-        user.append(["systemctl", "--user", "enable", "--now", "distccd.service"])
-    if running and writes:
-        user.append(["systemctl", "--user", "restart", "distccd.service"])
-
-    if dry_run:
-        for path, text in writes:
-            click.echo(f"--- {path}\n{text}", nl=False)
-        for why, argv in steps:
-            click.echo(f"{shlex.join(argv)}    # {why}")
-        for argv in user:
-            click.echo(shlex.join(argv))
-        return 0
-
-    if steps:
-        for why, argv in steps:
-            click.echo(f"distbuild: {why}: {shlex.join(argv)}", err=True)
-        if run(["sudo", "-v"]) != 0:
-            raise click.ClickException("sudo refused; nothing changed")
-        for why, argv in steps:
-            if run(argv) != 0:
-                raise click.ClickException(f"failed: {shlex.join(argv)}")
-    for path, text in writes:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text)
-        click.echo(f"wrote {path}")
-    for argv in user:
-        if run(argv) != 0:
-            raise click.ClickException(f"failed: {shlex.join(argv)}")
-    state = output(["systemctl", "--user", "is-active", "distccd.service"])
-    if state != "active":
-        raise click.ClickException(f"distccd is {state or 'not running'}; "
-                                   "see `journalctl --user -u distccd`")
-    click.echo(f"distccd runs as {sshutil.login_name()}"
-               + ("" if writes or steps or user else " (unchanged)"))
+    steps = root_steps(sshutil.login_name(), ["distcc"], ["distccd.service"], [DISTCCD_PORT])
+    done = carry_out(writes, steps, [], [("distccd.service", bool(writes))], dry_run)
+    if not dry_run:
+        click.echo(f"distccd runs as {sshutil.login_name()}" + ("" if done else " (unchanged)"))
     return 0
-
 
 def distccd_args(system_conf: str) -> str:
     """DISTCC_ARGS for the user unit: the system file's without --listen, or
@@ -598,31 +604,329 @@ def run(argv: list[str]) -> int:
         return 127
 
 
-def ufw_allows_distccd() -> bool | None:
-    """Whether ufw's rules let DISTCCD_PORT in; None when they cannot be read."""
+def ufw_allows(port: int) -> bool | None:
+    """Whether ufw's rules let TCP port in; None when they cannot be read."""
     try:
         rules = pathlib.Path(UFW_RULES).read_text()
     except OSError:
         return None
-    return re.search(rf"^### tuple ### allow tcp {DISTCCD_PORT} ", rules, re.M) is not None
+    return re.search(rf"^### tuple ### allow tcp {port} ", rules, re.M) is not None
 
 
-def root_steps(user: str) -> list[tuple[str, list[str]]]:
+def root_steps(user: str, packages: list[str], system_units: list[str], ports: list[int],
+               linger: bool = True) -> list[tuple[str, list[str]]]:
     """(why, command) for each one-time root step still needed, in the order
-    they have to run: the system unit is off before the user unit starts."""
+    they have to run: a system unit holding a port is off before the user
+    unit wanting it starts."""
     steps = []
-    if not output(["pacman", "-Q", "distcc"]):
-        steps.append(("distcc is not installed", ["sudo", "pacman", "-S", "--needed", "distcc"]))
-    if (output(["systemctl", "is-enabled", "distccd.service"]) == "enabled"
-            or output(["systemctl", "is-active", "distccd.service"]) == "active"):
-        steps.append(("the system distccd holds the port",
-                      ["sudo", "systemctl", "disable", "--now", "distccd.service"]))
-    if output(["systemctl", "is-active", "ufw.service"]) == "active" and not ufw_allows_distccd():
-        steps.append(("ufw is on", ["sudo", "ufw", "allow", f"{DISTCCD_PORT}/tcp"]))
-    if output(["loginctl", "show-user", user, "-p", "Linger", "--value"]) != "yes":
-        steps.append(("the unit should run with nobody logged in",
+    missing = [pkg for pkg in packages if not output(["pacman", "-Q", pkg])]
+    if missing:
+        steps.append((f"{', '.join(missing)} not installed",
+                      ["sudo", "pacman", "-S", "--needed", *missing]))
+    for unit in system_units:
+        if (output(["systemctl", "is-enabled", unit]) == "enabled"
+                or output(["systemctl", "is-active", unit]) == "active"):
+            steps.append((f"the system {unit.removesuffix('.service')} holds the port",
+                          ["sudo", "systemctl", "disable", "--now", unit]))
+    if output(["systemctl", "is-active", "ufw.service"]) == "active":
+        for port in ports:
+            if not ufw_allows(port):
+                steps.append(("ufw is on", ["sudo", "ufw", "allow", f"{port}/tcp"]))
+    if linger and output(["loginctl", "show-user", user, "-p", "Linger", "--value"]) != "yes":
+        steps.append(("the units should run with nobody logged in",
                       ["sudo", "loginctl", "enable-linger", user]))
     return steps
+
+
+@dataclasses.dataclass
+class Write:
+    path: pathlib.Path
+    text: str
+    mode: int = 0o644  # 0o600 for a file holding a secret, 0o755 for a script
+
+
+def carry_out(writes: list[Write], steps: list[tuple[str, list[str]]],
+              commands: list[tuple[list[str], bool]], units: list[tuple[str, bool]],
+              dry_run: bool) -> bool:
+    """The root steps, after one sudo prompt; the writes; the commands, each
+    (argv, whether it has to succeed); then each user unit enabled and
+    running, restarted when (unit, changed) says it changed. With dry_run,
+    print them instead. Whether anything was to be done."""
+    user = [["systemctl", "--user", "daemon-reload"]] if any(c for _, c in units) else []
+    for unit, changed in units:
+        running = output(["systemctl", "--user", "is-active", unit]) == "active"
+        if output(["systemctl", "--user", "is-enabled", unit]) != "enabled" or not running:
+            user.append(["systemctl", "--user", "enable", "--now", unit])
+        if running and changed:
+            user.append(["systemctl", "--user", "restart", unit])
+    todo = bool(writes or steps or commands or user)
+
+    if dry_run:
+        for w in writes:
+            try:
+                old = w.path.read_text()
+            except OSError:
+                click.echo(f"--- {w.path}\n{w.text}", nl=False)
+                continue
+            sys.stdout.writelines(difflib.unified_diff(
+                old.splitlines(keepends=True), w.text.splitlines(keepends=True), str(w.path), str(w.path)))
+        for why, argv in steps:
+            click.echo(f"{shlex.join(argv)}    # {why}")
+        for argv in [a for a, _ in commands] + user:
+            click.echo(shlex.join(argv))
+        return todo
+
+    if steps:
+        for why, argv in steps:
+            click.echo(f"distbuild: {why}: {shlex.join(argv)}", err=True)
+        if run(["sudo", "-v"]) != 0:
+            raise click.ClickException("sudo refused; nothing changed")
+        for why, argv in steps:
+            if run(argv) != 0:
+                raise click.ClickException(f"failed: {shlex.join(argv)}")
+    for w in writes:
+        w.path.parent.mkdir(parents=True, exist_ok=True)
+        w.path.write_text(w.text)
+        w.path.chmod(w.mode)
+        click.echo(f"wrote {w.path}")
+    for argv, must in commands + [(a, True) for a in user]:
+        if run(argv) != 0 and must:
+            raise click.ClickException(f"failed: {shlex.join(argv)}")
+    for unit, _ in units:
+        state = output(["systemctl", "--user", "is-active", unit])
+        if state != "active":
+            name = unit.removesuffix(".service")
+            raise click.ClickException(f"{name} is {state or 'not running'}; "
+                                       f"see `journalctl --user -u {name}`")
+    return todo
+
+
+def config_home() -> pathlib.Path:
+    return pathlib.Path(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"))
+
+
+def changed(path: pathlib.Path, text: str) -> Write | None:
+    """A Write of text to path, or None when path holds it already."""
+    try:
+        if path.read_text() == text:
+            return None
+    except OSError:
+        pass
+    return Write(path, text)
+
+
+@dataclasses.dataclass
+class Secrets:
+    scheduler_url: str
+    client_token: str
+    server_key: str
+
+
+def secrets_file(given: str | None) -> pathlib.Path:
+    return pathlib.Path(os.path.expanduser(
+        given or os.environ.get("DISTBUILD_SCCACHE_SECRETS")
+        or str(config_home() / "distbuild" / "sccache-secrets.toml")))
+
+
+def secrets_text(s: Secrets) -> str:
+    return (f"# written by `distbuild sccache-secrets`: what the sccache-dist hosts share\n"
+            f'scheduler_url = "{s.scheduler_url}"\n'
+            f'client_token = "{s.client_token}"\n'
+            f'server_key = "{s.server_key}"\n')
+
+
+def read_secrets(path: pathlib.Path) -> Secrets:
+    try:
+        data = tomllib.loads(path.read_text())
+    except OSError:
+        raise click.ClickException(f"no {path}; write it with `distbuild sccache-secrets`")
+    except tomllib.TOMLDecodeError as e:
+        raise click.ClickException(f"{path}: {e}")
+    try:
+        return Secrets(data["scheduler_url"], data["client_token"], data["server_key"])
+    except KeyError as e:
+        raise click.ClickException(f"{path}: no {e.args[0]}")
+
+
+def local_addresses() -> Probed:
+    """This machine's addresses, from the probe the logins get over ssh."""
+    out = subprocess.run(["sh", "-c", PROBE_SCRIPT], capture_output=True, text=True).stdout
+    found = parse_probe(out)
+    if found is None:
+        raise click.ClickException("cannot list this machine's addresses")
+    return found
+
+
+def login_address(login: Login) -> str:
+    """The address to reach login's services at: its first wired address,
+    else its first wifi one, else its host name."""
+    if login.login == "localhost":
+        found = local_addresses()
+    else:
+        proc = subprocess.run(sshutil.probe_ssh(login.login, batch=True)
+                              + ["sh", "-c", shlex.quote(PROBE_SCRIPT)],
+                              capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        found = parse_probe(proc.stdout) if proc.returncode == 0 else None
+        if found is None:
+            raise click.ClickException(f"{login.login}: cannot ask for its addresses")
+    return (found.wired + found.wifi)[0] if found.wired or found.wifi \
+        else login.login.rpartition("@")[2]
+
+
+def this_machine(files: tuple[str, ...]) -> Login:
+    """'localhost' as the ssh-lists files describe this machine."""
+    try:
+        found = lists.load_all(files)
+    except ToolError as e:
+        raise click.ClickException(str(e))
+    return logins.local_login(found.logins, logins.self_names(), sshutil.login_name())
+
+
+def sccache_dist(*args: str) -> str:
+    if not shutil.which("sccache-dist"):
+        raise click.ClickException("no sccache-dist; install sccache first (`sudo pacman -S sccache`)")
+    out = output(["sccache-dist", *args])
+    if not out:
+        raise click.ClickException(f"`sccache-dist {' '.join(args[:2])}` gave nothing")
+    return out
+
+
+@cli.command("sccache-secrets", cls=cmdline.Command, help=__doc__)
+@click.option("--secrets", "secrets_path", metavar="FILE", help="The secrets file to write.")
+@click.option("--force", is_flag=True, help="Replace an existing one.")
+@click.option("-f", "files", metavar="FILE", multiple=True,
+              help="an ssh-lists file to read (repeatable; these and no other)")
+def sccache_secrets(secrets_path: str | None, force: bool, files: tuple[str, ...]) -> int:
+    path = secrets_file(secrets_path)
+    if path.exists() and not force:
+        raise click.ClickException(f"{path} exists; --force replaces it, and every host's setup")
+    opts = logins.LoginOpts(files=files, terms=(attrs.term("sccache-scheduler", "term"),))
+    try:
+        found = logins.select(opts)
+    except ToolError as e:
+        raise click.ClickException(str(e))
+    if len(found) != 1:
+        raise click.ClickException("more than one login has 'sccache-scheduler': "
+                                   + ", ".join(e.login for e in found))
+    s = Secrets(f"http://{login_address(found[0])}:{SCHEDULER_PORT}",
+                secrets.token_urlsafe(32), sccache_dist("auth", "generate-jwt-hs256-key"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(secrets_text(s))
+    path.chmod(0o600)
+    click.echo(f"{path}: scheduler {s.scheduler_url}")
+    return 0
+
+
+@cli.command(cls=cmdline.Command, help=__doc__)
+@click.option("-n", "--dry-run", is_flag=True, help="Print the files and commands; change nothing.")
+@click.option("--secrets", "secrets_path", metavar="FILE", help="The secrets file to read.")
+@click.option("-f", "files", metavar="FILE", multiple=True,
+              help="an ssh-lists file to read (repeatable; these and no other)")
+def sccache(dry_run: bool, secrets_path: str | None, files: tuple[str, ...]) -> int:
+    s = read_secrets(secrets_file(secrets_path))
+    me = this_machine(files)
+    scheduler = "sccache-scheduler" in me.attributes
+    server = "sccache-server" in me.attributes
+    conf_dir = config_home() / "sccache-dist"
+    unit_dir = config_home() / "systemd" / "user"
+    writes: list[Write | None] = []
+    units: list[tuple[str, bool]] = []
+    commands: list[tuple[list[str], bool]] = []
+
+    if scheduler:
+        conf = conf_dir / "scheduler.conf"
+        conf_w = changed(conf, scheduler_conf(s))
+        unit_w = changed(unit_dir / "sccache-dist-scheduler.service",
+                         SCCACHE_DIST_UNIT.format(role="scheduler", env="", conf=conf))
+        writes += [conf_w and Write(conf_w.path, conf_w.text, 0o600), unit_w]
+        units.append(("sccache-dist-scheduler.service", bool(conf_w or unit_w)))
+    if server:
+        addr = local_addresses()
+        public = f"{(addr.wired + addr.wifi or ['127.0.0.1'])[0]}:{BUILD_SERVER_PORT}"
+        shim_dir = pathlib.Path(os.path.expanduser("~/.local/share/distbuild/podman-docker"))
+        conf = conf_dir / "server.conf"
+        token = sccache_dist("auth", "generate-jwt-hs256-server-token",
+                             "--secret-key", s.server_key, "--server", public)
+        cache = pathlib.Path(os.path.expanduser("~/.cache/sccache-dist"))
+        conf_w = changed(conf, server_conf(s, public, token, cache))
+        shim_w = changed(shim_dir / "docker",
+                         f'#!/bin/sh\nexec {sys.executable} -m curiousj_tools.podman_docker "$@"\n')
+        unit_w = changed(unit_dir / "sccache-dist-server.service",
+                         SCCACHE_DIST_UNIT.format(role="server", conf=conf,
+                                                  env=f"Environment=PATH={shim_dir}:/usr/bin:/bin\n"))
+        writes += [conf_w and Write(conf_w.path, conf_w.text, 0o600),
+                   shim_w and Write(shim_w.path, shim_w.text, 0o755), unit_w]
+        units.append(("sccache-dist-server.service", bool(conf_w or shim_w or unit_w)))
+        if run_quiet(["podman", "image", "exists", BASE_IMAGE]) != 0:
+            commands.append((["podman", "pull", "-q", BASE_IMAGE], True))
+
+    client = config_home() / "sccache" / "config"
+    if client.exists() and not client.read_text().startswith(CLIENT_HEADER):
+        raise click.ClickException(f"{client} is not `distbuild sccache`'s; "
+                                   "add its [dist] by hand, or move it away")
+    client_w = changed(client, client_conf(s))
+    if client_w:
+        writes.append(Write(client_w.path, client_w.text, 0o600))
+        # A running sccache read the old one; the next compile starts a new one.
+        commands.append((["sccache", "--stop-server"], False))
+    path, old, confs = read_confs()
+    wrapper = Override("RUSTC_WRAPPER", "export RUSTC_WRAPPER=/usr/bin/sccache",
+                       "set by `distbuild sccache`")
+    new = apply(old, [wrapper])
+    if new != old:
+        writes.append(Write(path, new))
+
+    ports = [SCHEDULER_PORT] * scheduler + [BUILD_SERVER_PORT] * server
+    system_units = ["sccache-scheduler.service"] * scheduler + ["sccache-server.service"] * server
+    steps = root_steps(sshutil.login_name(), ["sccache"] + ["podman"] * server, system_units, ports,
+                       linger=scheduler or server)
+    done = carry_out([w for w in writes if w], steps, commands, units, dry_run)
+    if not dry_run:
+        roles = ["scheduler"] * scheduler + ["build server"] * server + ["client"]
+        click.echo(f"sccache-dist {', '.join(roles)} for {s.scheduler_url}"
+                   + ("" if done else " (unchanged)"))
+    return 0
+
+
+CLIENT_HEADER = "# written by `distbuild sccache`"
+
+
+def client_conf(s: Secrets) -> str:
+    return (f"{CLIENT_HEADER}, from the sccache-dist secrets\n"
+            f"[dist]\n"
+            f'scheduler_url = "{s.scheduler_url}"\n'
+            f"toolchains = []\n\n"
+            f"[dist.auth]\n"
+            f'type = "token"\n'
+            f'token = "{s.client_token}"\n')
+
+
+def scheduler_conf(s: Secrets) -> str:
+    return (f'public_addr = "0.0.0.0:{SCHEDULER_PORT}"\n\n'
+            f"[client_auth]\n"
+            f'type = "token"\n'
+            f'token = "{s.client_token}"\n\n'
+            f"[server_auth]\n"
+            f'type = "jwt_hs256"\n'
+            f'secret_key = "{s.server_key}"\n')
+
+
+def server_conf(s: Secrets, public: str, token: str, cache: pathlib.Path) -> str:
+    return (f'cache_dir = "{cache}"\n'
+            f'public_addr = "{public}"\n'
+            f'scheduler_url = "{s.scheduler_url}"\n\n'
+            f"[builder]\n"
+            f'type = "docker"\n\n'
+            f"[scheduler_auth]\n"
+            f'type = "jwt_token"\n'
+            f'token = "{token}"\n')
+
+
+def run_quiet(argv: list[str]) -> int:
+    try:
+        return subprocess.run(argv, capture_output=True).returncode
+    except OSError:
+        return 127
 
 
 def read_confs() -> tuple[pathlib.Path, str, list[tuple[pathlib.Path, str]]]:

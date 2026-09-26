@@ -14,6 +14,7 @@ as the editor on all of them. Python 3.11+, click and ruamel.yaml.
 | `ec-browse` | opens URLs in whichever Emacs `emacsclient-auto` reaches; use it as `$BROWSER` |
 | `distbuild hosts` | points `DISTCC_HOSTS`, `MAKEFLAGS`, `NINJAFLAGS` and `BUILDENV` in the same file at the `distccd` logins of the lists, each with its nproc plus a few jobs, by their wired address |
 | `distbuild distccd` | runs distccd on this host as a systemd user unit instead of the system one, doing the one-time root steps with sudo only where needed |
+| `distbuild sccache` | sets up this host's part in sccache-dist, as its ssh-lists attributes say: the scheduler, a build server running compiles in podman containers, and the client; all as the user; `distbuild sccache-secrets` writes what they share |
 | `distbuild makepkg` | writes the system makepkg.conf's `CFLAGS` and `RUSTFLAGS` into the user's with the CPU named instead of `native`, so every distcc host compiles for the same one; see [Distributed builds](#distributed-builds) |
 | `curiousj-tools init` | prints the shell functions that go with them, for an rc file to eval: `emacs-remote` and the `tmux-env-refresh` prompt hook; see [Shell integration](#shell-integration) |
 
@@ -409,6 +410,33 @@ letting port 3632 through `ufw` when it is active, and `loginctl enable-linger`,
 with nobody logged in. Then the unit is enabled and started, or restarted when it changed. `-n`
 prints the files and commands instead. It sets up the host it runs on; for the others, run it
 there.
+
+```
+distbuild sccache-secrets [--secrets FILE] [--force] [-f FILE]...
+distbuild sccache [-n|--dry-run] [--secrets FILE] [-f FILE]...
+```
+
+For Rust, `distbuild sccache` sets up [sccache-dist](https://github.com/mozilla/sccache/blob/main/docs/Distributed.md)
+on this host, in the part its entry in the ssh-lists files gives it: with `sccache-scheduler`, the
+scheduler (port 10600); with `sccache-server`, a build server (port 10501, on its wired address); and
+on every host the client, `~/.config/sccache/config`, with `export RUSTC_WRAPPER=/usr/bin/sccache` in
+the user `makepkg.conf`. The scheduler and server run as systemd user units, as `distbuild distccd`
+runs distccd, with the same root steps done with `sudo` only where needed: `sccache` and `podman`
+installed, the system units off, the ports through `ufw`, lingering.
+
+A build server runs each compile in a podman container, through sccache-dist's `docker` builder and a
+`docker` that runs `curiousj_tools.podman_docker`: the builder's own overlay builder insists on root.
+Three of its commands need adapting for podman. sccache-dist writes a tar into `docker cp -` but keeps
+the pipe open while it waits, which docker tolerates and podman does not, so one archive is read and
+podman's input closed; `rm -f` would wait 10 s for each container, whose busybox shell ignores
+SIGTERM; and podman's `localhost/` image names would hide leftovers from the builder's cleanup. Each
+compile gets a fresh container, about a second of overhead: worth it for crates that take seconds,
+not for small ones. Crates that link (`bin`, `dylib`, `cdylib`, `proc-macro`) are never distributed.
+
+The hosts share a secrets file: the scheduler's URL, a client token and the key the servers' tokens
+are made from. `distbuild sccache-secrets` writes it once, finding the scheduler's wired address over
+ssh; both commands read it from `--secrets FILE`, else `$DISTBUILD_SCCACHE_SECRETS`, else
+`~/.config/distbuild/sccache-secrets.toml`. Keep it out of anything public.
 
 ## Development
 

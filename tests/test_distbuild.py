@@ -543,5 +543,172 @@ class TestDistccdCli(unittest.TestCase):
         self.assertIn(["sudo", "ufw", "allow", "3632/tcp"], self.ran)
 
 
+class TestExport(unittest.TestCase):
+    def test_export_is_an_assignment(self):
+        found = distbuild.assignments("export RUSTC_WRAPPER=/usr/bin/sccache\n  export  A=1\n")
+        self.assertEqual([a.name for a in found], ["RUSTC_WRAPPER", "A"])
+
+
+class TestSccacheCli(unittest.TestCase):
+    SECRETS = distbuild.Secrets("http://10.0.0.1:10600", "client-tok", "server-key")
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = pathlib.Path(tmp.name)
+        (self.root / "etc").mkdir()
+        (self.root / "etc" / "makepkg.conf").write_text(SYSTEM)
+        (self.root / "user.rules").write_text("")
+        self.secrets = self.root / "secrets.toml"
+        self.secrets.write_text(distbuild.secrets_text(self.SECRETS))
+        self.config = self.root / "config"
+        self.attributes = {}
+        self.state = {("pacman", "-Q", "sccache"): "sccache 0.17", ("pacman", "-Q", "podman"): "podman 6",
+                      ("loginctl", "show-user", "alice", "-p", "Linger", "--value"): "yes"}
+        self.ran = []
+        self.image = 0
+
+        def run(argv):
+            self.ran.append(argv)
+            if argv[:3] == ["systemctl", "--user", "enable"] or argv[:3] == ["systemctl", "--user", "restart"]:
+                self.state[("systemctl", "--user", "is-active", argv[-1])] = "active"
+                self.state[("systemctl", "--user", "is-enabled", argv[-1])] = "enabled"
+            return 0
+        machine = lambda files: Login("localhost", attributes=dict(self.attributes))
+        for patch in (mock.patch.object(distbuild, "SYSTEM_CONF", self.root / "etc" / "makepkg.conf"),
+                      mock.patch.object(distbuild, "UFW_RULES", str(self.root / "user.rules")),
+                      mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.config),
+                                                   "HOME": str(self.root)}),
+                      mock.patch.object(distbuild.sshutil, "login_name", return_value="alice"),
+                      mock.patch.object(distbuild, "output", side_effect=lambda argv: self.state.get(tuple(argv), "")),
+                      mock.patch.object(distbuild, "run", side_effect=run),
+                      mock.patch.object(distbuild, "run_quiet", side_effect=lambda argv: self.image),
+                      mock.patch.object(distbuild, "this_machine", side_effect=machine),
+                      mock.patch.object(distbuild, "local_addresses",
+                                        return_value=distbuild.Probed(16, None, ["10.0.0.5"], ["10.0.1.5"])),
+                      mock.patch.object(distbuild, "sccache_dist",
+                                        side_effect=lambda *a: f"token-for-{a[-1]}")):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def run_cli(self, *argv: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = distbuild.main(["sccache", "--secrets", str(self.secrets), *argv])
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_client_only(self):
+        rc, out, _ = self.run_cli()
+        self.assertEqual(rc, 0)
+        client = (self.config / "sccache" / "config").read_text()
+        self.assertTrue(client.startswith(distbuild.CLIENT_HEADER))
+        self.assertIn('scheduler_url = "http://10.0.0.1:10600"', client)
+        self.assertIn('token = "client-tok"', client)
+        self.assertEqual((self.config / "sccache" / "config").stat().st_mode & 0o777, 0o600)
+        self.assertIn("export RUSTC_WRAPPER=/usr/bin/sccache",
+                      (self.config / "pacman" / "makepkg.conf").read_text())
+        self.assertEqual(self.ran, [["sccache", "--stop-server"]])
+        self.assertIn("sccache-dist client for http://10.0.0.1:10600", out)
+
+    def test_second_run_changes_nothing(self):
+        self.run_cli()
+        self.ran.clear()
+        rc, out, _ = self.run_cli()
+        self.assertEqual((rc, self.ran), (0, []))
+        self.assertIn("(unchanged)", out)
+        self.assertEqual((self.config / "pacman" / "makepkg.conf").read_text().count("RUSTC_WRAPPER"), 1)
+
+    def test_scheduler_and_server(self):
+        self.attributes = {"sccache-scheduler": None, "sccache-server": None}
+        self.state[("systemctl", "is-active", "ufw.service")] = "active"
+        self.image = 1
+        rc, out, _ = self.run_cli()
+        self.assertEqual(rc, 0)
+        dist = self.config / "sccache-dist"
+        self.assertIn('secret_key = "server-key"', (dist / "scheduler.conf").read_text())
+        server = (dist / "server.conf").read_text()
+        self.assertIn('public_addr = "10.0.0.5:10501"', server)
+        self.assertIn('token = "token-for-10.0.0.5:10501"', server)
+        self.assertIn('type = "docker"', server)
+        self.assertEqual((dist / "server.conf").stat().st_mode & 0o777, 0o600)
+        shim = self.root / ".local" / "share" / "distbuild" / "podman-docker" / "docker"
+        self.assertIn("-m curiousj_tools.podman_docker", shim.read_text())
+        self.assertEqual(shim.stat().st_mode & 0o777, 0o755)
+        unit = (self.config / "systemd" / "user" / "sccache-dist-server.service").read_text()
+        self.assertIn(f"Environment=PATH={shim.parent}:/usr/bin:/bin", unit)
+        self.assertEqual(self.ran[:3], [["sudo", "-v"], ["sudo", "ufw", "allow", "10600/tcp"],
+                                        ["sudo", "ufw", "allow", "10501/tcp"]])
+        self.assertIn(["podman", "pull", "-q", distbuild.BASE_IMAGE], self.ran)
+        self.assertEqual(self.ran[-2:], [["systemctl", "--user", "enable", "--now", "sccache-dist-scheduler.service"],
+                                         ["systemctl", "--user", "enable", "--now", "sccache-dist-server.service"]])
+        self.assertIn("scheduler, build server, client", out)
+
+    def test_a_system_unit_is_turned_off(self):
+        self.attributes = {"sccache-server": None}
+        self.state[("systemctl", "is-enabled", "sccache-server.service")] = "enabled"
+        self.run_cli()
+        self.assertIn(["sudo", "systemctl", "disable", "--now", "sccache-server.service"], self.ran)
+
+    def test_someone_elses_client_config_is_refused(self):
+        (self.config / "sccache").mkdir(parents=True)
+        (self.config / "sccache" / "config").write_text("[cache.disk]\nsize = 1\n")
+        rc, _, err = self.run_cli()
+        self.assertEqual((rc, self.ran), (1, []))
+        self.assertIn("is not `distbuild sccache`'s", err)
+
+    def test_no_secrets(self):
+        self.secrets.unlink()
+        rc, _, err = self.run_cli()
+        self.assertEqual(rc, 1)
+        self.assertIn("distbuild sccache-secrets", err)
+
+    def test_dry_run_changes_nothing(self):
+        self.attributes = {"sccache-server": None}
+        rc, out, _ = self.run_cli("-n")
+        self.assertEqual((rc, self.ran), (0, []))
+        self.assertFalse(self.config.exists())
+        self.assertIn("systemctl --user enable --now sccache-dist-server.service", out)
+
+
+class TestSccacheSecrets(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = pathlib.Path(tmp.name) / "s" / "secrets.toml"
+        for patch in (mock.patch.object(distbuild.logins, "select",
+                                        return_value=[Login("alice@sched", attributes={"sccache-scheduler": None})]),
+                      mock.patch.object(distbuild, "login_address", return_value="10.0.0.1"),
+                      mock.patch.object(distbuild, "sccache_dist", return_value="the-key")):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def run_cli(self, *argv: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = distbuild.main(["sccache-secrets", "--secrets", str(self.path), *argv])
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_writes_them_private(self):
+        self.assertEqual(self.run_cli()[0], 0)
+        s = distbuild.read_secrets(self.path)
+        self.assertEqual((s.scheduler_url, s.server_key), ("http://10.0.0.1:10600", "the-key"))
+        self.assertGreater(len(s.client_token), 30)
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+
+    def test_kept_unless_forced(self):
+        self.run_cli()
+        first = self.path.read_text()
+        rc, _, err = self.run_cli()
+        self.assertEqual((rc, self.path.read_text()), (1, first))
+        self.run_cli("--force")
+        self.assertNotEqual(self.path.read_text(), first)
+
+    def test_one_scheduler_only(self):
+        with mock.patch.object(distbuild.logins, "select", return_value=[Login("a@x"), Login("b@y")]):
+            rc, _, err = self.run_cli()
+        self.assertEqual(rc, 1)
+        self.assertIn("more than one login", err)
+
+
 if __name__ == "__main__":
     unittest.main()
