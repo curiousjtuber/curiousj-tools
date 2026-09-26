@@ -93,7 +93,10 @@ It is FILE with --secrets, else $DISTBUILD_SCCACHE_SECRETS, else
 'scheduler', the scheduler (port 10600); 'server', a build server (port
 10501, on its wired address); and in any case the client,
 ~/.config/sccache/config, with RUSTC_WRAPPER exported in the user's
-makepkg.conf, so makepkg's rust builds go through it. --role names the
+makepkg.conf, so makepkg's rust builds go through it. The wrapper is
+sccache_retry, run from ~/.local/share/distbuild/sccache-retry: a compile
+that fails distributed -- a proc macro reading a file of its crate finds it
+missing on the server -- runs again here instead of failing the build. --role names the
 roles; without it, they are this machine's attributes in the ssh-lists
 files, 'sccache-scheduler' and 'sccache-server' (-f as for `ssh-logins`).
 --scheduler-url is where the scheduler is, http://ADDRESS:10600; without
@@ -869,8 +872,12 @@ def sccache(dry_run: bool, secrets_path: str | None, scheduler_url: str | None,
         writes.append(Write(client_w.path, client_w.text, 0o600))
         # A running sccache read the old one; the next compile starts a new one.
         commands.append((["sccache", "--stop-server"], False))
+    retry = pathlib.Path(os.path.expanduser("~/.local/share/distbuild/sccache-retry"))
+    retry_w = changed(retry, f'#!/bin/sh\nexec {sys.executable} -m curiousj_tools.sccache_retry "$@"\n')
+    if retry_w:
+        writes.append(Write(retry_w.path, retry_w.text, 0o755))
     path, old, confs = read_confs()
-    wrapper = Override("RUSTC_WRAPPER", "export RUSTC_WRAPPER=/usr/bin/sccache",
+    wrapper = Override("RUSTC_WRAPPER", f"export RUSTC_WRAPPER={retry}",
                        "set by `distbuild sccache`")
     new = apply(old, [wrapper])
     if new != old:

@@ -608,8 +608,10 @@ class TestSccacheCli(unittest.TestCase):
         self.assertIn('scheduler_url = "http://10.0.0.1:10600"', client)
         self.assertIn('token = "client-tok"', client)
         self.assertEqual((self.config / "sccache" / "config").stat().st_mode & 0o777, 0o600)
-        self.assertIn("export RUSTC_WRAPPER=/usr/bin/sccache",
-                      (self.config / "pacman" / "makepkg.conf").read_text())
+        retry = self.root / ".local" / "share" / "distbuild" / "sccache-retry"
+        self.assertIn(f"export RUSTC_WRAPPER={retry}", (self.config / "pacman" / "makepkg.conf").read_text())
+        self.assertIn("-m curiousj_tools.sccache_retry", retry.read_text())
+        self.assertEqual(retry.stat().st_mode & 0o777, 0o755)
         self.assertEqual(self.ran, [["sccache", "--stop-server"]])
         self.assertIn("sccache-dist client for http://10.0.0.1:10600", out)
 

@@ -435,6 +435,15 @@ SIGTERM; and podman's `localhost/` image names would hide leftovers from the bui
 compile gets a fresh container, about a second of overhead: worth it for crates that take seconds,
 not for small ones. Crates that link (`bin`, `dylib`, `cdylib`, `proc-macro`) are never distributed.
 
+makepkg's `RUSTC_WRAPPER` is not sccache itself but `sccache_retry`, run from
+`~/.local/share/distbuild/sccache-retry`: a compile that fails distributed runs again here, its output
+the one cargo sees. Some cannot work remotely at all -- a proc macro reading a file of its crate at
+compile time, as `wayland-scanner` reads `wayland.xml`, finds it missing on the build server, and sccache
+reports that as the compile's own error. A real error costs a second, local compile. Each retry is noted
+in `~/.cache/distbuild/sccache-retries.log`. Mind `-j` on a client short of memory: sccache's local
+server holds each job's inputs and outputs, on top of the proc macros, build scripts and links that
+stay local.
+
 A cluster's hosts share one secrets file: the client token every client shows the scheduler (it
 checks a single one) and the key each build server's own token is made from. Generating it is a step
 of its own, `distbuild sccache-secrets`, done once; getting the file to every host is up to you. Both
