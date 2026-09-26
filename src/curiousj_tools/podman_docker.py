@@ -27,6 +27,10 @@ server's (CachyOS's znver4 glibc on an older Zen). Each ELF program or
 library in it that this machine also has at the same path is replaced by
 this machine's; a target's libraries (rustlib/TARGET/lib) are not, as they
 are what the compile links against, not what runs it.
+
+With DISTBUILD_PODMAN_LOG naming a file, each toolchain and job-input copy
+and each output read (`exec CID /busybox cat FILE`) is logged there with
+its size and time: what a distributed job costs to move.
 """
 
 from __future__ import annotations
@@ -38,6 +42,7 @@ import subprocess
 import sys
 import tarfile
 import threading
+import time
 import zlib
 
 BLOCK = 512
@@ -218,6 +223,32 @@ def changed_dirs(cid: str, diff: str) -> set[str]:
     return set(out.splitlines())
 
 
+class _Counted(io.RawIOBase):
+    """out, counting what is written to it."""
+
+    def __init__(self, out):
+        self.out, self.n = out, 0
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, b) -> int:
+        self.out.write(b)
+        self.n += len(b)
+        return len(b)
+
+
+def log(kind: str, cid: str, nbytes: int, seconds: float) -> None:
+    path = os.environ.get("DISTBUILD_PODMAN_LOG")
+    if not path:
+        return
+    try:
+        with open(path, "a") as f:
+            f.write(f"{time.time():.3f} {kind} {cid[:12]} {nbytes} {seconds:.3f}\n")
+    except OSError:
+        pass
+
+
 def podman_args(args: list[str]) -> list[str]:
     if args[:2] == ["rm", "-f"]:
         return ["rm", "-f", "-t", "0", *args[2:]]
@@ -231,15 +262,29 @@ def strip_localhost(listing: str) -> str:
 def main(argv: list[str] | None = None) -> int:
     args = podman_args(sys.argv[1:] if argv is None else argv)
     if args[:2] == ["cp", "-"]:
+        start = time.monotonic()
         proc = subprocess.Popen(["podman", *args], stdin=subprocess.PIPE)
-        if len(args) > 2 and is_base_container(args[2].split(":")[0]):
-            swapped = copy_toolchain(sys.stdin.buffer, proc.stdin)
+        out = _Counted(proc.stdin)
+        cid = args[2].split(":")[0] if len(args) > 2 else ""
+        if cid and is_base_container(cid):
+            swapped = copy_toolchain(sys.stdin.buffer, out)
             print(f"podman_docker: toolchain made to run here, {len(swapped)} files of this "
                   f"machine's: {' '.join(swapped)}", file=sys.stderr)
+            kind = "toolchain"
         else:
-            copy_archive(sys.stdin.buffer, proc.stdin)
+            copy_archive(sys.stdin.buffer, out)
+            kind = "inputs"
         proc.stdin.close()
-        return proc.wait()
+        status = proc.wait()
+        log(kind, cid, out.n, time.monotonic() - start)
+        return status
+    if (os.environ.get("DISTBUILD_PODMAN_LOG") and args[:1] == ["exec"] and len(args) >= 5
+            and args[2:4] == ["/busybox", "cat"]):
+        start = time.monotonic()
+        proc = subprocess.run(["podman", *args], stdout=subprocess.PIPE)
+        sys.stdout.buffer.write(proc.stdout)
+        log("output", args[1], len(proc.stdout), time.monotonic() - start)
+        return proc.returncode
     if args[:1] == ["diff"] and len(args) == 2:
         proc = subprocess.run(["podman", *args], stdout=subprocess.PIPE, text=True)
         if proc.returncode == 0:

@@ -96,6 +96,19 @@ class TestArgs(unittest.TestCase):
     def test_a_changed_file_is_kept(self):
         self.assertEqual(podman_docker.filter_diff("C /opt/tc/bin/rustc\n", set()), "C /opt/tc/bin/rustc\n")
 
+    def test_log_only_when_asked(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "log")
+            os.environ.pop("DISTBUILD_PODMAN_LOG", None)
+            podman_docker.log("inputs", "abcdef0123456789", 10, 0.5)
+            self.assertFalse(os.path.exists(path))
+            os.environ["DISTBUILD_PODMAN_LOG"] = path
+            try:
+                podman_docker.log("inputs", "abcdef0123456789", 1234, 0.25)
+            finally:
+                del os.environ["DISTBUILD_PODMAN_LOG"]
+            self.assertTrue(open(path).read().endswith(" inputs abcdef012345 1234 0.250\n"))
+
     def test_listings_lose_localhost(self):
         self.assertEqual(podman_docker.strip_localhost(
             "abc localhost/sccache-builder-1\ndef docker.io/aidanhs/busybox\n"),
