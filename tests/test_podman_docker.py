@@ -84,6 +84,18 @@ class TestArgs(unittest.TestCase):
         for args in (["exec", "c1", "/busybox", "true"], ["rmi", "i1"], ["cp", "-", "c1:/"]):
             self.assertEqual(podman_docker.podman_args(args), args)
 
+    def test_diff_as_the_builder_can_reclaim_by(self):
+        after_job = ("A /etc\nC /home/alice\nC /home\nA /home/alice/.cache\nA /home/alice/.cache/a.rs\n"
+                     "C /tmp\nA /tmp/t\n")
+        dirs = {"/home", "/home/alice", "/tmp"}
+        self.assertEqual(podman_docker.filter_diff(after_job, dirs),
+                         "A /home/alice/.cache\nA /home/alice/.cache/a.rs\nA /tmp/t\n")
+        after_cleanup = "A /etc\nC /home/alice\nC /tmp\n"
+        self.assertEqual(podman_docker.filter_diff(after_cleanup, dirs), "")
+
+    def test_a_changed_file_is_kept(self):
+        self.assertEqual(podman_docker.filter_diff("C /opt/tc/bin/rustc\n", set()), "C /opt/tc/bin/rustc\n")
+
     def test_listings_lose_localhost(self):
         self.assertEqual(podman_docker.strip_localhost(
             "abc localhost/sccache-builder-1\ndef docker.io/aidanhs/busybox\n"),

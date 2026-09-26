@@ -13,6 +13,12 @@ podman, and are adapted; the rest go to podman as they are:
                SIGTERM; podman would wait its 10 s before killing each one.
   ps/images    podman names local images "localhost/NAME", and the builder's
     --format   startup cleanup looks for names starting "sccache-builder-".
+  diff CID     after a job the builder reuses the container only when its diff
+               is empty once the job's added files are gone; it gave up on
+               podman's own /etc (hosts, resolv.conf, mounted in) and on a
+               directory the job's files were added under, marked changed
+               ("C /home/USER" when the toolchain and the build both live in
+               a home). Those are left out; a changed file stays in.
 
 A toolchain copied in -- into a container of the builder's base image --
 is also made to run here. The client packs its compiler with its own copies
@@ -186,6 +192,32 @@ def is_base_container(cid: str) -> bool:
     return out.split(":")[0] == BASE_IMAGE
 
 
+def filter_diff(diff: str, dirs: set[str]) -> str:
+    """podman's diff as the builder can reclaim a container by it: podman's
+    /etc and changed directories (dirs) left out, sorted by path, as the
+    builder assumes docker's to be."""
+    kept = []
+    for line in diff.splitlines():
+        kind, _, path = line.partition(" ")
+        if path == "/etc" or path.startswith("/etc/"):
+            continue
+        if kind == "C" and path in dirs:
+            continue
+        kept.append((path, line))
+    return "".join(line + "\n" for _, line in sorted(kept))
+
+
+def changed_dirs(cid: str, diff: str) -> set[str]:
+    """The paths the diff has as changed that are directories in cid."""
+    changed = [line[2:] for line in diff.splitlines() if line.startswith("C ")]
+    if not changed:
+        return set()
+    out = subprocess.run(["podman", "exec", cid, "/busybox", "sh", "-c",
+                          'for p; do [ -d "$p" ] && echo "$p"; done', "_", *changed],
+                         capture_output=True, text=True).stdout
+    return set(out.splitlines())
+
+
 def podman_args(args: list[str]) -> list[str]:
     if args[:2] == ["rm", "-f"]:
         return ["rm", "-f", "-t", "0", *args[2:]]
@@ -208,6 +240,11 @@ def main(argv: list[str] | None = None) -> int:
             copy_archive(sys.stdin.buffer, proc.stdin)
         proc.stdin.close()
         return proc.wait()
+    if args[:1] == ["diff"] and len(args) == 2:
+        proc = subprocess.run(["podman", *args], stdout=subprocess.PIPE, text=True)
+        if proc.returncode == 0:
+            sys.stdout.write(filter_diff(proc.stdout, changed_dirs(args[1], proc.stdout)))
+        return proc.returncode
     if args[:1] in (["ps"], ["images"]) and "--format" in args:
         proc = subprocess.run(["podman", *args], stdout=subprocess.PIPE, text=True)
         sys.stdout.write(strip_localhost(proc.stdout))
