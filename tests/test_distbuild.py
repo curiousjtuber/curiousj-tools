@@ -14,6 +14,8 @@ import textwrap
 import unittest
 from unittest import mock
 
+import click
+
 from curiousj_tools import distbuild
 from curiousj_tools.lists import Login
 
@@ -550,7 +552,7 @@ class TestExport(unittest.TestCase):
 
 
 class TestSccacheCli(unittest.TestCase):
-    SECRETS = distbuild.Secrets("http://10.0.0.1:10600", "client-tok", "server-key")
+    SECRETS = distbuild.Secrets("client-tok", "server-key")
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -594,7 +596,8 @@ class TestSccacheCli(unittest.TestCase):
     def run_cli(self, *argv: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            rc = distbuild.main(["sccache", "--secrets", str(self.secrets), *argv])
+            rc = distbuild.main(["sccache", "--secrets", str(self.secrets),
+                                 "--scheduler-url", "http://10.0.0.1:10600", *argv])
         return rc, out.getvalue(), err.getvalue()
 
     def test_client_only(self):
@@ -656,6 +659,21 @@ class TestSccacheCli(unittest.TestCase):
         self.assertEqual((rc, self.ran), (1, []))
         self.assertIn("is not `distbuild sccache`'s", err)
 
+    def test_role_replaces_the_attributes(self):
+        self.attributes = {"sccache-scheduler": None}
+        self.run_cli("--role", "server")
+        dist = self.config / "sccache-dist"
+        self.assertTrue((dist / "server.conf").exists())
+        self.assertFalse((dist / "scheduler.conf").exists())
+
+    def test_the_scheduler_is_here_by_default(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = distbuild.main(["sccache", "--secrets", str(self.secrets), "--role", "scheduler"])
+        self.assertEqual(rc, 0)
+        self.assertIn('scheduler_url = "http://10.0.0.5:10600"',
+                      (self.config / "sccache" / "config").read_text())
+
     def test_no_secrets(self):
         self.secrets.unlink()
         rc, _, err = self.run_cli()
@@ -675,12 +693,9 @@ class TestSccacheSecrets(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.path = pathlib.Path(tmp.name) / "s" / "secrets.toml"
-        for patch in (mock.patch.object(distbuild.logins, "select",
-                                        return_value=[Login("alice@sched", attributes={"sccache-scheduler": None})]),
-                      mock.patch.object(distbuild, "login_address", return_value="10.0.0.1"),
-                      mock.patch.object(distbuild, "sccache_dist", return_value="the-key")):
-            patch.start()
-            self.addCleanup(patch.stop)
+        patch = mock.patch.object(distbuild, "sccache_dist", return_value="the-key")
+        patch.start()
+        self.addCleanup(patch.stop)
 
     def run_cli(self, *argv: str) -> tuple[int, str, str]:
         out, err = io.StringIO(), io.StringIO()
@@ -691,7 +706,7 @@ class TestSccacheSecrets(unittest.TestCase):
     def test_writes_them_private(self):
         self.assertEqual(self.run_cli()[0], 0)
         s = distbuild.read_secrets(self.path)
-        self.assertEqual((s.scheduler_url, s.server_key), ("http://10.0.0.1:10600", "the-key"))
+        self.assertEqual(s.server_key, "the-key")
         self.assertGreater(len(s.client_token), 30)
         self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
 
@@ -703,11 +718,30 @@ class TestSccacheSecrets(unittest.TestCase):
         self.run_cli("--force")
         self.assertNotEqual(self.path.read_text(), first)
 
+    def test_an_older_file_with_a_url_still_reads(self):
+        self.path.parent.mkdir()
+        self.path.write_text('scheduler_url = "http://x:10600"\nclient_token = "t"\nserver_key = "k"\n')
+        self.assertEqual(distbuild.read_secrets(self.path), distbuild.Secrets("t", "k"))
+
+
+class TestFindScheduler(unittest.TestCase):
+    def test_the_lists_scheduler(self):
+        with mock.patch.object(distbuild.logins, "select",
+                               return_value=[Login("alice@sched", attributes={"sccache-scheduler": None})]), \
+             mock.patch.object(distbuild, "login_address", return_value="10.0.0.1"):
+            self.assertEqual(distbuild.find_scheduler(False, ()), "http://10.0.0.1:10600")
+
     def test_one_scheduler_only(self):
         with mock.patch.object(distbuild.logins, "select", return_value=[Login("a@x"), Login("b@y")]):
-            rc, _, err = self.run_cli()
-        self.assertEqual(rc, 1)
-        self.assertIn("more than one login", err)
+            with self.assertRaises(click.ClickException) as e:
+                distbuild.find_scheduler(False, ())
+        self.assertIn("more than one login", str(e.exception.message))
+
+    def test_none_says_how_to_name_it(self):
+        with mock.patch.object(distbuild.logins, "select", side_effect=distbuild.ToolError("no logins")):
+            with self.assertRaises(click.ClickException) as e:
+                distbuild.find_scheduler(False, ())
+        self.assertIn("--scheduler-url", str(e.exception.message))
 
 
 if __name__ == "__main__":

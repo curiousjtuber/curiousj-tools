@@ -412,17 +412,19 @@ prints the files and commands instead. It sets up the host it runs on; for the o
 there.
 
 ```
-distbuild sccache-secrets [--secrets FILE] [--force] [-f FILE]...
-distbuild sccache [-n|--dry-run] [--secrets FILE] [-f FILE]...
+distbuild sccache-secrets [--secrets FILE] [--force]
+distbuild sccache [-n|--dry-run] [--secrets FILE] [--scheduler-url URL] [--role scheduler|server]... [-f FILE]...
 ```
 
 For Rust, `distbuild sccache` sets up [sccache-dist](https://github.com/mozilla/sccache/blob/main/docs/Distributed.md)
-on this host, in the part its entry in the ssh-lists files gives it: with `sccache-scheduler`, the
-scheduler (port 10600); with `sccache-server`, a build server (port 10501, on its wired address); and
-on every host the client, `~/.config/sccache/config`, with `export RUSTC_WRAPPER=/usr/bin/sccache` in
+on this host, in its roles: `--role scheduler`, the scheduler (port 10600); `--role server`, a build
+server (port 10501, on its wired address); and on every host the client, `~/.config/sccache/config`, with `export RUSTC_WRAPPER=/usr/bin/sccache` in
 the user `makepkg.conf`. The scheduler and server run as systemd user units, as `distbuild distccd`
 runs distccd, with the same root steps done with `sudo` only where needed: `sccache` and `podman`
-installed, the system units off, the ports through `ufw`, lingering.
+installed, the system units off, the ports through `ufw`, lingering. Without `--role`, the roles are
+this host's attributes in the ssh-lists files, `sccache-scheduler` and `sccache-server`. Without
+`--scheduler-url`, the scheduler is this host when it is one, else the login with `sccache-scheduler`,
+its wired address asked over ssh; a host that cannot ssh there needs the option.
 
 A build server runs each compile in a podman container, through sccache-dist's `docker` builder and a
 `docker` that runs `curiousj_tools.podman_docker`: the builder's own overlay builder insists on root.
@@ -433,9 +435,10 @@ SIGTERM; and podman's `localhost/` image names would hide leftovers from the bui
 compile gets a fresh container, about a second of overhead: worth it for crates that take seconds,
 not for small ones. Crates that link (`bin`, `dylib`, `cdylib`, `proc-macro`) are never distributed.
 
-The hosts share a secrets file: the scheduler's URL, a client token and the key the servers' tokens
-are made from. `distbuild sccache-secrets` writes it once, finding the scheduler's wired address over
-ssh; both commands read it from `--secrets FILE`, else `$DISTBUILD_SCCACHE_SECRETS`, else
+A cluster's hosts share one secrets file: the client token every client shows the scheduler (it
+checks a single one) and the key each build server's own token is made from. Generating it is a step
+of its own, `distbuild sccache-secrets`, done once; getting the file to every host is up to you. Both
+commands find it at `--secrets FILE`, else `$DISTBUILD_SCCACHE_SECRETS`, else
 `~/.config/distbuild/sccache-secrets.toml`. Keep it out of anything public.
 
 ## Development

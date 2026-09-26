@@ -4,8 +4,9 @@
     distbuild hosts [-n|--dry-run] [-e|--extra N] [-j|--jobs N] [-l|--local] [--localslots N]
                     [-a TERM]... [-p] [-f FILE]...
     distbuild distccd [-n|--dry-run]
-    distbuild sccache-secrets [--secrets FILE] [--force] [-f FILE]...
-    distbuild sccache [-n|--dry-run] [--secrets FILE] [-f FILE]...
+    distbuild sccache-secrets [--secrets FILE] [--force]
+    distbuild sccache [-n|--dry-run] [--secrets FILE] [--scheduler-url URL]
+                      [--role scheduler|server]... [-f FILE]...
 
 'makepkg' writes the compiler flags of the system makepkg.conf into the
 user's, ~/.config/pacman/makepkg.conf (under XDG_CONFIG_HOME when set), with
@@ -80,25 +81,31 @@ is active, and lingering, so the unit runs with nobody logged in. Then the
 unit is enabled and started, or restarted when it changed. -n prints the
 files and commands instead.
 
-'sccache-secrets' writes what the sccache-dist hosts share: the scheduler's
-URL, the wired address of the login with the 'sccache-scheduler' attribute
-(found over ssh as 'hosts' finds its hosts, or this machine), a client token
-and the key the servers' tokens are made from. The file is FILE with
---secrets, else $DISTBUILD_SCCACHE_SECRETS, else
+'sccache-secrets' generates what the hosts of one sccache-dist cluster
+share: the client token every client shows the scheduler, and the key each
+build server's own token is made from. It is a step of its own, done once
+per cluster; the file then goes to every host, by whatever means suit.
+It is FILE with --secrets, else $DISTBUILD_SCCACHE_SECRETS, else
 ~/.config/distbuild/sccache-secrets.toml; an existing one is kept unless
---force. -f names the ssh-lists files, as for `ssh-logins`.
+--force, which means setting every host up again.
 
-'sccache' sets this machine up for what its entry in the ssh-lists files
-says, from the secrets file: with 'sccache-scheduler', the sccache-dist
-scheduler (port 10600); with 'sccache-server', a build server (port 10501,
-on its wired address); and in any case the client, ~/.config/sccache/config,
-with RUSTC_WRAPPER exported in the user's makepkg.conf, so makepkg's rust
-builds go through it. The scheduler and server run as systemd user units,
-as 'distccd' runs distccd, with the same root steps for sccache, podman and
-their ports. A build server runs each compile in a podman container through
-sccache-dist's docker builder, with a `docker` that runs podman_docker; the
-builder's base image is pulled first. Rust crates that link -- bin, dylib,
-cdylib, proc-macro -- are never distributed, nor cached.
+'sccache' sets this machine up in its sccache-dist roles, from that file:
+'scheduler', the scheduler (port 10600); 'server', a build server (port
+10501, on its wired address); and in any case the client,
+~/.config/sccache/config, with RUSTC_WRAPPER exported in the user's
+makepkg.conf, so makepkg's rust builds go through it. --role names the
+roles; without it, they are this machine's attributes in the ssh-lists
+files, 'sccache-scheduler' and 'sccache-server' (-f as for `ssh-logins`).
+--scheduler-url is where the scheduler is, http://ADDRESS:10600; without
+it, this machine's wired address when it is the scheduler, else that of
+the login with 'sccache-scheduler', asked over ssh.
+
+The scheduler and server run as systemd user units, as 'distccd' runs
+distccd, with the same root steps for sccache, podman and their ports. A
+build server runs each compile in a podman container through sccache-dist's
+docker builder, with a `docker` that runs podman_docker; the builder's base
+image is pulled first. Rust crates that link -- bin, dylib, cdylib,
+proc-macro -- are never distributed, nor cached.
 """
 
 from __future__ import annotations
@@ -717,7 +724,6 @@ def changed(path: pathlib.Path, text: str) -> Write | None:
 
 @dataclasses.dataclass
 class Secrets:
-    scheduler_url: str
     client_token: str
     server_key: str
 
@@ -730,7 +736,6 @@ def secrets_file(given: str | None) -> pathlib.Path:
 
 def secrets_text(s: Secrets) -> str:
     return (f"# written by `distbuild sccache-secrets`: what the sccache-dist hosts share\n"
-            f'scheduler_url = "{s.scheduler_url}"\n'
             f'client_token = "{s.client_token}"\n'
             f'server_key = "{s.server_key}"\n')
 
@@ -743,7 +748,7 @@ def read_secrets(path: pathlib.Path) -> Secrets:
     except tomllib.TOMLDecodeError as e:
         raise click.ClickException(f"{path}: {e}")
     try:
-        return Secrets(data["scheduler_url"], data["client_token"], data["server_key"])
+        return Secrets(data["client_token"], data["server_key"])
     except KeyError as e:
         raise click.ClickException(f"{path}: no {e.args[0]}")
 
@@ -794,39 +799,34 @@ def sccache_dist(*args: str) -> str:
 @cli.command("sccache-secrets", cls=cmdline.Command, help=__doc__)
 @click.option("--secrets", "secrets_path", metavar="FILE", help="The secrets file to write.")
 @click.option("--force", is_flag=True, help="Replace an existing one.")
-@click.option("-f", "files", metavar="FILE", multiple=True,
-              help="an ssh-lists file to read (repeatable; these and no other)")
-def sccache_secrets(secrets_path: str | None, force: bool, files: tuple[str, ...]) -> int:
+def sccache_secrets(secrets_path: str | None, force: bool) -> int:
     path = secrets_file(secrets_path)
     if path.exists() and not force:
         raise click.ClickException(f"{path} exists; --force replaces it, and every host's setup")
-    opts = logins.LoginOpts(files=files, terms=(attrs.term("sccache-scheduler", "term"),))
-    try:
-        found = logins.select(opts)
-    except ToolError as e:
-        raise click.ClickException(str(e))
-    if len(found) != 1:
-        raise click.ClickException("more than one login has 'sccache-scheduler': "
-                                   + ", ".join(e.login for e in found))
-    s = Secrets(f"http://{login_address(found[0])}:{SCHEDULER_PORT}",
-                secrets.token_urlsafe(32), sccache_dist("auth", "generate-jwt-hs256-key"))
+    s = Secrets(secrets.token_urlsafe(32), sccache_dist("auth", "generate-jwt-hs256-key"))
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(secrets_text(s))
     path.chmod(0o600)
-    click.echo(f"{path}: scheduler {s.scheduler_url}")
+    click.echo(f"wrote {path}; it goes to every host of the cluster")
     return 0
 
 
 @cli.command(cls=cmdline.Command, help=__doc__)
 @click.option("-n", "--dry-run", is_flag=True, help="Print the files and commands; change nothing.")
 @click.option("--secrets", "secrets_path", metavar="FILE", help="The secrets file to read.")
+@click.option("--scheduler-url", metavar="URL", help="The scheduler, http://ADDRESS:10600.")
+@click.option("--role", "roles", type=click.Choice(["scheduler", "server"]), multiple=True,
+              help="This machine's role besides client (repeatable); default its list attributes.")
 @click.option("-f", "files", metavar="FILE", multiple=True,
               help="an ssh-lists file to read (repeatable; these and no other)")
-def sccache(dry_run: bool, secrets_path: str | None, files: tuple[str, ...]) -> int:
+def sccache(dry_run: bool, secrets_path: str | None, scheduler_url: str | None,
+            roles: tuple[str, ...], files: tuple[str, ...]) -> int:
     s = read_secrets(secrets_file(secrets_path))
-    me = this_machine(files)
-    scheduler = "sccache-scheduler" in me.attributes
-    server = "sccache-server" in me.attributes
+    if not roles:
+        attributes = this_machine(files).attributes
+        roles = tuple(r for r in ("scheduler", "server") if f"sccache-{r}" in attributes)
+    scheduler, server = "scheduler" in roles, "server" in roles
+    url = scheduler_url or find_scheduler(scheduler, files)
     conf_dir = config_home() / "sccache-dist"
     unit_dir = config_home() / "systemd" / "user"
     writes: list[Write | None] = []
@@ -848,7 +848,7 @@ def sccache(dry_run: bool, secrets_path: str | None, files: tuple[str, ...]) -> 
         token = sccache_dist("auth", "generate-jwt-hs256-server-token",
                              "--secret-key", s.server_key, "--server", public)
         cache = pathlib.Path(os.path.expanduser("~/.cache/sccache-dist"))
-        conf_w = changed(conf, server_conf(s, public, token, cache))
+        conf_w = changed(conf, server_conf(url, public, token, cache))
         shim_w = changed(shim_dir / "docker",
                          f'#!/bin/sh\nexec {sys.executable} -m curiousj_tools.podman_docker "$@"\n')
         unit_w = changed(unit_dir / "sccache-dist-server.service",
@@ -864,7 +864,7 @@ def sccache(dry_run: bool, secrets_path: str | None, files: tuple[str, ...]) -> 
     if client.exists() and not client.read_text().startswith(CLIENT_HEADER):
         raise click.ClickException(f"{client} is not `distbuild sccache`'s; "
                                    "add its [dist] by hand, or move it away")
-    client_w = changed(client, client_conf(s))
+    client_w = changed(client, client_conf(url, s))
     if client_w:
         writes.append(Write(client_w.path, client_w.text, 0o600))
         # A running sccache read the old one; the next compile starts a new one.
@@ -882,19 +882,36 @@ def sccache(dry_run: bool, secrets_path: str | None, files: tuple[str, ...]) -> 
                        linger=scheduler or server)
     done = carry_out([w for w in writes if w], steps, commands, units, dry_run)
     if not dry_run:
-        roles = ["scheduler"] * scheduler + ["build server"] * server + ["client"]
-        click.echo(f"sccache-dist {', '.join(roles)} for {s.scheduler_url}"
+        done_roles = ["scheduler"] * scheduler + ["build server"] * server + ["client"]
+        click.echo(f"sccache-dist {', '.join(done_roles)} for {url}"
                    + ("" if done else " (unchanged)"))
     return 0
+
+
+def find_scheduler(here: bool, files: tuple[str, ...]) -> str:
+    """The scheduler's URL: this machine's, or that of the login with the
+    'sccache-scheduler' attribute."""
+    if here:
+        found = local_addresses()
+        return f"http://{(found.wired + found.wifi or ['127.0.0.1'])[0]}:{SCHEDULER_PORT}"
+    opts = logins.LoginOpts(files=files, terms=(attrs.term("sccache-scheduler", "term"),))
+    try:
+        found = logins.select(opts)
+    except ToolError as e:
+        raise click.ClickException(f"{e}; or name it with --scheduler-url")
+    if len(found) != 1:
+        raise click.ClickException("more than one login has 'sccache-scheduler': "
+                                   + ", ".join(e.login for e in found))
+    return f"http://{login_address(found[0])}:{SCHEDULER_PORT}"
 
 
 CLIENT_HEADER = "# written by `distbuild sccache`"
 
 
-def client_conf(s: Secrets) -> str:
+def client_conf(url: str, s: Secrets) -> str:
     return (f"{CLIENT_HEADER}, from the sccache-dist secrets\n"
             f"[dist]\n"
-            f'scheduler_url = "{s.scheduler_url}"\n'
+            f'scheduler_url = "{url}"\n'
             f"toolchains = []\n\n"
             f"[dist.auth]\n"
             f'type = "token"\n'
@@ -911,10 +928,10 @@ def scheduler_conf(s: Secrets) -> str:
             f'secret_key = "{s.server_key}"\n')
 
 
-def server_conf(s: Secrets, public: str, token: str, cache: pathlib.Path) -> str:
+def server_conf(url: str, public: str, token: str, cache: pathlib.Path) -> str:
     return (f'cache_dir = "{cache}"\n'
             f'public_addr = "{public}"\n'
-            f'scheduler_url = "{s.scheduler_url}"\n\n'
+            f'scheduler_url = "{url}"\n\n'
             f"[builder]\n"
             f'type = "docker"\n\n'
             f"[scheduler_auth]\n"
