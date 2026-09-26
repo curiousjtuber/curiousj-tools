@@ -440,7 +440,11 @@ makepkg's `RUSTC_WRAPPER` is not sccache itself but `sccache_retry`, run from
 the one cargo sees. Some cannot work remotely at all -- a proc macro reading a file of its crate at
 compile time, as `wayland-scanner` reads `wayland.xml`, finds it missing on the build server, and sccache
 reports that as the compile's own error. A real error costs a second, local compile. Each retry is noted
-in `~/.cache/distbuild/sccache-retries.log`. Mind `-j` on a client short of memory: sccache's local
+in `~/.cache/distbuild/sccache-retries.log`. A `target-cpu=native` is named for this machine's CPU before sccache sees
+it, so a build server does not compile for its own. C and C++ that reach sccache -- ggml's build calls
+it itself -- are cached but not distributed (`no_dist` for every compiler found): they are preprocessed
+here and compiled there, so a `-march=native` would mean two CPUs at once. distcc has the same trouble
+with a package that adds `-march=native` itself. Mind `-j` on a client short of memory: sccache's local
 server holds each job's inputs and outputs, on top of the proc macros, build scripts and links that
 stay local.
 

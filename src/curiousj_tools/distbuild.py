@@ -93,7 +93,11 @@ It is FILE with --secrets, else $DISTBUILD_SCCACHE_SECRETS, else
 'scheduler', the scheduler (port 10600); 'server', a build server (port
 10501, on its wired address); and in any case the client,
 ~/.config/sccache/config, with RUSTC_WRAPPER exported in the user's
-makepkg.conf, so makepkg's rust builds go through it. The wrapper is
+makepkg.conf, so makepkg's rust builds go through it. C and C++ that
+reach sccache (ggml's build calls it itself) are cached but not
+distributed, each compiler here named "no_dist": their preprocessing is done
+here and their compile on the server, so a -march=native would mean two
+different CPUs. The wrapper is
 sccache_retry, run from ~/.local/share/distbuild/sccache-retry: a compile
 that fails distributed -- a proc macro reading a file of its crate finds it
 missing on the server -- runs again here instead of failing the build. --role names the
@@ -867,7 +871,7 @@ def sccache(dry_run: bool, secrets_path: str | None, scheduler_url: str | None,
     if client.exists() and not client.read_text().startswith(CLIENT_HEADER):
         raise click.ClickException(f"{client} is not `distbuild sccache`'s; "
                                    "add its [dist] by hand, or move it away")
-    client_w = changed(client, client_conf(url, s))
+    client_w = changed(client, client_conf(url, s, c_compilers()))
     if client_w:
         writes.append(Write(client_w.path, client_w.text, 0o600))
         # A running sccache read the old one; the next compile starts a new one.
@@ -915,14 +919,43 @@ def find_scheduler(here: bool, files: tuple[str, ...]) -> str:
 CLIENT_HEADER = "# written by `distbuild sccache`"
 
 
-def client_conf(url: str, s: Secrets) -> str:
+_C_COMPILER = re.compile(r"(cc|c\+\+|c89|c99|gcc|g\+\+|clang|clang\+\+)(-[0-9.]+)?"
+                         r"|.+-(gcc|g\+\+|c\+\+|cc)(-[0-9.]+)?")
+C_COMPILER_DIRS = ("/usr/bin", "/usr/lib/distcc/bin", "/usr/lib/ccache/bin", "/usr/lib/sccache/bin")
+
+
+def c_compilers(dirs: tuple[str, ...] = C_COMPILER_DIRS) -> list[str]:
+    """Every C and C++ compiler here, as sccache may be handed it: by name in
+    each of dirs (distcc's and ccache's included, as makepkg puts them first),
+    and where the name leads."""
+    found = set()
+    for d in dirs:
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for name in names:
+            if _C_COMPILER.fullmatch(name):
+                path = os.path.join(d, name)
+                found.update({path, os.path.realpath(path)})
+    return sorted(found)
+
+
+def client_conf(url: str, s: Secrets, no_dist: list[str]) -> str:
+    """The client config. C and C++ are cached here but never distributed:
+    their preprocessing is done here and their compile there, so a
+    -march=native, which a build like ggml's adds itself, means this CPU for
+    the one and the server's for the other."""
+    tables = "".join(f'\n[[dist.toolchains]]\ntype = "no_dist"\ncompiler_executable = "{c}"\n'
+                     for c in no_dist)
     return (f"{CLIENT_HEADER}, from the sccache-dist secrets\n"
             f"[dist]\n"
-            f'scheduler_url = "{url}"\n'
-            f"toolchains = []\n\n"
+            f'scheduler_url = "{url}"\n\n'
             f"[dist.auth]\n"
             f'type = "token"\n'
-            f'token = "{s.client_token}"\n')
+            f'token = "{s.client_token}"\n'
+            + (f"\n# C and C++ are cached, never distributed: see `distbuild sccache -h`\n{tables}"
+               if tables else ""))
 
 
 def scheduler_conf(s: Secrets) -> str:

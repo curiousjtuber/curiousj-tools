@@ -11,11 +11,16 @@ the one cargo sees. A real error costs a second, local compile; each retry is
 noted in ~/.cache/distbuild/sccache-retries.log (under XDG_CACHE_HOME when set).
 A compile reading its source from stdin ("-") goes to rustc directly: its input
 could not be given twice, and sccache does not cache it.
+
+A "target-cpu=native" is replaced by the CPU rustc takes it for here, before
+sccache sees it: on a build server it would mean that server's CPU, and the
+code built there would be for a machine other than this one.
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -45,6 +50,30 @@ def note_retry(args: list[str], status: int, stderr: bytes) -> None:
         pass
 
 
+_NATIVE = re.compile(r"((?:-C|--codegen=?)?target-cpu=)native")
+
+
+def native_cpu(rustc: str) -> str | None:
+    """What rustc takes target-cpu=native for on this machine."""
+    try:
+        out = subprocess.run([rustc, "--print", "target-cpus"], capture_output=True,
+                             text=True).stdout
+    except OSError:
+        return None
+    m = re.search(r"^\s*native\b.*\(currently (\S+?)\)", out, re.M)
+    return m.group(1) if m else None
+
+
+def name_native(args: list[str]) -> list[str]:
+    """args with each target-cpu=native naming this machine's CPU."""
+    if not any(_NATIVE.search(a) for a in args[1:]):
+        return args
+    cpu = native_cpu(args[0])
+    if cpu is None:
+        return args
+    return [args[0]] + [_NATIVE.sub(rf"\g<1>{cpu}", a) for a in args[1:]]
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     if not args:
@@ -53,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
     sccache = os.environ.get("DISTBUILD_SCCACHE") or shutil.which("sccache")
     if sccache is None or "-" in args[1:]:
         os.execvp(args[0], args)
-    proc = subprocess.run([sccache, *args], capture_output=True)
+    proc = subprocess.run([sccache, *name_native(args)], capture_output=True)
     if proc.returncode == 0:
         sys.stdout.buffer.write(proc.stdout)
         sys.stderr.buffer.write(proc.stderr)

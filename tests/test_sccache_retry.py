@@ -61,6 +61,17 @@ class TestRetry(RetryCase):
         self.assertEqual(proc.returncode, 3)
         self.assertEqual(len(self.calls.read_text().splitlines()), 2)
 
+    def test_native_names_this_cpu_for_sccache(self):
+        self.rustc.write_text(f'#!/bin/sh\necho "rustc $*" >> "{self.calls}"\n'
+                              'case "$*" in *"--print target-cpus"*) '
+                              'echo "    native - Select the CPU of the current host (currently znver5).";; esac\n')
+        proc = self.run_retry("exit 0", "-C", "target-cpu=native", "-Ctarget-cpu=native",
+                              "--codegen=target-cpu=native", "--crate-name", "a")
+        self.assertEqual(proc.returncode, 0)
+        calls = self.calls.read_text().splitlines()
+        self.assertEqual(calls[-1], f"sccache {self.rustc} -C target-cpu=znver5 -Ctarget-cpu=znver5 "
+                                    "--codegen=target-cpu=znver5 --crate-name a")
+
     def test_stdin_input_goes_to_rustc_directly(self):
         proc = self.run_retry("exit 1", "-", "--print", "cfg")
         self.assertEqual(proc.returncode, 0)

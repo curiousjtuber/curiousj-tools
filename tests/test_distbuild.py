@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import textwrap
+import tomllib
 import unittest
 from unittest import mock
 
@@ -614,6 +615,24 @@ class TestSccacheCli(unittest.TestCase):
         self.assertEqual(retry.stat().st_mode & 0o777, 0o755)
         self.assertEqual(self.ran, [["sccache", "--stop-server"]])
         self.assertIn("sccache-dist client for http://10.0.0.1:10600", out)
+
+    def test_c_and_cpp_are_not_distributed(self):
+        with mock.patch.object(distbuild, "c_compilers", return_value=["/usr/bin/c++", "/usr/bin/gcc"]):
+            self.run_cli()
+        conf = tomllib.loads((self.config / "sccache" / "config").read_text())
+        self.assertEqual(conf["dist"]["toolchains"],
+                         [{"type": "no_dist", "compiler_executable": "/usr/bin/c++"},
+                          {"type": "no_dist", "compiler_executable": "/usr/bin/gcc"}])
+        self.assertEqual(conf["dist"]["auth"], {"type": "token", "token": "client-tok"})
+
+    def test_c_compilers_by_name_and_where_they_lead(self):
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("gcc", "g++", "x86_64-pc-linux-gnu-gcc-16.2.1", "clang-22", "rustc", "cpp", "gcov"):
+                pathlib.Path(d, name).write_text("")
+            os.symlink("gcc", os.path.join(d, "cc"))
+            got = distbuild.c_compilers((d,))
+        names = {os.path.basename(p) for p in got}
+        self.assertEqual(names, {"gcc", "g++", "x86_64-pc-linux-gnu-gcc-16.2.1", "clang-22", "cc"})
 
     def test_second_run_changes_nothing(self):
         self.run_cli()
