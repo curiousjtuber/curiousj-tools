@@ -13,14 +13,25 @@ podman, and are adapted; the rest go to podman as they are:
                SIGTERM; podman would wait its 10 s before killing each one.
   ps/images    podman names local images "localhost/NAME", and the builder's
     --format   startup cleanup looks for names starting "sccache-builder-".
+
+A toolchain copied in -- into a container of the builder's base image --
+is also made to run here. The client packs its compiler with its own copies
+of the libraries it loads, and those may be built for a newer CPU than this
+server's (CachyOS's znver4 glibc on an older Zen). Each ELF program or
+library in it that this machine also has at the same path is replaced by
+this machine's; a target's libraries (rustlib/TARGET/lib) are not, as they
+are what the compile links against, not what runs it.
 """
 
 from __future__ import annotations
 
+import io
 import os
 import re
 import subprocess
 import sys
+import tarfile
+import threading
 import zlib
 
 BLOCK = 512
@@ -87,6 +98,94 @@ def copy_archive(src, out) -> None:
         copy_tar(src, first, out)
 
 
+BASE_IMAGE = "docker.io/aidanhs/busybox"
+_TARGET_LIBS = re.compile(r"(^|/)rustlib/[^/]+/lib/")
+
+
+def is_elf(data: bytes) -> bool:
+    return data[:4] == b"\x7fELF"
+
+
+def local_twin(name: str, root: str = "/") -> str | None:
+    """This machine's file at the archive member name's path, when it is a
+    runnable ELF file and not a target's library."""
+    if _TARGET_LIBS.search(name):
+        return None
+    path = os.path.join(root, name.lstrip("/"))
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4)
+    except OSError:
+        return None
+    return path if is_elf(head) else None
+
+
+def localize(src, out, root: str = "/") -> list[str]:
+    """The tar on src to out, each ELF member that has a local twin replaced
+    by it. What was replaced."""
+    swapped = []
+    with tarfile.open(fileobj=src, mode="r|") as tin, tarfile.open(fileobj=out, mode="w|") as tout:
+        for m in tin:
+            data = tin.extractfile(m) if m.isfile() else None
+            if data is not None:
+                head = data.read(4)
+                twin = local_twin(m.name, root) if is_elf(head) else None
+                if twin:
+                    with open(twin, "rb") as f:
+                        m.size = os.fstat(f.fileno()).st_size
+                        tout.addfile(m, f)
+                    swapped.append(m.name)
+                    continue
+                tout.addfile(m, io.BufferedReader(_Rejoined(head, data), _CHUNK))
+            else:
+                tout.addfile(m)
+    return swapped
+
+
+class _Rejoined(io.RawIOBase):
+    """head, then the rest of stream: a member whose first bytes were read."""
+
+    def __init__(self, head: bytes, stream):
+        self.head, self.stream = head, stream
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, b) -> int:
+        if self.head:
+            n = min(len(b), len(self.head))
+            b[:n], self.head = self.head[:n], self.head[n:]
+            return n
+        chunk = self.stream.read(len(b))
+        b[:len(chunk)] = chunk
+        return len(chunk)
+
+
+def copy_toolchain(src, out, root: str = "/") -> list[str]:
+    """One archive from src, as copy_archive reads it, to out localized."""
+    r, w = os.pipe()
+    reader, writer = os.fdopen(r, "rb"), os.fdopen(w, "wb")
+
+    def feed():
+        try:
+            copy_archive(src, writer)
+        finally:
+            writer.close()
+    t = threading.Thread(target=feed, daemon=True)
+    t.start()
+    try:
+        return localize(reader, out, root)
+    finally:
+        reader.close()
+        t.join()
+
+
+def is_base_container(cid: str) -> bool:
+    out = subprocess.run(["podman", "inspect", "--format", "{{.ImageName}}", cid],
+                         capture_output=True, text=True).stdout.strip()
+    return out.split(":")[0] == BASE_IMAGE
+
+
 def podman_args(args: list[str]) -> list[str]:
     if args[:2] == ["rm", "-f"]:
         return ["rm", "-f", "-t", "0", *args[2:]]
@@ -101,7 +200,12 @@ def main(argv: list[str] | None = None) -> int:
     args = podman_args(sys.argv[1:] if argv is None else argv)
     if args[:2] == ["cp", "-"]:
         proc = subprocess.Popen(["podman", *args], stdin=subprocess.PIPE)
-        copy_archive(sys.stdin.buffer, proc.stdin)
+        if len(args) > 2 and is_base_container(args[2].split(":")[0]):
+            swapped = copy_toolchain(sys.stdin.buffer, proc.stdin)
+            print(f"podman_docker: toolchain made to run here, {len(swapped)} files of this "
+                  f"machine's: {' '.join(swapped)}", file=sys.stderr)
+        else:
+            copy_archive(sys.stdin.buffer, proc.stdin)
         proc.stdin.close()
         return proc.wait()
     if args[:1] in (["ps"], ["images"]) and "--format" in args:

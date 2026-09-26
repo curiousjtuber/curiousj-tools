@@ -6,6 +6,7 @@ import gzip
 import io
 import os
 import tarfile
+import tempfile
 import threading
 import unittest
 
@@ -87,6 +88,63 @@ class TestArgs(unittest.TestCase):
         self.assertEqual(podman_docker.strip_localhost(
             "abc localhost/sccache-builder-1\ndef docker.io/aidanhs/busybox\n"),
             "abc sccache-builder-1\ndef docker.io/aidanhs/busybox\n")
+
+
+class TestLocalize(unittest.TestCase):
+    CLIENT = {
+        "usr/lib/libc.so.6": b"\x7fELF client libc",
+        "usr/lib/libz.so.1.3.1": b"\x7fELF client zlib",
+        "opt/tc/bin/rustc": b"\x7fELF client rustc",
+        "opt/tc/lib/rustlib/x86_64-unknown-linux-gnu/lib/libstd-1.so": b"\x7fELF target std",
+        "opt/tc/lib/rustlib/x86_64-unknown-linux-gnu/lib/libcore-1.rlib": b"!<arch> target core",
+        "usr/lib/README": b"not a program",
+    }
+    SERVER = {
+        "usr/lib/libc.so.6": b"\x7fELF server libc, longer than the client's",
+        "usr/lib/libz.so.1.3.1": b"\x7fELF server zlib",
+        "opt/tc/lib/rustlib/x86_64-unknown-linux-gnu/lib/libstd-1.so": b"\x7fELF server target std",
+        "usr/lib/README": b"server text",
+    }
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = tmp.name
+        for name, data in self.SERVER.items():
+            path = os.path.join(self.root, name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(data)
+
+    def contents(self, data: bytes) -> dict[str, bytes]:
+        with tarfile.open(fileobj=io.BytesIO(data)) as tar:
+            return {m.name: tar.extractfile(m).read() for m in tar if m.isfile()}
+
+    def test_runnable_files_become_this_machines(self):
+        out = io.BytesIO()
+        swapped = podman_docker.localize(io.BytesIO(tar_bytes(**self.CLIENT)), out, self.root)
+        self.assertEqual(sorted(swapped), ["usr/lib/libc.so.6", "usr/lib/libz.so.1.3.1"])
+        got = self.contents(out.getvalue())
+        self.assertEqual(got["usr/lib/libc.so.6"], self.SERVER["usr/lib/libc.so.6"])
+        # Not here, a target's library, not a program: as the client sent them.
+        for name in ("opt/tc/bin/rustc", "opt/tc/lib/rustlib/x86_64-unknown-linux-gnu/lib/libstd-1.so",
+                     "opt/tc/lib/rustlib/x86_64-unknown-linux-gnu/lib/libcore-1.rlib", "usr/lib/README"):
+            self.assertEqual(got[name], self.CLIENT[name])
+
+    def test_gzip_on_an_open_pipe(self):
+        pipe = OpenPipe(gzip.compress(tar_bytes(**self.CLIENT)))
+        self.addCleanup(pipe.close)
+        out = io.BytesIO()
+        done = threading.Event()
+        result = []
+
+        def go():
+            result.append(podman_docker.copy_toolchain(pipe.reader, out, self.root))
+            done.set()
+        threading.Thread(target=go, daemon=True).start()
+        self.assertTrue(done.wait(5), "copy_toolchain waited for the pipe to close")
+        self.assertEqual(len(result[0]), 2)
+        self.assertEqual(set(self.contents(out.getvalue())), set(self.CLIENT))
 
 
 if __name__ == "__main__":
