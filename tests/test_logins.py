@@ -27,15 +27,15 @@ class DropSelf(unittest.TestCase):
         self.assertEqual(logins.drop_self(H("my-mac.example.com"), SELF, "alice"), [])
         self.assertEqual(logins.drop_self(H("my-mac2"), SELF, "alice"), H("my-mac2"))
 
-    def test_local_login_inherits_the_self_entrys_attributes_and_operations(self):
+    def test_local_login_inherits_the_self_entrys_commands_attributes_and_operations(self):
         inside = Login("my-mac", via="distrobox enter dev --", attributes={"dbx": None})
         me = Login("alice@my-mac.local", ["exec zsh"], attributes={"mac": None, "brew": None},
                    operations={"sys": "brew upgrade"}, file="F")
         entries = [Login("a"), inside, me, Login("my-mac", attributes={"other": None})]
         local = logins.local_login(entries, SELF, "alice")
-        self.assertEqual(local, Login("localhost", attributes={"mac": None, "brew": None},
+        self.assertEqual(local, Login("localhost", ["exec zsh"], attributes={"mac": None, "brew": None},
                                       operations={"sys": "brew upgrade"}))
-        self.assertEqual((local.commands, local.via, local.file), ([], None, "F"))
+        self.assertEqual((local.via, local.file), (None, "F"))
         # a via entry is a place inside the machine, not the machine; another user is not me
         self.assertEqual(logins.local_login([inside, Login("bob@my-mac")], SELF, "alice"),
                          Login("localhost"))

@@ -192,8 +192,9 @@ See [examples/ssh-lists.toml](examples/ssh-lists.toml) and
 [examples/ssh-lists-operations.yaml](examples/ssh-lists-operations.yaml) for operations kept in a
 file of their own. `localhost` is appended to the logins for
 the local side unless `-N`, and entries naming the machine you are on, for your user, are
-dropped, so one file serves every host on it; `localhost` takes over the attributes and
-operations of the first such entry without a `via`. The ones with a `via` go too: `pssh` run on
+dropped, so one file serves every host on it; `localhost` takes over the `commands`,
+attributes and operations of the first such entry without a `via`, so `xssh`'s local pane runs
+the same `commands` as the other hosts' panes for it. The ones with a `via` go too: `pssh` run on
 devbox reaches devbox itself, not its container, which only another host's run gets into.
 `-a TERM` keeps the logins whose attributes satisfy the term, `mise`, `arch=x86_64`, `!mise` or
 `arch!=x86_64` (quote the `!` for the shell), every term when given several; `-A` does the

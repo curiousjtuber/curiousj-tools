@@ -7,9 +7,10 @@ One entry per line: every login ([user@]host) in the lists files, then
 for them (xssh: a local pane, pssh: a local run); -N/--no-local leaves it
 out. Entries that name this machine, for this user, are dropped, those
 with a via too, so one list can serve every host on it; 'localhost' takes
-over the attributes and operations of the first such entry without a via.
--p/--pick shows the list in fzf (TAB marks several) and prints only the
-marked entries; without fzf, a numbered menu (see `pick-lines -h`).
+over the commands, attributes and operations of the first such entry
+without a via (xssh runs the commands in the local pane). -p/--pick shows
+the list in fzf (TAB marks several) and prints only the marked entries;
+without fzf, a numbered menu (see `pick-lines -h`).
 Aborting the picker exits 130 with nothing printed.
 
 -a/--attr TERM keeps the logins whose attributes satisfy TERM: 'mise' has
@@ -112,12 +113,13 @@ def drop_self(entries: list[Login], names: set[str], user: str) -> list[Login]:
 
 
 def local_login(entries: list[Login], names: set[str], user: str) -> Login:
-    """'localhost' as the list describes this machine: the attributes and
-    operations of the first entry naming it that has no via (one with a via
-    is a place inside it, not the machine). A bare 'localhost' without one."""
+    """'localhost' as the list describes this machine: the commands,
+    attributes and operations of the first entry naming it that has no via
+    (one with a via is a place inside it, not the machine). A bare
+    'localhost' without one."""
     for entry in entries:
         if entry.via is None and is_self(entry, names, user):
-            return Login("localhost", attributes=dict(entry.attributes),
+            return Login("localhost", list(entry.commands), attributes=dict(entry.attributes),
                          operations=dict(entry.operations), file=entry.file)
     return Login("localhost")
 

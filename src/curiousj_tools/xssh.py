@@ -15,8 +15,10 @@ shell rc: aliases work and 'cd' persists between commands. A login with
 'commands' in the lists file runs them after login instead of stopping at
 the shell -- `ssh -t LOGIN 'cd src; exec zsh'`, or `distrobox enter dev -nw` --
 so the last one should be what you want to type into: an interactive
-shell, a container entered. The pane ends when it exits. (A login's 'via'
-is pssh's business; the pane types 'commands' only.)
+shell, a container entered. The pane ends when it exits. The local pane
+runs the 'commands' of the entry naming this machine, if it has any (see
+`ssh-logins -h`), from ~. (A login's 'via' is pssh's business; the pane
+types 'commands' only.)
 
 -o/--op NAME runs an operation of the lists files instead (see `pssh -h`
 for what one is): a pane per login the operation applies to, each running
@@ -56,9 +58,15 @@ from .lists import Login, ToolError
 LOCAL_PANE = "cd ~; exec $SHELL"
 
 
+def local_pane(entry: Login) -> str:
+    """The local pane: at ~ like a fresh ssh login, then the commands
+    'localhost' took over from the entry naming this machine, else a shell."""
+    return "; ".join(["cd ~", *entry.commands]) if entry.commands else LOCAL_PANE
+
+
 def pane_command(entry: Login) -> str:
     if entry.login == "localhost":
-        return LOCAL_PANE
+        return local_pane(entry)
     if not entry.commands:
         return f"ssh {entry.login}"
     return f"ssh -t {entry.login} {shlex.quote('; '.join(entry.commands))}"
@@ -93,7 +101,8 @@ def op_pane_command(entry: Login, script_text: str) -> str:
     base64-encoded and is decoded on the login."""
     line = pssh.wrap(script_text, entry.via)
     encoded = base64.b64encode(line.encode()).decode()
-    then = "; ".join(entry.commands) if entry.commands else LOCAL_PANE
+    then = ("; ".join(entry.commands) if entry.commands and entry.login != "localhost"
+            else local_pane(entry))
     inner = f'sh -c "$(echo {encoded} | base64 -d)"; {then}'
     if entry.login == "localhost":
         return inner

@@ -49,6 +49,10 @@ class PaneCommands(unittest.TestCase):
         self.assertEqual(xssh.pane_commands([Login("a"), Login("b@c"), Login("localhost")]),
                          ["ssh a", "ssh b@c", "cd ~; exec $SHELL"])
 
+    def test_localhost_runs_its_commands_from_home(self):
+        self.assertEqual(xssh.pane_command(Login("localhost", ["~/.local/bin/zsh"])),
+                         "cd ~; ~/.local/bin/zsh")
+
     def test_via_is_not_the_panes_business(self):
         self.assertEqual(xssh.pane_commands([Login("a", via="distrobox enter dev --")]), ["ssh a"])
 
@@ -99,6 +103,8 @@ class OpPanes(unittest.TestCase):
         self.assertTrue(local.startswith('sh -c "$(echo '), local)
         self.assertTrue(local.endswith(' | base64 -d)"; cd ~; exec $SHELL'), local)
         self.assertEqual(decoded(local), "cd ~\nrc=0\nexit $rc")
+        local = xssh.op_pane_command(Login("localhost", ["exec zsh"]), "x")
+        self.assertTrue(local.endswith(' | base64 -d)"; cd ~; exec zsh'), local)
 
     def test_the_decoded_pane_runs(self):
         pane = xssh.op_pane_command(Login("localhost"), "echo hi\nexit 3")
