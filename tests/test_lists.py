@@ -210,7 +210,7 @@ class FindFiles(unittest.TestCase):
 
     def test_explicit_files_in_order_each_readable(self):
         a, b = self.write("a.toml"), self.write("b.yaml")
-        self.write(".config/ssh-lists.toml")
+        self.write(".config/ssh-lists/ssh-lists.toml")
         self.assertEqual(lists.find_files([b, a], self.env), [b, a])
         with self.assertRaises(ToolError) as cm:
             lists.find_files([a, os.path.join(self.tmp.name, "none")], self.env)
@@ -218,7 +218,7 @@ class FindFiles(unittest.TestCase):
         self.assertNotIn("$SSH_LISTS_FILE", str(cm.exception))
 
     def test_file_var_is_colon_separated_then_the_search_path(self):
-        xdg = self.write(".config/ssh-lists.toml")
+        xdg = self.write(".config/ssh-lists/ssh-lists.toml")
         self.assertEqual(lists.find_files((), self.env), [xdg])
         in_dir = self.write("lists/ssh-lists.yaml")
         env = dict(self.env, SSH_LISTS_PATH=os.path.join(self.tmp.name, "nowhere")
@@ -237,16 +237,24 @@ class FindFiles(unittest.TestCase):
         local = self.write("a/ssh-lists-local.yaml")
         more = self.write("a/ssh-lists.toml")
         other = self.write("b/ssh-lists.json")
-        for name in ("a/ssh-lists.toml~", "a/ssh-lists.yaml.~1~", "a/notes.txt", "a/lists.toml",
+        any_name = self.write("a/lists.toml")
+        extra = self.write("b/extra.yaml")
+        for name in ("a/ssh-lists.toml~", "a/ssh-lists.yaml.~1~", "a/notes.txt",
                      "b/ssh-lists-x.md"):
             self.write(name)
         os.makedirs(os.path.join(self.tmp.name, "a", "ssh-lists.d.toml"))
         env = dict(self.env, SSH_LISTS_PATH=os.path.join(self.tmp.name, "a") + ":"
                    + os.path.join(self.tmp.name, "b"))
-        self.assertEqual(lists.find_files((), env), [local, more, main, other])
+        self.assertEqual(lists.find_files((), env), [any_name, local, more, main, extra, other])
+
+    def test_default_is_a_directory_of_its_own(self):
+        cfg = self.write(".config/ssh-lists/mine.yaml")
+        self.write(".config/other.toml")
+        self.write(".config/ssh-lists.toml")
+        self.assertEqual(lists.find_files((), self.env), [cfg])
 
     def test_search_path_replaces_the_default(self):
-        self.write(".config/ssh-lists.toml")
+        self.write(".config/ssh-lists/ssh-lists.toml")
         env = dict(self.env, SSH_LISTS_PATH=os.path.join(self.tmp.name, "nowhere"))
         with self.assertRaises(ToolError) as cm:
             lists.find_files((), env)
@@ -254,7 +262,7 @@ class FindFiles(unittest.TestCase):
         self.assertIn("SSH_LISTS_PATH", str(cm.exception))
 
     def test_xdg_config_home_honoured(self):
-        cfg = self.write("xdg/ssh-lists.json", "{}")
+        cfg = self.write("xdg/ssh-lists/ssh-lists.json", "{}")
         env = dict(self.env, XDG_CONFIG_HOME=os.path.join(self.tmp.name, "xdg"))
         self.assertEqual(lists.find_files((), env), [cfg])
         self.assertEqual(lists.load_all((), env).files, [cfg])
@@ -359,16 +367,16 @@ class ExampleFiles(unittest.TestCase):
         root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples")
         with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
             found = lists.load_files([os.path.join(root, "ssh-lists.yaml"),
-                                      os.path.join(root, "ssh-lists-operations.yaml")])
+                                      os.path.join(root, "operations.yaml")])
         self.assertEqual(err.getvalue(), "")
         alone = lists.load(os.path.join(root, "ssh-lists.yaml"))
         self.assertGreater(len(found.operations), len(alone.operations))
         self.assertTrue(set(alone.operations) < set(found.operations))
         group = next(op for op in found.operations.values()
-                     if op.group and op.file.endswith("ssh-lists-operations.yaml"))
+                     if op.group and op.file.endswith("operations.yaml"))
         self.assertTrue(any(found.operations[m].file.endswith("ssh-lists.yaml") for m in group.members))
         with self.assertRaises(ToolError) as cm:  # the group needs the other file
-            lists.load(os.path.join(root, "ssh-lists-operations.yaml"))
+            lists.load(os.path.join(root, "operations.yaml"))
         self.assertIn("unknown member", str(cm.exception))
 
 

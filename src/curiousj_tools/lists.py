@@ -65,13 +65,13 @@ Several files make one list. Which are read:
     -f FILE                     on the command line, repeatable: those and no other
     $SSH_LISTS_FILE             colon-separated files, when no -f
     $SSH_LISTS_PATH             colon-separated directories, otherwise: every
-                                ssh-lists*.toml, .yaml, .yml or .json in each,
-                                by name; default $XDG_CONFIG_HOME (~/.config)
+                                .toml, .yaml, .yml or .json file in each, by
+                                name; default $XDG_CONFIG_HOME/ssh-lists
+                                (~/.config/ssh-lists)
 
-Files merge in that order. An entry given twice -- a login with the same
-commands and via, a path, an operation name -- keeps its first definition,
-with a warning naming both files. (Beware that 'ssh-lists-extra.yaml'
-sorts before 'ssh-lists.yaml'.)
+Files merge in that order, those of a directory by name. An entry given
+twice -- a login with the same commands and via, a path, an operation
+name -- keeps its first definition, with a warning naming both files.
 """
 
 from __future__ import annotations
@@ -158,14 +158,14 @@ def warn(message: str) -> None:
 
 
 def search_path(env: Any = None) -> list[str]:
-    """The directories read for ssh-lists*: $SSH_LISTS_PATH, else the XDG
-    config home."""
+    """The directories whose lists files are read: $SSH_LISTS_PATH, else
+    ssh-lists in the XDG config home."""
     env = os.environ if env is None else env
     raw = env.get(PATH_VAR)
     if raw:
         return [os.path.expanduser(d) for d in raw.split(":") if d]
     home = env.get("HOME") or os.path.expanduser("~")
-    return [env.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")]
+    return [os.path.join(env.get("XDG_CONFIG_HOME") or os.path.join(home, ".config"), NAME)]
 
 
 def find_files(explicit: Sequence[str] = (), env: Any = None) -> list[str]:
@@ -186,13 +186,13 @@ def find_files(explicit: Sequence[str] = (), env: Any = None) -> list[str]:
             continue
         for name in names:
             path = os.path.join(d, name)
-            if (name.startswith(NAME) and os.path.splitext(name)[1].lower() in SUFFIXES
+            if (os.path.splitext(name)[1].lower() in SUFFIXES
                     and os.path.isfile(path) and os.access(path, os.R_OK)):
                 found.append(path)
     if not found:
         raise ToolError(
-            f"no {NAME}*{'/'.join(SUFFIXES)} in {':'.join(dirs)}: set ${FILE_VAR} or ${PATH_VAR}, "
-            f"or create ~/.config/{NAME}.toml (or .yaml, .yml, .json)")
+            f"no lists file ({'/'.join(SUFFIXES)}) in {':'.join(dirs)}: set ${FILE_VAR} or "
+            f"${PATH_VAR}, or create ~/.config/{NAME}/{NAME}.toml (or .yaml, .yml, .json)")
     return found
 
 

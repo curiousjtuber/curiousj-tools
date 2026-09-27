@@ -1,8 +1,8 @@
 # The logins xssh, pssh and ssh-logins reach, the paths `pssh -P` works in,
-# and the operations `pssh -o` and `xssh -o` run. Lives at
-# ~/.config/ssh-lists.toml, or on $SSH_LISTS_PATH (see README); the same file
-# can be YAML (ssh-lists.yaml) or JSON (ssh-lists.json), and several
-# ssh-lists*.* files side by side make one list.
+# and the operations `pssh -o` and `xssh -o` run. Lives in
+# ~/.config/ssh-lists/, or in a directory on $SSH_LISTS_PATH (see README);
+# the same file can be YAML (ssh-lists.yaml) or JSON (ssh-lists.json), and
+# every such file side by side makes one list.
 
 logins = [
     "build.example.com",                 # [user@]host, as ssh takes it

@@ -1,4 +1,4 @@
-# The same lists as ssh-lists.toml, in YAML: ~/.config/ssh-lists.yaml (or .yml).
+# The same lists as ssh-lists.toml, in YAML: ~/.config/ssh-lists/ssh-lists.yaml (or .yml).
 logins:
   - build.example.com                    # [user@]host, as ssh takes it
   - login: alice@devbox                  # a mapping where a login needs more

@@ -26,8 +26,8 @@ Which files, merged in this order:
 
     -f FILE                         on the command line, repeatable
     $SSH_LISTS_FILE                 colon-separated files, without -f
-    DIR/ssh-lists*.toml|yaml|yml|json   otherwise, for each DIR in $SSH_LISTS_PATH
-                                    (colon-separated), default ~/.config
+    DIR/*.toml|yaml|yml|json        otherwise, for each DIR in $SSH_LISTS_PATH
+                                    (colon-separated), default ~/.config/ssh-lists
 """
 
 from __future__ import annotations

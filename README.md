@@ -145,9 +145,9 @@ pssh      [-f FILE]... -L|--list-ops
 xssh      [-f FILE]... -L|--list-ops
 ```
 
-All three read the same lists, `~/.config/ssh-lists.toml` (or `.yaml`, `.yml`, `.json`, or several
-such files; see [where they live](#where-the-lists-files-live)): the `logins` to reach, the
-`paths` to work in, and the `operations` to run there. A login is a `[user@]host` string, or a
+All three read the same lists, the `.toml` (or `.yaml`, `.yml`, `.json`) files in
+`~/.config/ssh-lists/` (see [where they live](#where-the-lists-files-live)): the `logins` to reach,
+the `paths` to work in, and the `operations` to run there. A login is a `[user@]host` string, or a
 table when it needs `commands` run after login (`distrobox enter dev -nw`, `cd src`, `exec zsh`):
 `xssh` runs them in that login's pane, so end them in something interactive, or the pane ends
 with them. `via` is the batch counterpart, for `pssh`: a command line its command is run through
@@ -189,7 +189,7 @@ paths:
 
 See [examples/ssh-lists.toml](examples/ssh-lists.toml) and
 [examples/ssh-lists.yaml](examples/ssh-lists.yaml), and
-[examples/ssh-lists-operations.yaml](examples/ssh-lists-operations.yaml) for operations kept in a
+[examples/operations.yaml](examples/operations.yaml) for operations kept in a
 file of their own. `localhost` is appended to the logins for
 the local side unless `-N`, and entries naming the machine you are on, for your user, are
 dropped, so one file serves every host on it; `localhost` takes over the `commands`,
@@ -309,17 +309,18 @@ Several files make one list, merged in this order:
 |---|---|
 | on the command line | `-f FILE`, repeatable: those files and no other |
 | named files | `$SSH_LISTS_FILE`, colon-separated, when no `-f` |
-| a search path | `$SSH_LISTS_PATH`, colon-separated directories, otherwise: every `ssh-lists*.toml`, `.yaml`, `.yml`, `.json` in each, by name |
-| default | `~/.config` (`$XDG_CONFIG_HOME`), the same names |
+| a search path | `$SSH_LISTS_PATH`, colon-separated directories, otherwise: every `.toml`, `.yaml`, `.yml`, `.json` file in each, by name |
+| default | `~/.config/ssh-lists` (`$XDG_CONFIG_HOME/ssh-lists`), the same |
 
 An entry defined twice -- a login with the same `commands` and `via`, a path, an operation name
 -- keeps its first definition, with a warning naming both files, so a second file can add to
-the first but not change it. (Mind that `ssh-lists-extra.yaml` sorts before `ssh-lists.yaml`.)
+the first but not change it. A directory's files merge in name order, so the one that should
+win sorts first.
 The search path is for keeping the files in a private repo checked out on every host, and the
 several files for keeping a host's own additions out of it:
 
 ```sh
-export SSH_LISTS_PATH=~/src/my-lists     # holds ssh-lists.yaml, and ssh-lists-local.yaml on one host
+export SSH_LISTS_PATH=~/src/my-lists     # holds lists.yaml, and local.yaml on one host
 ```
 
 The extension names the format. YAML is read with ruamel.yaml, TOML and JSON with the standard
