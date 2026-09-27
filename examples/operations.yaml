@@ -15,5 +15,5 @@ operations:
   updates-pending:
     command: checkupdates | wc -l
     logins: cachyos
-  morning:                               # a group; a member may live in the other file
-    operations: [git-fetch, git-status, disk, mise-update]
+  morning:                               # a group; a member may be built in, or in the other file
+    operations: [git-fetch, git-status, disk, mise-update, test]

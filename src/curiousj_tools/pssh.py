@@ -36,8 +36,10 @@ attributes satisfy TERM, as -a does for logins. So `pssh -P git status -s`
 shows every checkout on every login, and `pssh -A git -c 'git pull'` brings
 the git ones up to date.
 
--o/--op NAME runs an operation of the lists files instead of a COMMAND, one
-that says itself what it runs and where:
+-o/--op NAME runs an operation instead of a COMMAND, one that says itself
+what it runs and where. git-pull, uv-tool-update, mise-update, cachy-update,
+brew-upgrade, system-update and update-all come built in; the lists files
+add their own, and replace a built-in by defining its name:
 
     [operations.git-pull]
     command = "git pull --rebase --autostash"
@@ -66,7 +68,7 @@ it in order, in one shell, each announced by "== NAME" and, per path, by
 "== DIR" as -P does; a login none applies to is left alone. -A narrows the
 paths, -C picks them, -c clones for every per-path operation, -a narrows
 the logins: `pssh -o git-pull -A py-project`, `pssh -a cachyos -o
-system-update`. -L/--list-ops lists the operations the lists files define,
+system-update`. -L/--list-ops lists the operations, the built-in ones first,
 where each runs and what, the entries' own commands under it.
 
 -s/--serial runs one login at a time, in the foreground, through `ssh -t`
@@ -389,8 +391,8 @@ def need_parallel() -> None:
 @logins.login_options
 @click.option("-i", "--interactive", is_flag=True, help="run through `zsh -ic`")
 @click.option("-o", "--op", "ops", metavar="NAME", multiple=True,
-              help="run the lists' operation NAME instead of a COMMAND (repeatable)")
-@click.option("-L", "--list-ops", is_flag=True, help="list the operations of the lists files")
+              help="run the operation NAME instead of a COMMAND (repeatable)")
+@click.option("-L", "--list-ops", is_flag=True, help="list the operations, built-in and the lists files'")
 @click.option("-P", "--paths", is_flag=True, help="in every listed path on each login")
 @path_options
 @click.argument("command", nargs=-1, type=click.UNPROCESSED)

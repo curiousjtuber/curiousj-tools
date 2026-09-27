@@ -72,6 +72,12 @@ Several files make one list. Which are read:
 Files merge in that order, those of a directory by name. An entry given
 twice -- a login with the same commands and via, a path, an operation
 name -- keeps its first definition, with a warning naming both files.
+
+Ahead of them all come the operations curiousj-tools ships, in
+'operations.toml' beside this module: git-pull, uv-tool-update, mise-update,
+cachy-update, brew-upgrade, system-update and update-all (`pssh -L` lists
+them). A file's operation of the same name takes a
+built-in's place, without a warning.
 """
 
 from __future__ import annotations
@@ -81,6 +87,7 @@ import os
 import sys
 import tomllib
 from dataclasses import dataclass, field
+from importlib import resources
 from typing import Any, Sequence
 
 from . import attrs
@@ -90,6 +97,7 @@ NAME = "ssh-lists"
 SUFFIXES = (".toml", ".yaml", ".yml", ".json")
 FILE_VAR = "SSH_LISTS_FILE"
 PATH_VAR = "SSH_LISTS_PATH"
+BUILTIN = "operations.toml"
 
 
 class ToolError(Exception):
@@ -245,8 +253,15 @@ def load_files(paths: Sequence[str]) -> Lists:
 
 
 def load_all(explicit: Sequence[str] = (), env: Any = None) -> Lists:
-    """The files find_files finds, merged."""
-    return load_files(find_files(explicit, env))
+    """The files find_files finds, merged over the built-in operations."""
+    return merge([parse(read_data(p), p) for p in find_files(explicit, env)],
+                 builtin_operations())
+
+
+def builtin_operations() -> Lists:
+    """The operations curiousj-tools ships; see the module docstring."""
+    source = resources.files(__package__) / BUILTIN
+    return parse(tomllib.loads(source.read_text()), str(source))
 
 
 def parse(data: Any, path: str = NAME) -> Lists:
@@ -389,12 +404,15 @@ def table(raw: Any, main: str, allowed: tuple[str, ...], where: str) -> dict:
     return raw
 
 
-def merge(parts: Sequence[Lists]) -> Lists:
+def merge(parts: Sequence[Lists], builtin: Lists | None = None) -> Lists:
     """The parts as one, in order, first definition of anything kept with a
-    warning for the others; then checked as a whole, and a name only entries
+    warning for the others, over the builtin operations, which a part's
+    replaces in place; then checked as a whole, and a name only entries
     define given a table entry of its own, without a command, so every
     operation a run can name is in the table. Raises ToolError."""
     out = Lists()
+    if builtin is not None:
+        out.operations.update(builtin.operations)
     seen: dict[tuple, str] = {}
     for part in parts:
         out.files.extend(part.files)

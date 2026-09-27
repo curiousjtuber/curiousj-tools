@@ -35,34 +35,19 @@ path = "/opt/tools/mytool"               # no git_url: never cloned, skipped whe
 operations = { git-pull = "git pull --ff-only" }   # this path's own way of being pulled
 
 # Operations: `pssh -o NAME` runs one on every login it applies to, `xssh -o
-# NAME` opens a synchronized pane per such login instead. A condition is a
-# term ('mise', 'arch=x86_64', '!mise', 'arch!=x86_64'), a list of terms that
-# all hold, or a table with all, any, none.
+# NAME` opens a synchronized pane per such login instead. git-pull,
+# uv-tool-update, mise-update, cachy-update, brew-upgrade, system-update and
+# update-all come built in (`pssh -L` lists them); these add to them. A
+# condition is a term ('mise', 'arch=x86_64', '!mise', 'arch!=x86_64'), a
+# list of terms that all hold, or a table with all, any, none.
 
-[operations.git-pull]                    # per path: 'paths' says which (true: all of them)
-command = "git pull --rebase --autostash"
-paths = "git"
-clone = true                             # clone a missing path first, as -c
-
-[operations.uv-tool-update]              # install each checkout as a uv tool, where it is one
-command = "uv tool install --force --reinstall ."
-paths = "py-project"
-
-[operations.mise-update]                 # per login: 'logins' says which (absent: all of them)
-command = "mise self-update -y && mise upgrade"
-logins = "mise"
-
-[operations.cachy-update]
-command = "cachy-update"
-logins = "cachyos"
-serial = true                            # asks questions: pssh runs it one login at a time, as -s
-
-[operations.brew-upgrade]
-command = "brew update && brew upgrade"
+[operations.brew-upgrade]                # the built-in's name: this takes its place
+command = "export PATH=/opt/homebrew/bin:$PATH; brew update && brew upgrade"
 logins = { any = ["mac", "brew"], none = "headless" }
 
-[operations.system-update]               # a group: each login runs the members that apply to it
-operations = ["cachy-update", "brew-upgrade"]
+[operations.test]                        # per path: 'paths' says which (true: all of them)
+command = "uv run pytest -q"
+paths = "py-project"
 
-[operations.update-all]
-operations = ["git-pull", "uv-tool-update", "mise-update", "system-update"]
+[operations.nightly]                     # a group: each login runs the members that apply to it
+operations = ["update-all", "test"]

@@ -231,37 +231,40 @@ answer would reach every pane, and under parallel the prompt stops the backgroun
 
 ### Operations
 
-A routine worth a name goes in the lists file as an operation, which says itself what it runs
-and where, and `pssh -o NAME` runs it:
+A routine worth a name is an operation, which says itself what it runs and where, and
+`pssh -o NAME` runs it. These come built in
+([src/curiousj_tools/operations.toml](src/curiousj_tools/operations.toml)), and select on
+attributes the lists give the logins and paths:
+
+| | |
+|---|---|
+| `git-pull` | `git pull --rebase --autostash` in every path tagged `git`, cloning it where missing |
+| `uv-tool-update` | `uv tool install --force --reinstall --editable .` in every path tagged `py-project` |
+| `mise-update` | `mise self-update` and `mise upgrade` on the logins tagged `mise` |
+| `cachy-update` | `cachy-update` on the logins tagged `cachyos`, one at a time |
+| `brew-upgrade` | `brew update && brew upgrade` on the logins tagged `mac` or `brew` |
+| `system-update` | a group: `cachy-update` and `brew-upgrade`, each login running the one that applies |
+| `update-all` | a group: `git-pull`, `uv-tool-update`, `mise-update`, `system-update` |
+
+A lists file adds its own, and one of the same name takes a built-in's place:
 
 ```toml
 [operations.git-pull]
-command = "git pull --rebase --autostash"
+command = "git pull --ff-only"
 paths = "git"                      # per path: in every path whose attributes match (true: all)
 clone = true                       # as -c
 
-[operations.uv-tool-update]
-command = "uv tool install --force --reinstall ."
-paths = "py-project"
-
 [operations.mise-update]
-command = "mise self-update -y && mise upgrade"
+command = "mise upgrade"
 logins = "mise"                    # per login: on every login whose attributes match (absent: all)
 
-[operations.cachy-update]
-command = "cachy-update"
-logins = "cachyos"
+[operations.apt-upgrade]
+command = "sudo apt update && sudo apt upgrade"
+logins = "debian"
 serial = true                      # asks questions: run one login at a time, as -s
 
-[operations.brew-upgrade]
-command = "brew update && brew upgrade"
-logins = { any = ["mac", "brew"] }
-
 [operations.system-update]         # a group: each login runs the members that apply to it
-operations = ["cachy-update", "brew-upgrade"]
-
-[operations.update-all]
-operations = ["git-pull", "uv-tool-update", "mise-update", "system-update"]
+operations = ["cachy-update", "brew-upgrade", "apt-upgrade"]
 ```
 
 A condition is a term, a list of terms that all have to hold, or a table with any of `all`,
@@ -284,7 +287,7 @@ pssh -o update-all                   # everything, everywhere it applies
 pssh -o git-pull -A py-project       # the python checkouts only
 pssh -a cachyos -o system-update     # the CachyOS boxes only
 pssh -n -o update-all                # the per-login scripts and who runs which
-pssh -L                              # the operations the lists define, where and what each runs
+pssh -L                              # the operations, built-in first, where and what each runs
 xssh -o system-update --stay         # the same, a synchronized pane per login instead
 ```
 

@@ -352,32 +352,93 @@ class Merge(unittest.TestCase):
         self.assertIsNone(found.operations["up"].command)
 
 
+class Builtins(unittest.TestCase):
+    """The operations the package ships, read ahead of the lists files."""
+
+    NAMES = ["git-pull", "uv-tool-update", "mise-update", "cachy-update", "brew-upgrade",
+             "system-update", "update-all"]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def load(self, *texts):
+        paths = []
+        for n, text in enumerate(texts):
+            paths.append(os.path.join(self.tmp.name, f"{n}.yaml"))
+            with open(paths[-1], "w") as f:
+                f.write(text)
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            found = lists.load_all(paths, {"HOME": self.tmp.name})
+        return found, err.getvalue()
+
+    def test_the_shipped_file_is_operations_only_and_consistent(self):
+        builtin = lists.builtin_operations()
+        self.assertEqual(list(builtin.operations), self.NAMES)
+        self.assertEqual((builtin.logins, builtin.paths), ([], []))
+        self.assertEqual(list(lists.merge([], builtin).operations), self.NAMES)
+
+    def test_read_first_and_not_counted_among_the_files(self):
+        found, err = self.load("operations: {mine: {command: x}}\n")
+        self.assertEqual(err, "")
+        self.assertEqual(list(found.operations), self.NAMES + ["mine"])
+        self.assertEqual(found.files, [os.path.join(self.tmp.name, "0.yaml")])
+        self.assertTrue(found.operations["git-pull"].file.endswith("operations.toml"))
+
+    def test_a_file_replaces_one_in_place_without_a_warning(self):
+        found, err = self.load("operations: {git-pull: {command: git pull --ff-only, paths: git}}\n")
+        self.assertEqual(err, "")
+        self.assertEqual(list(found.operations), self.NAMES)
+        self.assertEqual(found.operations["git-pull"].command, "git pull --ff-only")
+        self.assertFalse(found.operations["git-pull"].clone)
+
+    def test_two_files_defining_one_still_warn(self):
+        found, err = self.load("operations: {git-pull: {command: one, paths: git}}\n",
+                               "operations: {git-pull: {command: two, paths: git}}\n")
+        self.assertEqual(found.operations["git-pull"].command, "one")
+        self.assertIn("duplicate operation git-pull", err)
+
+    def test_groups_and_entries_use_them(self):
+        found, err = self.load("paths: [{path: p, operations: {git-pull: git pull --ff-only}}]\n"
+                               "operations: {nightly: {operations: [update-all, mine]}, "
+                               "mine: {command: x}}\n")
+        self.assertEqual(err, "")
+        self.assertEqual(found.operations["nightly"].members, ["update-all", "mine"])
+        with self.assertRaises(ToolError) as cm:
+            self.load("paths: [{path: p, operations: {mise-update: x}}]\n")
+        self.assertIn("operations 'mise-update' runs per login, not per path", str(cm.exception))
+
+
 class ExampleFiles(unittest.TestCase):
     """The shipped examples parse, and say the same thing in each format."""
 
+    ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples")
+
+    def load(self, *names):
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            found = lists.load_all([os.path.join(self.ROOT, n) for n in names], {})
+        self.assertEqual(err.getvalue(), "")
+        return found
+
     def test_examples_agree(self):
-        root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples")
-        toml = lists.load(os.path.join(root, "ssh-lists.toml"))
-        yaml = lists.load(os.path.join(root, "ssh-lists.yaml"))
+        toml, yaml = self.load("ssh-lists.toml"), self.load("ssh-lists.yaml")
         self.assertEqual((toml.logins, toml.paths, toml.operations),
                          (yaml.logins, yaml.paths, yaml.operations))
-        self.assertTrue(toml.logins and toml.paths and toml.operations)
+        self.assertTrue(toml.logins and toml.paths)
+        self.assertTrue(set(toml.operations) > set(Builtins.NAMES))
 
     def test_operations_file_adds_to_the_yaml_without_a_warning(self):
-        root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "examples")
-        with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
-            found = lists.load_files([os.path.join(root, "ssh-lists.yaml"),
-                                      os.path.join(root, "operations.yaml")])
-        self.assertEqual(err.getvalue(), "")
-        alone = lists.load(os.path.join(root, "ssh-lists.yaml"))
-        self.assertGreater(len(found.operations), len(alone.operations))
+        found = self.load("ssh-lists.yaml", "operations.yaml")
+        alone = self.load("ssh-lists.yaml")
         self.assertTrue(set(alone.operations) < set(found.operations))
         group = next(op for op in found.operations.values()
                      if op.group and op.file.endswith("operations.yaml"))
-        self.assertTrue(any(found.operations[m].file.endswith("ssh-lists.yaml") for m in group.members))
+        files = {found.operations[m].file.rsplit("/", 1)[1] for m in group.members}
+        self.assertEqual(files, {"operations.yaml", "ssh-lists.yaml", "operations.toml"})
         with self.assertRaises(ToolError) as cm:  # the group needs the other file
-            lists.load(os.path.join(root, "operations.yaml"))
-        self.assertIn("unknown member", str(cm.exception))
+            self.load("operations.yaml")
+        self.assertIn("unknown member 'test'", str(cm.exception))
+
 
 
 class ReadmeBlocks(unittest.TestCase):
@@ -399,7 +460,7 @@ class ReadmeBlocks(unittest.TestCase):
         from ruamel.yaml import YAML
         import tomllib
         data = tomllib.loads(body) if lang == "toml" else YAML(typ="safe").load(body)
-        return lists.merge([lists.parse(data, f"README {lang} block")])
+        return lists.merge([lists.parse(data, f"README {lang} block")], lists.builtin_operations())
 
     def test_every_block_is_a_valid_lists_file(self):
         blocks = self.blocks()

@@ -15,7 +15,7 @@ BLOCKLIST = re.compile(
 class NoInternalStrings(unittest.TestCase):
     def test_shipped_files(self):
         files = [ROOT / "README.md", ROOT / "pyproject.toml"]
-        files += sorted((ROOT / "src").rglob("*.py")) + sorted((ROOT / "src").rglob("*.sh"))
+        files += [p for ext in ("py", "sh", "toml") for p in sorted((ROOT / "src").rglob(f"*.{ext}"))]
         files += sorted(p for p in (ROOT / "examples").iterdir() if p.is_file())
         hits = []
         for path in files:

@@ -21,25 +21,12 @@ paths:
     attributes: [git, py-project]
   - path: /opt/tools/mytool              # no git_url: never cloned, skipped where absent
     operations: {git-pull: git pull --ff-only}   # this path's own way of being pulled
-operations:                              # `pssh -o NAME`, `xssh -o NAME`
-  git-pull:                              # per path: 'paths' says which (true: all)
-    command: git pull --rebase --autostash
-    paths: git
-    clone: true                          # clone a missing path first, as -c
-  uv-tool-update:
-    command: uv tool install --force --reinstall .
-    paths: py-project
-  mise-update:                           # per login: 'logins' says which (absent: all)
-    command: mise self-update -y && mise upgrade
-    logins: mise
-  cachy-update:
-    command: cachy-update
-    logins: cachyos
-    serial: true                         # asks questions: one login at a time, as -s
-  brew-upgrade:
-    command: brew update && brew upgrade
+operations:                              # `pssh -o NAME`, `xssh -o NAME`, beside the built-in ones
+  brew-upgrade:                          # the built-in's name: this takes its place
+    command: export PATH=/opt/homebrew/bin:$PATH; brew update && brew upgrade
     logins: {any: [mac, brew], none: headless}
-  system-update:                         # a group: each login runs the members that apply
-    operations: [cachy-update, brew-upgrade]
-  update-all:
-    operations: [git-pull, uv-tool-update, mise-update, system-update]
+  test:                                  # per path: 'paths' says which (true: all)
+    command: uv run pytest -q
+    paths: py-project
+  nightly:                               # a group: each login runs the members that apply
+    operations: [update-all, test]

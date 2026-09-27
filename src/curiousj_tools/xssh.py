@@ -20,8 +20,8 @@ runs the 'commands' of the entry naming this machine, if it has any (see
 `ssh-logins -h`), from ~. (A login's 'via' is pssh's business; the pane
 types 'commands' only.)
 
--o/--op NAME runs an operation of the lists files instead (see `pssh -h`
-for what one is): a pane per login the operation applies to, each running
+-o/--op NAME runs an operation instead (see `pssh -h` for what one is, and
+the built-in ones): a pane per login the operation applies to, each running
 the login's share of it as pssh would -- through its 'via', "== NAME" and
 "== DIR" announcing each step -- then dropping into a shell. The panes
 being synchronized, a question every login asks is answered once, for all
@@ -127,8 +127,8 @@ def op_panes(entries: list[Login], ops: list[lists.Operation], path_list: list[l
                context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
 @logins.login_options
 @click.option("-o", "--op", "ops", metavar="NAME", multiple=True,
-              help="a pane per login running the lists' operation NAME (repeatable)")
-@click.option("-L", "--list-ops", is_flag=True, help="list the operations of the lists files")
+              help="a pane per login running the operation NAME (repeatable)")
+@click.option("-L", "--list-ops", is_flag=True, help="list the operations, built-in and the lists files'")
 @pssh.path_options(short=False, implies=" (with -o)")
 @click.argument("xpanes_args", nargs=-1, type=click.UNPROCESSED)
 def cli(opts: logins.LoginOpts, ops: tuple[str, ...], list_ops: bool,
