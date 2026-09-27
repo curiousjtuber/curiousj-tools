@@ -17,8 +17,31 @@ as the editor on all of them. Python 3.11+, click and ruamel.yaml.
 ## Install
 
 ```sh
+curl -LsSf https://raw.githubusercontent.com/curiousjtuber/curiousj-tools/main/install.sh | sh
+```
+
+or, with wget:
+
+```sh
+wget -qO- https://raw.githubusercontent.com/curiousjtuber/curiousj-tools/main/install.sh | sh
+```
+
+[`install.sh`](install.sh) runs `uv tool install` on this repository, first installing
+[uv](https://docs.astral.sh/uv/) from astral.sh if it is missing; uv fetches a Python 3.11+
+when the system has none. It needs no root, only curl or wget and git. Run it again to upgrade:
+an existing install is upgraded from wherever it came from, an editable checkout included.
+`CURIOUSJ_TOOLS_SOURCE` installs something else instead, such as a tag
+(`git+https://github.com/curiousjtuber/curiousj-tools@v0.2.0`) or a checkout's directory.
+
+By hand, with uv or pipx:
+
+```sh
 uv tool install git+https://github.com/curiousjtuber/curiousj-tools
-# or, from a checkout, so edits are live:
+```
+
+or, from a checkout, so edits are live:
+
+```sh
 uv tool install --editable ~/src/curiousj-tools
 ```
 
