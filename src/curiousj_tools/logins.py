@@ -5,10 +5,12 @@
 One entry per line: every login ([user@]host) in the lists files, then
 'localhost' last, which consumers turn into whatever "this machine" means
 for them (xssh: a local pane, pssh: a local run); -N/--no-local leaves it
-out. Entries that name this machine, for this user, are dropped, those
-with a via too, so one list can serve every host on it; 'localhost' takes
-over the commands, attributes and operations of the first such entry
-without a via (xssh runs the commands in the local pane). -p/--pick shows
+out. Entries that name this machine, for this user, become 'localhost',
+so one list can serve every host on it: each keeps its commands, via,
+attributes and operations (xssh runs the commands in a local pane, pssh
+runs through the via here), so a machine listed plainly and with a via is
+'localhost' twice. A plain 'localhost' comes first when every such entry
+has a via, or there is none. -p/--pick shows
 the list in fzf (TAB marks several) and prints only the marked entries;
 without fzf, a numbered menu (see `pick-lines -h`).
 Aborting the picker exits 130 with nothing printed.
@@ -16,8 +18,8 @@ Aborting the picker exits 130 with nothing printed.
 -a/--attr TERM keeps the logins whose attributes satisfy TERM: 'mise' has
 it, 'arch=x86_64' has it with that value, '!mise' lacks it, 'arch!=x86_64'
 lacks it or has another value; given several times, every TERM has to hold.
-'localhost' is kept or dropped like any other, by the attributes it took
-over; with no entry naming this machine it has none. Quote a '!' for the
+A 'localhost' is kept or dropped like any other, by the attributes it took
+over; the plain one added for the machine has none. Quote a '!' for the
 shell.
 
 The logins are the 'logins' list of the ssh-lists files, TOML, YAML or JSON
@@ -112,16 +114,18 @@ def drop_self(entries: list[Login], names: set[str], user: str) -> list[Login]:
     return [entry for entry in entries if not is_self(entry, names, user)]
 
 
-def local_login(entries: list[Login], names: set[str], user: str) -> Login:
-    """'localhost' as the list describes this machine: the commands,
-    attributes and operations of the first entry naming it that has no via
-    (one with a via is a place inside it, not the machine). A bare
-    'localhost' without one."""
-    for entry in entries:
-        if entry.via is None and is_self(entry, names, user):
-            return Login("localhost", list(entry.commands), attributes=dict(entry.attributes),
-                         operations=dict(entry.operations), file=entry.file)
-    return Login("localhost")
+def local_logins(entries: list[Login], names: set[str], user: str) -> list[Login]:
+    """'localhost' as the list describes this machine: one per entry naming
+    it, in list order, with that entry's commands, via, attributes and
+    operations -- a via entry is a place inside the machine, a container,
+    reached here as from any other host. A bare 'localhost' first when no
+    entry names the machine itself, without a via."""
+    local = [Login("localhost", list(e.commands), e.via, dict(e.attributes),
+                   dict(e.operations), e.file)
+             for e in entries if is_self(e, names, user)]
+    if all(e.via is not None for e in local):
+        local.insert(0, Login("localhost"))
+    return local
 
 
 def confirm_new_hosts(entries: list[str], prog: str) -> None:
@@ -150,9 +154,8 @@ def select(opts: LoginOpts, env=None, found: lists.Lists | None = None) -> list[
     entries = [e for e in drop_self(found.logins, names, user)
                if attrs.holds_all(opts.terms, e.attributes)]
     if not opts.no_local:
-        local = local_login(found.logins, names, user)
-        if attrs.holds_all(opts.terms, local.attributes):
-            entries.append(local)
+        entries += [local for local in local_logins(found.logins, names, user)
+                    if attrs.holds_all(opts.terms, local.attributes)]
     if not entries:
         why = (f"match -a {' '.join(map(str, opts.terms))}" if opts.terms
                else "(entries naming this machine are dropped)")

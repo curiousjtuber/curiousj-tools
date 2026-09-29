@@ -15,10 +15,10 @@ shell rc: aliases work and 'cd' persists between commands. A login with
 'commands' in the lists file runs them after login instead of stopping at
 the shell -- `ssh -t LOGIN 'cd src; exec zsh'`, or `distrobox enter dev -nw` --
 so the last one should be what you want to type into: an interactive
-shell, a container entered. The pane ends when it exits. The local pane
-runs the 'commands' of the entry naming this machine, if it has any (see
-`ssh-logins -h`), from ~. (A login's 'via' is pssh's business; the pane
-types 'commands' only.)
+shell, a container entered. The pane ends when it exits. Each entry naming
+this machine gets a local pane running its 'commands', if it has any (see
+`ssh-logins -h`), from ~, so its container gets one here too. (A login's
+'via' is pssh's business; the pane types 'commands' only.)
 
 -o/--op NAME runs an operation instead (see `pssh -h` for what one is, and
 the built-in ones): a pane per login the operation applies to, each running
@@ -60,7 +60,7 @@ LOCAL_PANE = "cd ~; exec $SHELL"
 
 def local_pane(entry: Login) -> str:
     """The local pane: at ~ like a fresh ssh login, then the commands
-    'localhost' took over from the entry naming this machine, else a shell."""
+    this 'localhost' took over from an entry naming this machine, else a shell."""
     return "; ".join(["cd ~", *entry.commands]) if entry.commands else LOCAL_PANE
 
 

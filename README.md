@@ -214,11 +214,11 @@ See [examples/ssh-lists.toml](examples/ssh-lists.toml) and
 [examples/ssh-lists.yaml](examples/ssh-lists.yaml), and
 [examples/operations.yaml](examples/operations.yaml) for operations kept in a
 file of their own. `localhost` is appended to the logins for
-the local side unless `-N`, and entries naming the machine you are on, for your user, are
-dropped, so one file serves every host on it; `localhost` takes over the `commands`,
-attributes and operations of the first such entry without a `via`, so `xssh`'s local pane runs
-the same `commands` as the other hosts' panes for it. The ones with a `via` go too: `pssh` run on
-devbox reaches devbox itself, not its container, which only another host's run gets into.
+the local side unless `-N`: entries naming the machine you are on, for your user, become
+`localhost`, so one file serves every host on it. Each keeps its `commands`, `via`, attributes
+and operations, so `xssh`'s local panes run the same `commands` as the other hosts' panes for
+it, and `pssh` run on devbox reaches both devbox and its container. A plain `localhost` comes
+first when no such entry is without a `via`.
 `-a TERM` keeps the logins whose attributes satisfy the term, `mise`, `arch=x86_64`, `!mise` or
 `arch!=x86_64` (quote the `!` for the shell), every term when given several; `-A` does the
 same for paths. `-p` picks logins in fzf (TAB marks several) or a numbered menu; a login
@@ -246,7 +246,7 @@ carrying over between calls, and no login `commands` either. `xssh` gives each o
 shell, so all of those work there. A login listed plainly and again with a `via` is run in both
 places by `pssh`, and once per place: inside `distrobox enter dev -nw -- sh -c '...'` the `~` is
 the container's own home, so a `git pull` there keeps the container's checkouts current
-alongside the host's -- from any host but that one, which drops both entries for `localhost`.
+alongside the host's -- from that host too, where both entries are `localhost`.
 
 Both contact a host whose key is not in `known_hosts` yet once beforehand, in the foreground, so
 ssh's yes/no question is asked where it can be answered: inside a synchronized xpanes window the

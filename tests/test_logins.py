@@ -27,18 +27,26 @@ class DropSelf(unittest.TestCase):
         self.assertEqual(logins.drop_self(H("my-mac.example.com"), SELF, "alice"), [])
         self.assertEqual(logins.drop_self(H("my-mac2"), SELF, "alice"), H("my-mac2"))
 
-    def test_local_login_inherits_the_self_entrys_commands_attributes_and_operations(self):
-        inside = Login("my-mac", via="distrobox enter dev --", attributes={"dbx": None})
+    def test_every_self_entry_is_a_localhost_with_its_commands_via_attributes_operations(self):
+        # Only the first entry without a via used to become 'localhost', so
+        # the container listed beside the host got no pane or run on it.
+        inside = Login("my-mac", ["dbx.sh"], via="dbx.sh --", attributes={"dbx": None})
         me = Login("alice@my-mac.local", ["exec zsh"], attributes={"mac": None, "brew": None},
                    operations={"sys": "brew upgrade"}, file="F")
         entries = [Login("a"), inside, me, Login("my-mac", attributes={"other": None})]
-        local = logins.local_login(entries, SELF, "alice")
-        self.assertEqual(local, Login("localhost", ["exec zsh"], attributes={"mac": None, "brew": None},
-                                      operations={"sys": "brew upgrade"}))
-        self.assertEqual((local.via, local.file), (None, "F"))
-        # a via entry is a place inside the machine, not the machine; another user is not me
-        self.assertEqual(logins.local_login([inside, Login("bob@my-mac")], SELF, "alice"),
-                         Login("localhost"))
+        local = logins.local_logins(entries, SELF, "alice")
+        self.assertEqual(local, [
+            Login("localhost", ["dbx.sh"], via="dbx.sh --", attributes={"dbx": None}),
+            Login("localhost", ["exec zsh"], attributes={"mac": None, "brew": None},
+                  operations={"sys": "brew upgrade"}),
+            Login("localhost", attributes={"other": None})])
+        self.assertEqual(local[1].file, "F")
+
+    def test_the_machine_itself_is_there_when_only_a_place_inside_it_is_listed(self):
+        inside = Login("my-mac", via="dbx.sh --")
+        self.assertEqual(logins.local_logins([inside, Login("bob@my-mac")], SELF, "alice"),
+                         [Login("localhost"), Login("localhost", via="dbx.sh --")])
+        self.assertEqual(logins.local_logins([Login("a")], SELF, "alice"), [Login("localhost")])
 
 
 class Hosts(unittest.TestCase):
@@ -108,6 +116,16 @@ class Hosts(unittest.TestCase):
         self.assertEqual([e.login for e in logins.select(opts)], ["b"])
         opts = logins.LoginOpts(files=(self.file,), terms=(Term("mac"), Term("mise")))
         self.assertEqual([e.login for e in logins.select(opts)], ["localhost"])
+
+    def test_attr_terms_pick_among_the_localhosts(self):
+        with open(self.file, "w") as f:
+            f.write('logins = ["b", { login = "alice@my-mac.local", attributes = ["cachyos"] },\n'
+                    '  { login = "my-mac", via = "dbx.sh --", attributes = ["ubuntu"] }]\n')
+        self.assertEqual([(e.login, e.via) for e in logins.select(logins.LoginOpts(files=(self.file,)))],
+                         [("b", None), ("localhost", None), ("localhost", "dbx.sh --")])
+        opts = logins.LoginOpts(files=(self.file,), terms=(Term("ubuntu"),))
+        self.assertEqual(logins.select(opts),
+                         [Login("localhost", via="dbx.sh --", attributes={"ubuntu": None})])
 
     def test_nothing_matching_is_an_error(self):
         with self.assertRaises(logins.ToolError) as cm:

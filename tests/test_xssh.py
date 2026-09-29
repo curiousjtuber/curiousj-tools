@@ -53,6 +53,12 @@ class PaneCommands(unittest.TestCase):
         self.assertEqual(xssh.pane_command(Login("localhost", ["~/.local/bin/zsh"])),
                          "cd ~; ~/.local/bin/zsh")
 
+    def test_each_localhost_is_a_pane(self):
+        # A host listed plainly and with its container used to get one local pane.
+        self.assertEqual(xssh.pane_commands([Login("localhost"),
+                                             Login("localhost", ["dbx.sh"], "dbx.sh --")]),
+                         ["cd ~; exec $SHELL", "cd ~; dbx.sh"])
+
     def test_via_is_not_the_panes_business(self):
         self.assertEqual(xssh.pane_commands([Login("a", via="distrobox enter dev --")]), ["ssh a"])
 
@@ -105,6 +111,10 @@ class OpPanes(unittest.TestCase):
         self.assertEqual(decoded(local), "cd ~\nrc=0\nexit $rc")
         local = xssh.op_pane_command(Login("localhost", ["exec zsh"]), "x")
         self.assertTrue(local.endswith(' | base64 -d)"; cd ~; exec zsh'), local)
+        # this machine's container: through its via here, then into it
+        local = xssh.op_pane_command(Login("localhost", ["dbx.sh"], "dbx.sh --"), "x")
+        self.assertTrue(local.endswith(' | base64 -d)"; cd ~; dbx.sh'), local)
+        self.assertEqual(decoded(local), "dbx.sh -- sh -c 'cd ~\nx'")
 
     def test_the_decoded_pane_runs(self):
         pane = xssh.op_pane_command(Login("localhost"), "echo hi\nexit 3")

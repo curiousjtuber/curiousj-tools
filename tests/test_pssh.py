@@ -568,6 +568,19 @@ class Main(unittest.TestCase):
         self.assertIn("cmd='brew up'\n", out.getvalue())
         self.assertIn("\n-- on:\n   localhost\n-- not contacted (no operation applies):\n   b\n", out.getvalue())
 
+    def test_this_machines_container_is_run_through_its_via_here(self):
+        # Both entries naming this machine used to give way to one plain
+        # 'localhost', so pssh on the host never reached its container.
+        with open(self.file, "w") as f:
+            f.write('logins = ["alice@my-mac.local", "b",\n'
+                    '  { login = "alice@my-mac.local", via = "dbx.sh --" }]\n')
+        with mock.patch.object(logins, "self_names", return_value={"my-mac", "localhost"}), \
+                mock.patch("getpass.getuser", return_value="alice"), \
+                mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            self.assertEqual(pssh.main(["-n", "-f", self.file, "uptime"]), 0)
+        self.assertEqual(out.getvalue(), "cd ~\nuptime\n-- on:\n   b\n   localhost\n"
+                                         "dbx.sh -- sh -c 'cd ~\nuptime'\n-- on:\n   localhost\n")
+
     def test_op_mode_reads_the_files_once(self):
         found = Lists([Login("a")], [], {"up": UP}, ["F"])
         with mock.patch.object(lists, "load_all", return_value=found) as load, \
