@@ -278,7 +278,8 @@ class TestAddHost(ConfigDirMixin, unittest.TestCase):
         sshtsf.save_config(cfg)
         answers = {"name for this [user@]host": "devbox-root", "ssh destination": "",
                    "user on it": "root", "alias": "",
-                   "forward the local Emacs socket": "", "forward Wayland": ""}
+                   "run everything there via": "", "forward the local Emacs socket": "",
+                   "forward Wayland": ""}
         with mock.patch.object(sshtsf, "ssh_known_hosts",
                                return_value=["devbox.local", "other"]), \
              mock.patch.object(sshtsf, "choose",
@@ -316,7 +317,8 @@ class TestAddHost(ConfigDirMixin, unittest.TestCase):
         # No "user on it": the login names one. No "name" typed: the default
         # is the login's machine part.
         answers = {"name for this [user@]host": "", "ssh destination": "", "alias": "",
-                   "forward the local Emacs socket": "", "forward Wayland": ""}
+                   "run everything there via": "", "forward the local Emacs socket": "",
+                   "forward Wayland": ""}
         with mock.patch.object(sshtsf, "ssh_known_hosts",
                                return_value=["newbox", "other"]), \
              mock.patch.object(sshtsf, "choose", return_value="alice@newbox") as pick, \
@@ -350,13 +352,14 @@ class TestAddHost(ConfigDirMixin, unittest.TestCase):
         # a blank destination still dials mac.local.
         hcfg = self.add_host({"name for this [user@]host": "mac", "ssh destination": "",
                               "user on it": "", "alias": "",
-                              "forward the local Emacs socket": "",
+                              "run everything there via": "", "forward the local Emacs socket": "",
                               "forward Wayland": ""}, typed="mac.local")
         self.assertEqual(hcfg, {"target": "mac.local"})
 
     def test_asks_the_host_defaults_before_the_first_session(self):
         hcfg = self.add_host({"name for this [user@]host": "mac", "ssh destination": "me@mac.local",
-                              "alias": "m", "forward the local Emacs socket": "y",
+                              "alias": "m", "run everything there via": "",
+                              "forward the local Emacs socket": "y",
                               "relay it": "41234", "forward Wayland": ""})
         self.assertEqual(hcfg, {"target": "me@mac.local", "alias": "m", "ecf": True,
                                 "ecf_port": 41234})
@@ -364,7 +367,7 @@ class TestAddHost(ConfigDirMixin, unittest.TestCase):
     def test_a_no_leaves_the_fields_out(self):
         hcfg = self.add_host({"name for this [user@]host": "mac", "ssh destination": "",
                               "user on it": "", "alias": "",
-                              "forward the local Emacs socket": "n",
+                              "run everything there via": "", "forward the local Emacs socket": "n",
                               "forward Wayland": "no"})
         self.assertEqual(hcfg, {})
 
@@ -372,14 +375,14 @@ class TestAddHost(ConfigDirMixin, unittest.TestCase):
         # "me@mac.local" above went straight to the alias: no user prompt.
         hcfg = self.add_host({"name for this [user@]host": "mac", "ssh destination": "mac.local",
                               "user on it": "me", "alias": "",
-                              "forward the local Emacs socket": "",
+                              "run everything there via": "", "forward the local Emacs socket": "",
                               "forward Wayland": ""})
         self.assertEqual(hcfg, {"target": "me@mac.local"})
 
     def test_blank_user_leaves_the_destination_alone(self):
         hcfg = self.add_host({"name for this [user@]host": "mac", "ssh destination": "mac.local",
                               "user on it": "", "alias": "",
-                              "forward the local Emacs socket": "",
+                              "run everything there via": "", "forward the local Emacs socket": "",
                               "forward Wayland": ""})
         self.assertEqual(hcfg, {"target": "mac.local"})
 
@@ -988,7 +991,7 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         with mock.patch.object(sshtsf, "live_sessions", return_value=([], "")) as live:
             rc, out, _ = run_capture(["-L", "build"])
         self.assertEqual(rc, 0)
-        self.assertEqual(live.call_args.args, ("build.internal",))
+        self.assertEqual(live.call_args.args, ("build.internal", ""))
 
     def test_live_rows_are_worded_and_matched_by_name(self):
         rows = ["web\t1\tattached", "scratch\t3\tdetached"]
@@ -1092,11 +1095,11 @@ class TestProbes(ConfigDirMixin, unittest.TestCase):
 
 
 class TestWaypipeRemoteProbe(unittest.TestCase):
-    def probe(self, returncode, opts=()):
+    def probe(self, returncode, opts=(), via=""):
         proc = mock.Mock(returncode=returncode)
         with mock.patch.object(sshtsf, "WAYPIPE_OPTS", list(opts)), \
              mock.patch.object(sshtsf.subprocess, "run", return_value=proc) as run:
-            why = sshtsf.waypipe_remote_missing("devbox")
+            why = sshtsf.waypipe_remote_missing("devbox", via)
         return why, run.call_args.args[0]
 
     def test_present(self):
@@ -1125,6 +1128,94 @@ class TestWaypipeRemoteProbe(unittest.TestCase):
     def test_remote_bin_with_equals(self):
         _, argv = self.probe(0, ["--remote-bin=/opt/wp/bin/waypipe"])
         self.assertEqual(argv[-1], "test -x /opt/wp/bin/waypipe")
+
+    def test_via_asks_inside_the_container(self):
+        why, argv = self.probe(1, via="distrobox enter dev --")
+        self.assertEqual(argv, PROBE + ["-o", "BatchMode=yes", "devbox",
+                                        "distrobox enter dev -- sh -c 'command -v waypipe'"])
+        self.assertEqual(why, "no waypipe on the non-interactive PATH of devbox"
+                              " via distrobox enter dev --")
+
+    def test_via_with_remote_bin(self):
+        _, argv = self.probe(0, ["--remote-bin", "/opt/wp/bin/waypipe"],
+                             via="distrobox enter dev --")
+        self.assertEqual(argv[-1],
+                         "distrobox enter dev -- sh -c 'test -x /opt/wp/bin/waypipe'")
+
+
+class TestVia(ConfigDirMixin, unittest.TestCase):
+    """A host whose tools live in a container: everything runs behind its via."""
+
+    VIA = "distrobox enter dev --"
+
+    def setUp(self):
+        super().setUp()
+        cfg = {**SAMPLE, "hosts": {**SAMPLE["hosts"],
+                                   "devbox": {**SAMPLE["hosts"]["devbox"], "via": self.VIA}}}
+        sshtsf.save_config(cfg)
+
+    def test_round_trip(self):
+        self.assertEqual(sshtsf.load_config()["hosts"]["devbox"]["via"], self.VIA)
+
+    def exec_argv(self, argv: list[str], waypipe: bool, opts=()) -> list[str]:
+        with mock.patch.object(sshtsf, "WAYPIPE_OPTS", list(opts)), \
+             mock.patch.object(sshtsf, "ecf_local_socket", return_value=None), \
+             mock.patch.object(sshtsf, "waypipe_local_display",
+                               return_value=("/run/user/1000/wayland-0", "")), \
+             mock.patch.object(sshtsf, "waypipe_remote_missing", return_value="") as probe, \
+             mock.patch.object(sshtsf.os, "execvp") as execvp:
+            run_capture(argv + (["-w"] if waypipe else ["-W"]))
+        if waypipe:
+            self.assertEqual(probe.call_args.args, ("devbox", self.VIA))
+        return execvp.call_args.args[1]
+
+    def test_plain_connection_runs_the_script_behind_it(self):
+        argv = self.exec_argv(["devbox", "shell"], waypipe=False)
+        i = argv.index("devbox")
+        self.assertEqual(argv[i + 1:i + 4], [self.VIA, "sh", "-c"])
+
+    def test_waypipe_runs_its_server_behind_it_and_the_script_bare(self):
+        # The server starts the script as its child, inside already.
+        argv = self.exec_argv(["devbox", "shell"], waypipe=True, opts=["--no-gpu"])
+        self.assertEqual(argv[:4], ["waypipe", "--no-gpu", "--remote-bin",
+                                    self.VIA + " waypipe"])
+        i = argv.index("devbox")
+        self.assertEqual(argv[i + 1:i + 3], ["sh", "-c"])
+
+    def test_waypipe_remote_bin_is_kept_behind_it(self):
+        argv = self.exec_argv(["devbox", "shell"], waypipe=True,
+                              opts=["--remote-bin=/opt/wp/waypipe", "--no-gpu"])
+        self.assertEqual(argv[:4], ["waypipe", "--no-gpu", "--remote-bin",
+                                    self.VIA + " /opt/wp/waypipe"])
+
+    def test_ecf_cleanup_runs_behind_it(self):
+        with mock.patch.object(sshtsf, "ecf_local_socket", return_value="/x/server"):
+            rc, out, _ = run_capture(["devbox", "api", "--dry-run"])
+        self.assertEqual(rc, 0)
+        self.assertTrue(out.splitlines()[0].startswith(
+            f"ssh -o ConnectTimeout=10 devbox {self.VIA} sh -c "), out)
+
+    def test_live_sessions_run_behind_it(self):
+        proc = mock.Mock(returncode=0, stdout="web\t2\tdetached\n", stderr="")
+        with mock.patch.object(sshtsf.subprocess, "run", return_value=proc) as run:
+            rc, _, _ = run_capture(["-L", "devbox"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(run.call_args.args[0][3:6], ["devbox", self.VIA, "sh"])
+        with mock.patch.object(sshtsf.subprocess, "run", return_value=proc) as run:
+            sshtsf.remote_tmux("devbox", self.VIA)
+        self.assertEqual(run.call_args.args[0][5:7], ["devbox", self.VIA])
+
+    def test_a_new_host_is_offered_the_lists_via(self):
+        self.write_lists('logins = [{ login = "me@newbox", via = "distrobox enter nb --" }]\n')
+        answers = {"name for this [user@]host": "newbox", "ssh destination": "me@newbox",
+                   "alias": "", "run everything there via": "",
+                   "forward the local Emacs socket": "", "forward Wayland": ""}
+        with mock.patch.object(sshtsf, "ask", side_effect=scripted(answers)), \
+             mock.patch.object(sshtsf, "known_host_candidates", return_value=[]), \
+             mock.patch.object(sshtsf, "route_add_session", return_value=0):
+            sshtsf.route_add_host(sshtsf.load_config(), "me@newbox")
+        self.assertEqual(sshtsf.load_config()["hosts"]["newbox"],
+                         {"target": "me@newbox", "via": "distrobox enter nb --"})
 
 
 class TestConfigure(ConfigDirMixin, unittest.TestCase):
@@ -1182,7 +1273,7 @@ class TestConfigure(ConfigDirMixin, unittest.TestCase):
     def test_host_settings_default_and_port(self):
         rc, _, cfg = self.configure(["build"], {
             "name": "", "ssh destination": "", "alias": "b",
-            "forward the local Emacs socket": "y", "relay it": "-",
+            "run everything there via": "", "forward the local Emacs socket": "y", "relay it": "-",
             "forward Wayland": "", "offer this host first": "y"},
             picked=sshtsf.HOST_SETTINGS)
         self.assertEqual(rc, 0)
@@ -1193,7 +1284,8 @@ class TestConfigure(ConfigDirMixin, unittest.TestCase):
     def test_rename_host_follows_default_and_last(self):
         rc, _, cfg = self.configure(["devbox"], {
             "name": "dev", "ssh destination": "", "alias": "",
-            "forward the local Emacs socket": "", "forward Wayland": "",
+            "run everything there via": "", "forward the local Emacs socket": "",
+            "forward Wayland": "",
             "offer this host first": ""},
             picked=sshtsf.HOST_SETTINGS)
         self.assertEqual(rc, 0)
@@ -1220,7 +1312,8 @@ class TestConfigure(ConfigDirMixin, unittest.TestCase):
     def test_unknown_names_register_without_connecting(self):
         rc, err, cfg = self.configure(["newbox"], {
             "name for this [user@]host": "", "ssh destination": "", "user on it": "",
-            "alias": "", "forward the local Emacs socket": "", "forward Wayland": ""})
+            "alias": "", "run everything there via": "", "forward the local Emacs socket": "",
+            "forward Wayland": ""})
         self.assertEqual(rc, 0)
         self.assertIn("new host newbox", err)
         self.assertEqual(cfg["hosts"]["newbox"], {})
@@ -1250,7 +1343,8 @@ class TestConfigure(ConfigDirMixin, unittest.TestCase):
         self.assertEqual(cfg["hosts"]["build"]["sessions"]["api"], {"alias": "bapi"})
         rc, err, cfg = self.configure(["build"], {
             "name": "", "ssh destination": "", "alias": ["devweb", "b"],
-            "forward the local Emacs socket": "", "relay it": "", "forward Wayland": "",
+            "run everything there via": "", "forward the local Emacs socket": "", "relay it": "",
+            "forward Wayland": "",
             "offer this host first": ""}, picked=sshtsf.HOST_SETTINGS)
         self.assertEqual(rc, 0)
         self.assertIn("  devweb already names devbox+web\n", err)
@@ -1261,7 +1355,8 @@ class TestConfigure(ConfigDirMixin, unittest.TestCase):
         # is asked again, where it used to end the walk.
         rc, err, cfg = self.configure(["devbox"], {
             "name": ["build", "c"], "ssh destination": "", "alias": "-",
-            "forward the local Emacs socket": "", "forward Wayland": "",
+            "run everything there via": "", "forward the local Emacs socket": "",
+            "forward Wayland": "",
             "offer this host first": ""}, picked=sshtsf.HOST_SETTINGS)
         self.assertEqual(rc, 0)
         self.assertIn("  build already names host build\n", err)
@@ -1271,7 +1366,8 @@ class TestConfigure(ConfigDirMixin, unittest.TestCase):
     def test_a_new_host_named_like_a_session_alias_is_asked_again(self):
         with mock.patch.object(sshtsf, "ask", side_effect=scripted({
                 "name for this [user@]host": ["devweb", "dw"], "ssh destination": "",
-                "user on it": "", "alias": "", "forward the local Emacs socket": "",
+                "user on it": "", "alias": "", "run everything there via": "",
+                "forward the local Emacs socket": "",
                 "forward Wayland": ""})), \
              mock.patch.object(sshtsf, "known_host_candidates", return_value=[]), \
              mock.patch.object(sshtsf, "route_add_session", return_value=0), \

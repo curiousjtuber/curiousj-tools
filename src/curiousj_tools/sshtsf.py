@@ -52,11 +52,12 @@ With waypipe on, the connection is wrapped in `waypipe ssh`, so applications
 started inside the remote tmux session draw on the local Wayland desktop.
 Remembered the same way; -w / -W override. It needs a Wayland session here
 and waypipe installed at both ends -- on the remote, on the PATH a
-non-interactive ssh gets. Extra waypipe options (--compress, --no-gpu,
---xwls, --remote-bin, ...) go in SSHTSF_WAYPIPE_OPTS. The two forwards are
-independent and compose. A waypipe session names the terminal tab
-HOST:SESSION itself, since the terminal only sees waypipe, not the ssh
-behind it; the name stays on the tab after the session ends.
+non-interactive ssh gets, or inside the host's via (below). Extra waypipe
+options (--compress, --no-gpu, --xwls, --remote-bin, ...) go in
+SSHTSF_WAYPIPE_OPTS. The two forwards are independent and compose. A
+waypipe session names the terminal tab HOST:SESSION itself, since the
+terminal only sees waypipe, not the ssh behind it; the name stays on the
+tab after the session ends.
 
 A missing tool is a warning, never a refusal. A forward whose tool is absent
 at either end (no Emacs server, no waypipe, no socat on the remote) is left
@@ -69,6 +70,13 @@ Everything sshtsf runs on the remote (tmux, socat) is looked for in the
 Homebrew, Linuxbrew and ~/.local/bin directories first, since a non-
 interactive ssh does not read the rc file that adds them. SSHTSF_REMOTE_PATH,
 colon-separated, replaces that list.
+
+A host whose tools live in a container gets a 'via', a command prefix such
+as 'distrobox enter dev --', as in the ssh-lists files (and offered from
+them by -c). Everything sshtsf runs there then runs behind it: the tmux
+session, its probes, the Emacs socket cleanup, waypipe's server and the
+check for it. Only the folder listing skips it, since the home directory is
+the same inside.
 
 The session is told waypipe's display name on connect, so no tmux config is
 needed on the remote -- WAYLAND_DISPLAY only joined tmux's default
@@ -87,6 +95,7 @@ Config layout (all fields but the host key are optional):
     [hosts.devbox]
     target = "devbox"       # ssh destination, [user@]host; defaults to the host key
     alias = "c"
+    via = "distrobox enter dev --"  # run tmux, waypipe and socat inside this container
     ecf = true              # forward the local Emacs socket, by default
     ecf_port = 41234        # relay via TCP port (for SELinux hosts where sshd cannot bind unix sockets)
 
@@ -222,7 +231,7 @@ def dump_config(cfg: dict) -> str:
     # has to survive a rewrite rather than be dropped as falsy.
     for host, hcfg in sorted((cfg.get("hosts") or {}).items()):
         lines.append(f"[hosts.{toml_key(host)}]")
-        for field in ("target", "alias"):
+        for field in ("target", "alias", "via"):
             if hcfg.get(field):
                 lines.append(f"{field} = {toml_str(hcfg[field])}")
         if hcfg.get("ecf_port"):
@@ -392,6 +401,11 @@ def word_clash(cfg: dict, word: str, own: tuple[str, str]) -> str:
 
 def ssh_target(cfg: dict, host: str) -> str:
     return cfg["hosts"].get(host, {}).get("target") or host
+
+
+def host_via(cfg: dict, host: str) -> str:
+    """The prefix every remote command on host runs behind, or ""."""
+    return (cfg["hosts"].get(host, {}).get("via") or "").strip()
 
 
 class Overrides(NamedTuple):
@@ -645,7 +659,8 @@ def remote_sh(script: str) -> list[str]:
     through this, so a probe resolves the same tmux the connection will. Two
     remote commands do not: the folder listing, which needs nothing past
     find, sed and sort, and the waypipe probe, since `waypipe ssh` starts its
-    server on the plain non-interactive PATH, which is the one to ask about.
+    server on the plain non-interactive PATH (or the via's), which is the one
+    to ask about.
 
     sh rather than the login shell for the script itself: the script is
     POSIX sh and the login shell need not be (fish has no `VAR=value; cmd`).
@@ -654,7 +669,18 @@ def remote_sh(script: str) -> list[str]:
     return ["sh", "-c", f'PATH="{REMOTE_PATH}:$PATH"; {script}']
 
 
-def remote_tmux(target: str) -> str:
+def remote_words(script: str, via: str = "") -> list[str]:
+    """remote_sh quoted for ssh, behind the host's via when it has one.
+
+    via is shell text, as in the ssh-lists files -- '~/box.sh --' has to
+    reach the remote shell with its ~ unexpanded here -- so it goes in as
+    one unquoted word and the remote shell splits it.
+    """
+    words = [shlex.quote(word) for word in remote_sh(script)]
+    return [via] + words if via else words
+
+
+def remote_tmux(target: str, via: str = "") -> str:
     """Which tmux a non-interactive `ssh target tmux` resolves, as "PATH (VERSION)".
 
     Empty when the question cannot be answered. Costs a second connection, so
@@ -663,7 +689,7 @@ def remote_tmux(target: str) -> str:
     try:
         proc = subprocess.run(
             sshutil.probe_ssh(target, batch=True)
-            + [shlex.quote(word) for word in remote_sh("command -v tmux && tmux -V")],
+            + remote_words("command -v tmux && tmux -V", via),
             text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     except OSError:
         return ""
@@ -675,7 +701,7 @@ def remote_tmux(target: str) -> str:
     return f"{lines[0]} ({lines[1]})"
 
 
-def live_sessions(target: str) -> tuple[list[str], str]:
+def live_sessions(target: str, via: str = "") -> tuple[list[str], str]:
     """Live remote sessions, and -- the point of the tuple -- why there are none.
 
     tmux can exit nonzero in silence: a client too old to speak to the running
@@ -692,8 +718,8 @@ def live_sessions(target: str) -> tuple[list[str], str]:
     fmt = "#{session_name}\t#{session_windows}\t#{?session_attached,attached,detached}"
     try:
         proc = subprocess.run(
-            sshutil.probe_ssh(target) + [shlex.quote(word) for word in
-                                 remote_sh(f"tmux -u list-sessions -F {shlex.quote(fmt)}")],
+            sshutil.probe_ssh(target)
+            + remote_words(f"tmux -u list-sessions -F {shlex.quote(fmt)}", via),
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     except OSError as exc:
         return [], f"cannot run ssh: {exc}"
@@ -703,7 +729,7 @@ def live_sessions(target: str) -> tuple[list[str], str]:
     err = " ".join(proc.stderr.split())
     if err:
         return [], err
-    which = remote_tmux(target)
+    which = remote_tmux(target, via)
     if which:
         return [], (f"tmux exited {proc.returncode} without a message; "
                     f"`ssh {target} tmux` is {which}")
@@ -787,7 +813,7 @@ def tab_title(title: str) -> str:
     return f"\x1b]30;{title}\x07\x1b]0;{title}\x07"
 
 
-def waypipe_remote_missing(target: str) -> str:
+def waypipe_remote_missing(target: str, via: str = "") -> str:
     """Why `waypipe ssh` would die on the far side, or "" when it should not.
 
     waypipe_local_display, one hop further out: waypipe has to exist at both
@@ -797,9 +823,11 @@ def waypipe_remote_missing(target: str) -> str:
     choice between a plain connection and none.
 
     Honours --remote-bin in SSHTSF_WAYPIPE_OPTS, the knob for exactly the host
-    whose non-interactive PATH lacks waypipe. A probe that cannot answer -- a
-    host that only takes a password, a timeout -- is taken as a yes, leaving
-    the real connection to be the judge.
+    whose non-interactive PATH lacks waypipe, and the host's via, which is
+    where ssh_argv starts the server: the question is asked behind it, of
+    the PATH the server will get there. A probe that cannot answer -- a host
+    that only takes a password, a timeout -- is taken as a yes, leaving the
+    real connection to be the judge.
     """
     remote_bin = waypipe_remote_bin()
     if remote_bin:
@@ -808,6 +836,11 @@ def waypipe_remote_missing(target: str) -> str:
     else:
         check = "command -v waypipe"
         what = f"no waypipe on the non-interactive PATH of {target}"
+    if via:
+        # sh -c for command -v, a shell builtin that via may not be able to
+        # start on its own; sh leaves the PATH as via set it.
+        check = f"{via} sh -c {shlex.quote(check)}"
+        what += f" via {via}"
     try:
         proc = subprocess.run(
             sshutil.probe_ssh(target, batch=True) + [check],
@@ -833,14 +866,14 @@ def remote_user_guess(target: str) -> str:
     return sshutil.login_name()
 
 
-def waypipe_usable(target: str) -> bool:
+def waypipe_usable(target: str, via: str = "") -> bool:
     """Whether a waypipe forward can go ahead; if not, says why on stderr."""
     display, why = waypipe_local_display()
     if display is None:
         print(f"sshtsf: no local Wayland display ({why}); connecting without it",
               file=sys.stderr)
         return False
-    why = waypipe_remote_missing(target)
+    why = waypipe_remote_missing(target, via)
     if why:
         print(f"sshtsf: {why}; connecting without Wayland", file=sys.stderr)
         return False
@@ -857,7 +890,8 @@ class EcfForward(NamedTuple):
     cleanup: list[str]
 
 
-def ecf_forward(target: str, port: int | None, dry_run: bool) -> EcfForward | None:
+def ecf_forward(target: str, port: int | None, dry_run: bool,
+                via: str = "") -> EcfForward | None:
     """The Emacs socket forward, or None, with the reason on stderr, when
     there is no local server or the remote socket cannot be cleared.
 
@@ -880,8 +914,8 @@ def ecf_forward(target: str, port: int | None, dry_run: bool) -> EcfForward | No
         print("sshtsf: no local Emacs server socket (start Emacs first); "
               "connecting without the forward", file=sys.stderr)
         return None
-    cleanup = sshutil.probe_ssh(target) + [shlex.quote(word) for word in remote_sh(
-        f'p={shlex.quote(ECF_REMOTE_SOCKET)}-$(id -un); rm -f "$p" && echo "$p"')]
+    cleanup = sshutil.probe_ssh(target) + remote_words(
+        f'p={shlex.quote(ECF_REMOTE_SOCKET)}-$(id -un); rm -f "$p" && echo "$p"', via)
     if dry_run:
         return EcfForward(local, f"{ECF_REMOTE_SOCKET}-{remote_user_guess(target)}",
                           port, cleanup)
@@ -1025,8 +1059,10 @@ def remote_script(session: str, scfg: dict, env: list[tuple[str, str]],
         + ("; [ -z \"$SOCAT_PID\" ] || kill $SOCAT_PID 2>/dev/null" if port else ""))
 
 
-def ssh_argv(target: str, script: str, ecf: EcfForward | None, waypipe: bool) -> list[str]:
-    """The command line that connects: ssh, or waypipe ssh, running script."""
+def ssh_argv(target: str, script: str, ecf: EcfForward | None, waypipe: bool,
+             via: str = "") -> list[str]:
+    """The command line that connects: ssh, or waypipe ssh, running script,
+    behind via if the host has one."""
     # No ExitOnForwardFailure: a bind that fails despite the cleanup is ssh's
     # own warning and a session without the forward, not a dead connection.
     sshopts = ["-R", f"{ecf.port or ecf.remote}:{ecf.local}"] if ecf else []
@@ -1039,8 +1075,12 @@ def ssh_argv(target: str, script: str, ecf: EcfForward | None, waypipe: bool) ->
     # Quote for the remote shell: ssh joins its command words with spaces and
     # the far side re-parses them, so an unquoted path with a space would
     # arrive as two arguments.
+    #
+    # With waypipe, via goes in front of waypipe's server rather than the
+    # script: the server starts the script as its own child, so it is inside
+    # already, and a second via would try to enter from within.
     argv = ["ssh"] + sshopts + ["-t", target] + \
-        [shlex.quote(word) for word in remote_sh(script)]
+        remote_words(script, "" if waypipe else via)
 
     if waypipe:
         # waypipe takes its options before the mode word and passes everything
@@ -1052,8 +1092,28 @@ def ssh_argv(target: str, script: str, ecf: EcfForward | None, waypipe: bool) ->
         # per-connection name is fine, because the session is told the name
         # above, and a prompt hook that re-reads `tmux show-environment` can
         # carry it into the panes that predate this connection.
-        argv = ["waypipe"] + WAYPIPE_OPTS + ["ssh"] + argv[1:]
+        argv = ["waypipe"] + waypipe_opts(via) + ["ssh"] + argv[1:]
     return argv
+
+
+def waypipe_opts(via: str) -> list[str]:
+    """WAYPIPE_OPTS, with --remote-bin put behind via when there is one.
+
+    waypipe hands --remote-bin to ssh as a single word, and ssh joins its
+    words for the remote shell to split again, so a value with spaces is
+    run as a command line there -- which is what makes 'via waypipe' work.
+    """
+    if not via:
+        return WAYPIPE_OPTS
+    opts, skip = [], False
+    for word in WAYPIPE_OPTS:
+        if skip:
+            skip = False
+        elif word == "--remote-bin":
+            skip = True
+        elif not word.startswith("--remote-bin="):
+            opts.append(word)
+    return opts + ["--remote-bin", f"{via} {waypipe_remote_bin() or 'waypipe'}"]
 
 
 def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
@@ -1070,14 +1130,15 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
     """
     scfg = cfg["hosts"][host].get("sessions", {}).get(session, {})
     target = ssh_target(cfg, host)
+    via = host_via(cfg, host)
     waypipe = (resolve_flag(cfg, host, session, "waypipe", over.waypipe)
-               and waypipe_usable(target))
+               and waypipe_usable(target, via))
     ecf = None
     if resolve_flag(cfg, host, session, "ecf", over.ecf):
         port = scfg.get("ecf_port") or cfg["hosts"][host].get("ecf_port")
-        ecf = ecf_forward(target, port, dry_run)
+        ecf = ecf_forward(target, port, dry_run, via)
     env = session_env(target, waypipe, ecf is not None)
-    argv = ssh_argv(target, remote_script(session, scfg, env, ecf), ecf, waypipe)
+    argv = ssh_argv(target, remote_script(session, scfg, env, ecf), ecf, waypipe, via)
 
     if dry_run:
         if ecf:
@@ -1201,6 +1262,18 @@ def lists_logins() -> list[str]:
     return list(dict.fromkeys(entry.login for entry in entries))
 
 
+def lists_via(target: str) -> str:
+    """The via of the first ssh-lists entry that dials target, or "": the
+    container pssh and xssh already run that machine's commands in, and so
+    the likely one for sshtsf's."""
+    try:
+        entries = lists.load_all().logins
+    except lists.ToolError:
+        return ""
+    return next((entry.via for entry in entries
+                 if entry.login == target and entry.via), "")
+
+
 def host_candidates(cfg: dict) -> list[tuple[str, str, str]]:
     """(destination, note, source) to offer for a new host: the ssh-lists
     logins, then the known_hosts machines the lists do not name, the fresh
@@ -1293,6 +1366,12 @@ def edit_host(cfg: dict, name: str = "", existing: dict | None = None) -> str | 
 
     set_field(hcfg, "alias", ask_word(cfg, (name, ""), lambda: ask_text(
         "  alias", hcfg.get("alias", ""), editing)))
+    # Offered from ssh-lists for a new host, so a machine whose tools live in
+    # a container is set up once, there; editing shows only what is set.
+    via = hcfg.get("via", "") if editing else lists_via(target or new_name)
+    set_field(hcfg, "via", ask_text(
+        "  run everything there via (e.g. distrobox enter NAME --)", via,
+        editing or bool(via), unset="the host itself"))
     # The host-wide defaults: a yes here is inherited by every session on the
     # host, and edit_session then skips the same question for a new session
     # rather than ask it again.
@@ -1583,7 +1662,7 @@ def cmd_live(cfg: dict, token: str | None = None) -> int:
         sys.exit("sshtsf: no hosts registered")
     for host in hosts_named(cfg, token):
         target = ssh_target(cfg, host)
-        rows, why = live_sessions(target)
+        rows, why = live_sessions(target, host_via(cfg, host))
         print(f"{host}:" if target == host else f"{host}  (-> {target}):")
         if not rows:
             print(f"    ({why or 'no tmux server'})")

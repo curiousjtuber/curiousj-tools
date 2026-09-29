@@ -106,6 +106,12 @@ lists is the target as is; otherwise the user is asked for when the destination 
 and a blank leaves it to ssh (`~/.ssh/config`, or your own name). Two users on one machine are
 two host entries.
 
+A host whose `tmux`/`waypipe` live in a container gets a `via`, a command prefix such as
+`distrobox enter dev --`, the same as `via` in the ssh-lists file (`sshtsf -c` offers that
+one). Everything `sshtsf` runs on the host then runs behind it: the tmux session and its
+probes, the Emacs socket cleanup, and waypipe's server (as `--remote-bin 'VIA waypipe'`)
+along with the check for it.
+
 `sshtsf -w` wraps the connection in `waypipe ssh`, and a terminal such as Konsole then sees
 `waypipe`, not the ssh it would otherwise title the tab after. So a waypipe session names the
 tab `HOST:SESSION` itself, and the name stays on the tab after the session ends.

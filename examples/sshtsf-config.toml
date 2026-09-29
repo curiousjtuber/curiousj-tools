@@ -11,6 +11,7 @@ session = "web"
 [hosts.devbox]
 target = "devbox"       # ssh destination, [user@]host; defaults to the host key
 alias = "c"
+via = "distrobox enter dev --"  # run tmux, waypipe and socat inside this container
 ecf = true              # forward the local Emacs socket, by default
 ecf_port = 41234        # relay via TCP port (for SELinux hosts where sshd cannot bind unix sockets)
 
