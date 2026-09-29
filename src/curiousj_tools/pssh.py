@@ -92,7 +92,10 @@ Inside, '~' is that place's home, so with the same login listed plainly as
 well, `pssh -P -c ...` keeps a container's separate home current alongside
 the host's. Entries that repeat a login with the same via are run once. Run
 on the host itself, both entries become 'localhost', the second keeping its
-via, so the container is reached from there as from the other hosts.
+via, so the container is reached from there as from the other hosts. Its
+lines are tagged with the via too, less the closing '--', as
+"localhost[distrobox enter dev -nw]", to tell them from the host's; -s
+announces it so.
 
 A login whose host key is not in known_hosts yet is contacted once beforehand,
 in the foreground, so ssh's yes/no question can be answered; parallel
@@ -112,7 +115,6 @@ explicitly.
 from __future__ import annotations
 
 import functools
-import os
 import shlex
 import shutil
 import subprocess
@@ -320,38 +322,65 @@ def wrap(cmd: str, via: str | None, interactive: bool = False) -> str:
     return via + " " + (cmd if interactive else "sh -c " + shlex.quote(cmd))
 
 
-def runs(pairs: list[tuple[Login, str]], interactive: bool = False) -> dict[str, list[str]]:
+def runs(pairs: list[tuple[Login, str]], interactive: bool = False) -> dict[str, list[Login]]:
     """What runs where: each distinct final command with its logins, in list
     order, from (login, its command) pairs. A login listed twice with the
     same via is one run; one listed plainly and with a via is two, one for
     each place."""
-    out: dict[str, list[str]] = {}
+    out: dict[str, list[Login]] = {}
     for entry, cmd in pairs:
         line = wrap(cmd, entry.via, interactive)
         group = out.setdefault(line, [])
-        if entry.login not in group:
-            group.append(entry.login)
+        if all(e.login != entry.login for e in group):
+            group.append(entry)
     return out
 
 
-def parallel_argv(entries: list[str], cmd: str) -> list[str]:
-    hosts = [":" if e == "localhost" else e for e in entries]  # ':' is parallel's "here"
-    return ["parallel", "--nonall", "--tag", "--linebuffer", "-S", ",".join(hosts), cmd]
+def tag(entry: Login) -> str:
+    """What a login's output is tagged with: the login, then its via less the
+    closing '--' when it has one, so a host and its container tell apart."""
+    if not entry.via:
+        return entry.login
+    return f"{entry.login}[{entry.via.strip().removesuffix(' --')}]"
+
+
+def parallel_argv(entry: Login, cmd: str) -> list[str]:
+    """One login's run, tagged as tag() says. '--nonall --tag' is this per
+    host with the host for the tag, the same for a host and its container
+    and ':' for this machine; -N0 runs cmd once, on no argument."""
+    host = ":" if entry.login == "localhost" else entry.login  # ':' is parallel's "here"
+    return ["parallel", "-j1", "-N0", "--linebuffer", "--tagstring", tag(entry),
+            "-S", host, cmd, ":::", "1"]
+
+
+def parallel_run(groups: dict[str, list[Login]]) -> int:
+    """Every login at once: the number that failed; 130 when interrupted."""
+    procs = [subprocess.Popen(parallel_argv(entry, line))
+             for line, entries in groups.items() for entry in entries]
+    try:
+        return sum(p.wait() != 0 for p in procs)
+    except KeyboardInterrupt:
+        # ^C reached the parallels too; see that none outlives pssh.
+        for p in procs:
+            if p.poll() is None:
+                p.terminate()
+            p.wait()
+        return pick.EXIT_ABORT
 
 
 def serial_argv(login: str, cmd: str) -> list[str]:
     return ["sh", "-c", cmd] if login == "localhost" else ["ssh", "-t", login, cmd]
 
 
-def serial_run(groups: dict[str, list[str]]) -> int:
+def serial_run(groups: dict[str, list[Login]]) -> int:
     """Each login in turn, in the foreground: the number that failed; 130
     when interrupted."""
     failed = 0
     try:
         for line, entries in groups.items():
-            for login in entries:
-                print(f"== {login}", flush=True)
-                if subprocess.run(serial_argv(login, line)).returncode != 0:
+            for entry in entries:
+                print(f"== {tag(entry)}", flush=True)
+                if subprocess.run(serial_argv(entry.login, line)).returncode != 0:
                     failed += 1
     except KeyboardInterrupt:
         return pick.EXIT_ABORT
@@ -450,7 +479,7 @@ def cli(opts: logins.LoginOpts, dry_run: bool, serial: bool, interactive: bool,
             print(line)
             print("-- one at a time on:" if serial else "-- on:")
             for entry in entries:
-                print(f"   {entry}")
+                print(f"   {entry.login}")
         if skipped:
             print("-- not contacted (no operation applies):")
             for login in skipped:
@@ -462,21 +491,12 @@ def cli(opts: logins.LoginOpts, dry_run: bool, serial: bool, interactive: bool,
         print("pssh: no login takes part", file=sys.stderr)
         return 0
     try:
-        logins.confirm_new_hosts(list(dict.fromkeys(e for g in groups.values() for e in g)),
+        logins.confirm_new_hosts(list(dict.fromkeys(e.login for g in groups.values() for e in g)),
                                  "pssh")
     except ToolError as e:
         print(f"pssh: {e}", file=sys.stderr)
         return cmdline.EXIT_ERROR
-    if serial:
-        return serial_run(groups)
-    if len(groups) == 1:
-        (line, entries), = groups.items()
-        os.execvp("parallel", parallel_argv(entries, line))
-        return 0
-    # One parallel per distinct command, all at once; each exits with its
-    # number of failed logins, so the sum is what one run would have given.
-    procs = [subprocess.Popen(parallel_argv(entries, line)) for line, entries in groups.items()]
-    return sum(p.wait() for p in procs)
+    return serial_run(groups) if serial else parallel_run(groups)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -1,5 +1,6 @@
 import io
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -357,14 +358,14 @@ class Serial(unittest.TestCase):
         self.assertEqual(pssh.serial_argv("localhost", "x"), ["sh", "-c", "x"])
 
     def test_each_login_in_turn_counting_failures(self):
-        groups = {"one": ["a", "localhost"], "two": ["b"]}
+        groups = {"one": [Login("a"), Login("localhost")], "two": [Login("b", via="dbx.sh --")]}
         results = [mock.Mock(returncode=0), mock.Mock(returncode=1), mock.Mock(returncode=2)]
         with mock.patch.object(pssh.subprocess, "run", side_effect=results) as run, \
                 mock.patch("sys.stdout", new_callable=io.StringIO) as out:
             self.assertEqual(pssh.serial_run(groups), 2)
         self.assertEqual([c.args[0] for c in run.call_args_list],
                          [["ssh", "-t", "a", "one"], ["sh", "-c", "one"], ["ssh", "-t", "b", "two"]])
-        self.assertEqual(out.getvalue(), "== a\n== localhost\n== b\n")
+        self.assertEqual(out.getvalue(), "== a\n== localhost\n== b[dbx.sh]\n")
         with mock.patch.object(pssh.subprocess, "run", side_effect=KeyboardInterrupt), \
                 mock.patch("sys.stdout", new_callable=io.StringIO):
             self.assertEqual(pssh.serial_run(groups), 130)
@@ -395,10 +396,31 @@ class Wrap(unittest.TestCase):
 
 
 class ParallelArgv(unittest.TestCase):
-    def test_localhost_is_colon(self):
-        argv = pssh.parallel_argv(["a", "b", "localhost"], "uptime")
-        self.assertEqual(argv, ["parallel", "--nonall", "--tag", "--linebuffer",
-                                "-S", "a,b,:", "uptime"])
+    def test_localhost_is_colon_tagged_localhost(self):
+        self.assertEqual(pssh.parallel_argv(Login("localhost"), "uptime"),
+                         ["parallel", "-j1", "-N0", "--linebuffer", "--tagstring", "localhost",
+                          "-S", ":", "uptime", ":::", "1"])
+
+    def test_a_via_is_in_the_tag(self):
+        # '--nonall --tag' tagged a host and its container alike, and this
+        # machine ':'.
+        self.assertEqual(pssh.tag(Login("a")), "a")
+        self.assertEqual(pssh.tag(Login("localhost", via="~/dbx-ubuntu.sh --")),
+                         "localhost[~/dbx-ubuntu.sh]")
+        self.assertEqual(pssh.tag(Login("a", via="distrobox enter dev")), "a[distrobox enter dev]")
+
+    def test_the_tags_reach_the_output(self):
+        if not shutil.which("parallel"):
+            self.skipTest("GNU parallel not installed")
+        groups = {"echo here": [Login("localhost")],
+                  "sh -c 'echo inside; exit 3'": [Login("localhost", via="sh -c --")]}
+        real = subprocess.Popen
+        with tempfile.TemporaryFile("w+") as out:
+            with mock.patch.object(pssh.subprocess, "Popen", lambda argv: real(argv, stdout=out)):
+                self.assertEqual(pssh.parallel_run(groups), 1)
+            out.seek(0)
+            self.assertEqual(sorted(out.read().splitlines()),
+                             ["localhost\there", "localhost[sh -c]\tinside"])
 
 
 class Main(unittest.TestCase):
@@ -409,55 +431,58 @@ class Main(unittest.TestCase):
         with open(self.file, "w") as f:
             f.write(TOML)
 
-    def test_execs_parallel(self):
-        with mock.patch.object(logins, "select", return_value=[Login("a"), Login("localhost")]), \
-                mock.patch("shutil.which", return_value="/usr/bin/parallel"), \
-                mock.patch("os.execvp") as ex, \
-                mock.patch.object(logins, "confirm_new_hosts"):
-            pssh.main(["-N", "uptime"])
-        ex.assert_called_once_with("parallel", ["parallel", "--nonall", "--tag", "--linebuffer",
-                                                "-S", "a,:", "cd ~\nuptime"])
-
-    def test_two_places_are_two_parallels(self):
-        via = "distrobox enter dev --"
-        entries = [Login("a"), Login("a", via=via), Login("localhost")]
-        procs = [mock.Mock(wait=mock.Mock(return_value=1)), mock.Mock(wait=mock.Mock(return_value=2))]
+    def run_main(self, argv, entries, results=()):
+        """pssh.main with the parallels mocked: (exit status, their argvs)."""
+        procs = [mock.Mock(wait=mock.Mock(return_value=r)) for r in results]
         with mock.patch.object(logins, "select", return_value=entries), \
                 mock.patch("shutil.which", return_value="/usr/bin/parallel"), \
-                mock.patch("os.execvp") as ex, \
-                mock.patch.object(pssh.subprocess, "Popen", side_effect=procs) as popen, \
-                mock.patch.object(logins, "confirm_new_hosts") as confirm:
-            self.assertEqual(pssh.main(["uptime"]), 3)
-        ex.assert_not_called()
-        confirm.assert_called_once_with(["a", "localhost"], "pssh")
-        self.assertEqual([c.args[0] for c in popen.call_args_list], [
-            ["parallel", "--nonall", "--tag", "--linebuffer", "-S", "a,:", "cd ~\nuptime"],
-            ["parallel", "--nonall", "--tag", "--linebuffer", "-S", "a",
-             "distrobox enter dev -- sh -c 'cd ~\nuptime'"]])
+                mock.patch.object(pssh.subprocess, "Popen",
+                                  side_effect=procs or None,
+                                  return_value=mock.Mock(wait=mock.Mock(return_value=0))) as popen, \
+                mock.patch.object(logins, "confirm_new_hosts"):
+            rc = pssh.main(argv)
+        return rc, [c.args[0] for c in popen.call_args_list]
+
+    def test_a_parallel_per_login(self):
+        rc, argvs = self.run_main(["-N", "uptime"], [Login("a"), Login("localhost")])
+        self.assertEqual(rc, 0)
+        self.assertEqual([(a[5], a[7], a[8]) for a in argvs],
+                         [("a", "a", "cd ~\nuptime"), ("localhost", ":", "cd ~\nuptime")])
+
+    def test_two_places_are_tagged_apart_and_failures_counted(self):
+        via = "distrobox enter dev --"
+        entries = [Login("a"), Login("a", via=via), Login("localhost")]
+        rc, argvs = self.run_main(["uptime"], entries, results=[1, 0, 255])
+        self.assertEqual(rc, 2)
+        self.assertEqual([(a[5], a[7], a[8]) for a in argvs], [
+            ("a", "a", "cd ~\nuptime"), ("localhost", ":", "cd ~\nuptime"),
+            ("a[distrobox enter dev]", "a", "distrobox enter dev -- sh -c 'cd ~\nuptime'")])
+
+    def test_interrupted_it_stops_every_parallel(self):
+        running = mock.Mock(wait=mock.Mock(side_effect=[KeyboardInterrupt, 0]),
+                            poll=mock.Mock(return_value=None))
+        with mock.patch.object(logins, "select", return_value=[Login("a")]), \
+                mock.patch("shutil.which", return_value="/usr/bin/parallel"), \
+                mock.patch.object(pssh.subprocess, "Popen", return_value=running), \
+                mock.patch.object(logins, "confirm_new_hosts"):
+            self.assertEqual(pssh.main(["uptime"]), 130)
+        running.terminate.assert_called_once_with()
 
     def test_dirs_mode_wraps_the_command(self):
-        with mock.patch.object(logins, "select", return_value=[Login("localhost")]), \
-                mock.patch("shutil.which", return_value="/usr/bin/parallel"), \
-                mock.patch("os.execvp") as ex, \
-                mock.patch.object(logins, "confirm_new_hosts"):
-            pssh.main(["-P", "-f", self.file, "git", "status", "-s"])
-        cmd = ex.call_args[0][1][-1]
+        _, argvs = self.run_main(["-P", "-f", self.file, "git", "status", "-s"], [Login("localhost")])
+        cmd = argvs[0][8]
         self.assertTrue(cmd.startswith("cd ~\nrc=0\nrun() {"))
         self.assertIn("\nrun a\nrun b\nexit $rc", cmd)
         self.assertIn("git status -s", cmd)
 
     def test_clone_flag_reaches_the_script(self):
-        with mock.patch.object(logins, "select", return_value=[Login("localhost")]), \
-                mock.patch("shutil.which", return_value="/usr/bin/parallel"), \
-                mock.patch("os.execvp") as ex, \
-                mock.patch.object(logins, "confirm_new_hosts"):
-            pssh.main(["-c", "-f", self.file, "true"])
-        self.assertIn("\nrun a git@example.com:me/a.git main\nrun b\n", ex.call_args[0][1][-1])
+        _, argvs = self.run_main(["-c", "-f", self.file, "true"], [Login("localhost")])
+        self.assertIn("\nrun a git@example.com:me/a.git main\nrun b\n", argvs[0][8])
 
     def test_dry_run_prints_command_and_hosts_without_parallel(self):
         with mock.patch.object(logins, "select", return_value=[Login("h1"), Login("localhost")]), \
                 mock.patch("shutil.which", return_value=None), \
-                mock.patch("os.execvp") as ex, \
+                mock.patch.object(pssh.subprocess, "Popen") as ex, \
                 mock.patch.object(logins, "confirm_new_hosts"), \
                 mock.patch("sys.stdout", new_callable=io.StringIO) as out:
             self.assertEqual(pssh.main(["-n", "-P", "-f", self.file, "uptime"]), 0)
@@ -536,7 +561,7 @@ class Main(unittest.TestCase):
                                                                Login("localhost")]), \
                 mock.patch.object(lists, "load_all", return_value=found), \
                 mock.patch("shutil.which", return_value=None), \
-                mock.patch("os.execvp") as ex, \
+                mock.patch.object(pssh.subprocess, "Popen") as ex, \
                 mock.patch.object(pssh.subprocess, "run", return_value=mock.Mock(returncode=1)) as run, \
                 mock.patch.object(logins, "confirm_new_hosts") as confirm, \
                 mock.patch("sys.stdout", new_callable=io.StringIO), \
@@ -595,7 +620,7 @@ class Main(unittest.TestCase):
                 mock.patch("shutil.which", return_value="/usr/bin/parallel"), \
                 mock.patch.object(logins, "confirm_new_hosts",
                                   side_effect=logins.ToolError("new: host key not confirmed")), \
-                mock.patch("os.execvp") as ex, \
+                mock.patch.object(pssh.subprocess, "Popen") as ex, \
                 mock.patch("sys.stderr", new_callable=io.StringIO) as err:
             self.assertEqual(pssh.main(["uptime"]), 1)
         ex.assert_not_called()

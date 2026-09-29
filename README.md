@@ -246,7 +246,9 @@ carrying over between calls, and no login `commands` either. `xssh` gives each o
 shell, so all of those work there. A login listed plainly and again with a `via` is run in both
 places by `pssh`, and once per place: inside `distrobox enter dev -nw -- sh -c '...'` the `~` is
 the container's own home, so a `git pull` there keeps the container's checkouts current
-alongside the host's -- from that host too, where both entries are `localhost`.
+alongside the host's -- from that host too, where both entries are `localhost`. Its output is
+tagged with the `via` as well, less the closing `--`, `alice@devbox[distrobox enter dev -nw]`,
+so it reads apart from the host's.
 
 Both contact a host whose key is not in `known_hosts` yet once beforehand, in the foreground, so
 ssh's yes/no question is asked where it can be answered: inside a synchronized xpanes window the
