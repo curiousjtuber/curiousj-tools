@@ -90,12 +90,15 @@ a command line the command is run through there, handed `sh -c `...'` (or
 
 Inside, '~' is that place's home, so with the same login listed plainly as
 well, `pssh -P -c ...` keeps a container's separate home current alongside
-the host's. Entries that repeat a login with the same via are run once. Run
-on the host itself, both entries become 'localhost', the second keeping its
-via, so the container is reached from there as from the other hosts. Its
-lines are tagged with the via too, less the closing '--', as
-"localhost[distrobox enter dev -nw]", to tell them from the host's; -s
-announces it so.
+the host's. A container sharing the host's home -- distrobox's default --
+takes the attribute 'shared-home': it is then left out of -P and of every
+per-path operation, so no checkout is worked on twice at once, and runs its
+per-login operations as any login does. Entries that repeat a login with the
+same via are run once. Run on the host itself, both entries become
+'localhost', the second keeping its via, so the container is reached from
+there as from the other hosts. Its lines are tagged with the via too, less
+the closing '--', as "localhost[distrobox enter dev -nw]", to tell them
+from the host's; -s announces it so.
 
 A login whose host key is not in known_hosts yet is contacted once beforehand,
 in the foreground, so ssh's yes/no question can be answered; parallel
@@ -259,6 +262,15 @@ def list_operations(found: lists.Lists) -> str:
     return "\n".join(out)
 
 
+SHARED_HOME = "shared-home"
+
+
+def shares_home(entry: Login) -> bool:
+    """Whether the login's home is another listed login's: its paths are
+    worked on there, not here."""
+    return SHARED_HOME in entry.attributes
+
+
 def per_login_command(op: Operation, entry: Login) -> str | None:
     """What a per-login operation runs on a login: its own command, else the
     operation's when the login matches; None when nothing."""
@@ -286,7 +298,7 @@ def login_script(entry: Login, ops: list[Operation], path_list: list[PathInfo],
     lines: list[str] = []
     for op in ops:
         if op.per_path:
-            if not op.logins.matches(entry.attributes):
+            if shares_home(entry) or not op.logins.matches(entry.attributes):
                 continue
             pairs = [(p, cmd) for p in path_list if (cmd := per_path_command(op, p))]
             if pairs:
@@ -444,7 +456,8 @@ def cli(opts: logins.LoginOpts, dry_run: bool, serial: bool, interactive: bool,
     if paths and ops:
         raise click.UsageError("-P and -o: an operation says itself where it runs.", ctx)
     paths = paths or clone or pick_paths or bool(path_attrs)
-    skipped: list[str] = []
+    skipped: list[str] = []  # tagged, so a host and its container tell apart
+    why = "no operation applies"
     try:
         found = lists.load_all(opts.files) if paths or ops else None
         leaves = expand(list(ops), found.operations) if ops else []
@@ -463,13 +476,18 @@ def cli(opts: logins.LoginOpts, dry_run: bool, serial: bool, interactive: bool,
                          if any(op.per_path for op in leaves) else [])
             entries = logins.select(opts, found=found)
             scripts = [(e, login_script(e, leaves, path_list, clone)) for e in entries]
-            skipped = list(dict.fromkeys(e.login for e, s in scripts if s is None))
+            skipped = list(dict.fromkeys(tag(e) for e, s in scripts if s is None))
             groups = runs([(e, s) for e, s in scripts if s], interactive)
         else:
             cmd = command_line(list(command))
             if paths:
                 cmd = paths_script(paths_list(found, pick_paths, path_attrs), cmd, clone)
-            groups = runs([(e, cmd) for e in logins.select(opts, found=found)], interactive)
+            entries = logins.select(opts, found=found)
+            if paths:
+                skipped = list(dict.fromkeys(tag(e) for e in entries if shares_home(e)))
+                entries = [e for e in entries if not shares_home(e)]
+                why = SHARED_HOME
+            groups = runs([(e, cmd) for e in entries], interactive)
     except ToolError as e:
         print(f"pssh: {e}", file=sys.stderr)
         return cmdline.EXIT_ERROR
@@ -482,12 +500,12 @@ def cli(opts: logins.LoginOpts, dry_run: bool, serial: bool, interactive: bool,
             for entry in entries:
                 print(f"   {entry.login}")
         if skipped:
-            print("-- not contacted (no operation applies):")
+            print(f"-- not contacted ({why}):")
             for login in skipped:
                 print(f"   {login}")
         return 0
     for login in skipped:
-        print(f"pssh: {login}: no operation applies, skipped", file=sys.stderr)
+        print(f"pssh: {login}: {why}, skipped", file=sys.stderr)
     if not groups:
         print("pssh: no login takes part", file=sys.stderr)
         return 0

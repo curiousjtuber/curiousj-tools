@@ -285,6 +285,13 @@ class LoginScript(unittest.TestCase):
         self.assertIn("cmd=ls", script)
         self.assertIsNone(pssh.login_script(Login("b"), [Operation("own")], []))
 
+    def test_a_shared_home_takes_no_per_path_part(self):
+        shared = Login("a", via="dbx --", attributes={"shared-home": None, "mise": None})
+        self.assertIsNone(pssh.login_script(shared, [GIT_PULL], self.PATHS))
+        script = pssh.login_script(shared, [GIT_PULL, UP], self.PATHS)
+        self.assertEqual(self.lines(script)[:2], ["echo '== up'", "cmd='mise up'"])
+        self.assertNotIn("git-pull", script)
+
     def test_login_condition_gates_a_per_path_op(self):
         gated = Operation("git-pull", "git pull", logins=cond("dev"), paths=True and attrs.EVERYTHING)
         self.assertIsNone(pssh.login_script(Login("a"), [gated], self.PATHS))
@@ -542,6 +549,23 @@ class Main(unittest.TestCase):
                             ops=OPS.values())
         self.assertEqual(rc, 0)
         self.assertIn("\necho '== git-pull'\ncmd='git pull'\nrun p u\nexit $rc\n-- on:\n   c\n   localhost\n", out)
+
+    def test_a_shared_home_is_left_out_of_paths_and_reported_by_its_tag(self):
+        shared = Login("a", via="dbx --", attributes={"shared-home": None, "mise": None})
+        entries = [Login("a", attributes={"mise": None}), shared]
+        rc, out, err, _ = dry(["-n", "-P", "true"], entries=entries, path_list=[PathInfo("p")])
+        self.assertEqual((rc, err), (0, ""))
+        self.assertIn("\nrun p\nexit $rc\n-- on:\n   a\n-- not contacted (shared-home):\n   a[dbx]\n", out)
+        rc, out, _, _ = dry(["-n", "-o", "all"], entries=entries,
+                            path_list=[PathInfo("p", attributes={"git": None})], ops=OPS.values())
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.count("run p"), 1)
+        self.assertEqual(out.count("== up'"), 2)
+        self.assertNotIn("not contacted", out)
+        # a plain run is not per path: the shared home takes part
+        _, out, _, _ = dry(["-n", "true"], entries=entries)
+        self.assertIn("-- on:\n   a\n", out)
+        self.assertNotIn("not contacted", out)
 
     def test_a_serial_op_makes_the_run_serial(self):
         entries = [Login("a", attributes={"cachyos": None}), Login("b", attributes={"mise": None})]

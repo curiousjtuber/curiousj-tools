@@ -116,7 +116,7 @@ def op_panes(entries: list[Login], ops: list[lists.Operation], path_list: list[l
     for entry in entries:
         script_text = pssh.login_script(entry, ops, path_list, clone)
         if script_text is None:
-            skipped.append(entry.login)
+            skipped.append(pssh.tag(entry))
             continue
         kept.append(entry)
         commands.append(op_pane_command(entry, script_text))

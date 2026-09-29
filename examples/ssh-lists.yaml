@@ -11,6 +11,7 @@ logins:
   - login: alice@devbox                  # the same login twice: one pane on the
     commands: [distrobox enter dev -nw]      # host, one inside its container...
     via: distrobox enter dev -nw --          # ...and pssh runs its command in there too
+    # attributes: [shared-home]              # when it shares the host's home: no per-path work
 paths:
   - path: dotfiles                       # relative to ~ unless absolute
     git_url: git@github.com:me/dotfiles.git   # optional: `pssh -c` clones it when missing

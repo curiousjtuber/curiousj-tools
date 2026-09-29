@@ -9,7 +9,9 @@ or .json. Three parts, all optional:
           via = "distrobox enter dev -nw --", attributes = ["mise", "cachyos"] },
     ]   # commands: run after login, in the pane xssh opens
         # via: what pssh runs its command through there, given `sh -c `...'`
-        # attributes: flags and key=value pairs the operations select on
+        # attributes: flags and key=value pairs the operations select on;
+        #   'shared-home', for a container sharing the host's home, keeps
+        #   pssh and xssh from working on its paths a second time
 
     [[paths]]
     path = "src/webapp"                     # relative to ~ unless absolute

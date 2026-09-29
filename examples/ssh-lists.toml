@@ -15,7 +15,9 @@ logins = [
     { login = "my-mac.local", commands = ["cd src", "exec zsh"], attributes = ["mac", "brew", "mise"], operations = { brew-upgrade = "brew update && brew upgrade --greedy" } },
     # the same login twice: one pane on the host, one inside its container;
     # via is how pssh runs its command in there (handed `sh -c `...'`), so
-    # `pssh -o git-pull` keeps a container's separate home current too
+    # `pssh -o git-pull` keeps a container's separate home current too; one
+    # sharing the host's home (distrobox's default) takes attributes =
+    # ["shared-home"], and then no per-path work, which the host does
     { login = "alice@devbox", commands = ["distrobox enter dev -nw"], via = "distrobox enter dev -nw --" },
 ]
 

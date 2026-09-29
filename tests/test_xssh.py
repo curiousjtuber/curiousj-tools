@@ -116,6 +116,11 @@ class OpPanes(unittest.TestCase):
         self.assertTrue(local.endswith(' | base64 -d)"; cd ~; dbx.sh'), local)
         self.assertEqual(decoded(local), "dbx.sh -- sh -c 'cd ~\nx'")
 
+    def test_a_shared_home_gets_no_pane_for_per_path_work(self):
+        shared = Login("a", via="dbx --", attributes={"shared-home": None})
+        kept, _, skipped = xssh.op_panes([Login("a"), shared], self.OPS[1:], self.PATHS)
+        self.assertEqual(([e.via for e in kept], skipped), ([None], ["a[dbx]"]))
+
     def test_the_decoded_pane_runs(self):
         pane = xssh.op_pane_command(Login("localhost"), "echo hi\nexit 3")
         inner = pane.split("; cd ~; exec $SHELL")[0]

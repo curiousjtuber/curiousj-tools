@@ -254,7 +254,10 @@ places by `pssh`, and once per place: inside `distrobox enter dev -nw -- sh -c '
 the container's own home, so a `git pull` there keeps the container's checkouts current
 alongside the host's -- from that host too, where both entries are `localhost`. Its output is
 tagged with the `via` as well, less the closing `--`, `alice@devbox[distrobox enter dev -nw]`,
-so it reads apart from the host's.
+so it reads apart from the host's. A container that shares the host's home instead, as distrobox
+does unless created with `--home`, takes the attribute `shared-home`: `pssh -P`, and every
+per-path operation in `pssh -o` and `xssh -o`, then leave it out, so a checkout is not pulled
+twice at once, while its per-login operations (`apt-upgrade`, `mise-update`) still run there.
 
 Both contact a host whose key is not in `known_hosts` yet once beforehand, in the foreground, so
 ssh's yes/no question is asked where it can be answered: inside a synchronized xpanes window the
