@@ -30,8 +30,13 @@ serial = true
 command = "export PATH=/opt/homebrew/bin:$PATH; brew update && brew upgrade"
 logins = { any = ["mac", "brew"] }
 
+[operations.apt-upgrade]                # sudo and apt ask, so one login at a time too
+command = "sudo apt update && sudo apt upgrade"
+logins = { any = ["ubuntu", "debian"] }
+serial = true
+
 [operations.system-update]              # each login runs the member that applies to it
-operations = ["cachy-update", "brew-upgrade"]
+operations = ["cachy-update", "brew-upgrade", "apt-upgrade"]
 
 [operations.update-all]
 operations = ["git-pull", "uv-tool-update", "mise-update", "system-update"]

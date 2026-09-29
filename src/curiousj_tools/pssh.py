@@ -38,8 +38,8 @@ the git ones up to date.
 
 -o/--op NAME runs an operation instead of a COMMAND, one that says itself
 what it runs and where. git-pull, uv-tool-update, mise-update, cachy-update,
-brew-upgrade, system-update and update-all come built in; the lists files
-add their own, and replace a built-in by defining its name:
+brew-upgrade, apt-upgrade, system-update and update-all come built in; the
+lists files add their own, and replace a built-in by defining its name:
 
     [operations.git-pull]
     command = "git pull --rebase --autostash"
@@ -451,7 +451,8 @@ def cli(opts: logins.LoginOpts, dry_run: bool, serial: bool, interactive: bool,
         askers = [op.name for op in leaves if op.serial]
         if askers and not serial:
             serial = True
-            print(f"pssh: {', '.join(askers)} asks questions: one login at a time",
+            verb = "asks" if len(askers) == 1 else "ask"
+            print(f"pssh: {', '.join(askers)} {verb} questions: one login at a time",
                   file=sys.stderr)
         # Once serial is settled, and before any picker: a run parallel is
         # missing for asks nothing first.
