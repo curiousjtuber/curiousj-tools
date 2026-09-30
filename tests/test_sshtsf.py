@@ -237,7 +237,7 @@ def scripted(answers: dict[str, str | list[str]]):
     answers = {prefix: list(reply) if isinstance(reply, list) else reply
                for prefix, reply in answers.items()}
 
-    def fake_ask(prompt, default=""):
+    def fake_ask(prompt, default="", words=None, prefill=True):
         for prefix, reply in answers.items():
             if prompt.strip().startswith(prefix):
                 if isinstance(reply, list):
@@ -401,6 +401,60 @@ class TestAddHost(ConfigDirMixin, unittest.TestCase):
                          {"alias": "s"})
 
 
+class TestAsk(unittest.TestCase):
+    def ask(self, *args, rl=None, reply="", **kw):
+        with mock.patch.object(sshtsf, "line_editor", return_value=rl), \
+             mock.patch("builtins.input", return_value=reply) as inp:
+            got = sshtsf.ask(*args, **kw)
+        return got, inp.call_args.args[0]
+
+    def test_without_a_terminal_the_default_is_in_brackets(self):
+        words = mock.Mock(return_value=["x"])
+        self.assertEqual(self.ask("  name", "box", words), ("box", "  name [box]: "))
+        words.assert_not_called()
+
+    def test_on_a_terminal_the_default_is_on_the_line(self):
+        rl = mock.Mock(backend="readline")
+        got, prompt = self.ask("  via", "podman --", lambda: ["a", "b"], rl=rl,
+                               reply="distrobox enter box -- ")
+        self.assertEqual((got, prompt), ("distrobox enter box --", "  via: "))
+        hook = rl.set_startup_hook.call_args_list[0].args[0]
+        hook()
+        rl.insert_text.assert_called_once_with("podman --")
+        complete = rl.set_completer.call_args_list[0].args[0]
+        self.assertEqual(complete("", 1), "b")
+        # Both are taken off again, for the next prompt.
+        self.assertEqual(rl.set_startup_hook.call_args.args, (None,))
+        self.assertEqual(rl.set_completer.call_args.args, (None,))
+
+    def test_an_erased_line_is_still_the_default(self):
+        rl = mock.Mock(backend="readline")
+        self.assertEqual(self.ask("  via", "podman --", rl=rl)[0], "podman --")
+
+    def test_libedit_completes_but_keeps_the_brackets(self):
+        rl = mock.Mock(backend="editline")
+        _, prompt = self.ask("  via", "podman --", lambda: ["a"], rl=rl)
+        self.assertEqual(prompt, "  via [podman --]: ")
+        self.assertEqual(rl.set_startup_hook.call_args_list[0].args, (None,))
+        self.assertIsNotNone(rl.set_completer.call_args_list[0].args[0])
+
+    def test_a_yes_no_keeps_its_brackets(self):
+        rl = mock.Mock(backend="readline")
+        _, prompt = self.ask("  first? (y/n)", "no", rl=rl, prefill=False)
+        self.assertEqual(prompt, "  first? (y/n) [no]: ")
+        self.assertEqual(rl.set_startup_hook.call_args_list[0].args, (None,))
+
+    def test_completer_offers_the_words_the_text_starts(self):
+        complete = sshtsf.completer(["root@a", "", "me@b", "root@a", "root@c"])
+        self.assertEqual([complete("root@", n) for n in range(3)], ["root@a", "root@c", None])
+
+    def test_vias_are_the_hosts_then_the_lists(self):
+        cfg = {"hosts": {"a": {"via": "box1 --"}, "b": {}, "c": {"via": "box1 --"}}}
+        found = mock.Mock(logins=[mock.Mock(via="box2 --"), mock.Mock(via="")])
+        with mock.patch.object(sshtsf.lists, "load_all", return_value=found):
+            self.assertEqual(sshtsf.known_vias(cfg), ["box1 --", "box2 --"])
+
+
 class TestPromptFolder(unittest.TestCase):
     def prompt(self, typed, current="", dirs=("src/a", "src/b"), picked="src/b"):
         with mock.patch.object(sshtsf, "ask", side_effect=scripted({"folder": typed})) as ask, \
@@ -445,6 +499,14 @@ class TestPromptFolder(unittest.TestCase):
         got, _, _, pick = self.prompt("?", current="src/old", picked=None)
         self.assertEqual(got, "src/old")
         self.assertEqual(pick.call_args.args[2], "remote folder (abort keeps src/old)")
+
+    def test_a_question_mark_after_a_path_browses_from_it(self):
+        # The current folder pre-fills the line, so "?" lands after a path.
+        got, _, listed, pick = self.prompt("src/?", current="src/old")
+        self.assertEqual((got, listed), ("src/b", True))
+        self.assertEqual(pick.call_args.kwargs["query"], "src/")
+        _, _, _, pick = self.prompt("src/old?", current="src/old")
+        self.assertEqual(pick.call_args.kwargs["query"], "src/old")
 
     def test_a_failed_listing_keeps_the_current_on_a_blank(self):
         # "?" first, then a blank at the prompt that replaces the listing:

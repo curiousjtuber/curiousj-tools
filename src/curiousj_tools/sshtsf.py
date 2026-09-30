@@ -112,6 +112,7 @@ Config layout (all fields but the host key are optional):
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import shlex
@@ -122,6 +123,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+from collections.abc import Callable, Iterable
 from typing import NamedTuple
 
 import click
@@ -320,14 +322,73 @@ def said_yes(reply: str) -> bool:
     return yes_no(reply) is True
 
 
-def ask(prompt: str, default: str = "") -> str:
-    suffix = f" [{default}]" if default else ""
+def ask(prompt: str, default: str = "",
+        words: Callable[[], Iterable[str]] | None = None,
+        prefill: bool = True) -> str:
+    """A line from the user, stripped; blank is the default.
+
+    On a terminal the default is put on the line to edit, rather than shown
+    in brackets, and TAB completes the answer from words(), called only
+    then. A blank line is still the default, erased or not, so "-" stays
+    the one way to clear a field. prefill=False keeps the brackets, for a
+    yes/no, whose answer replaces the default rather than edits it; so does
+    libedit, which cannot pre-fill (see uses_libedit)."""
+    rl = line_editor()
+    edit = rl is not None and prefill and bool(default) and not uses_libedit(rl)
+    suffix = f" [{default}]" if default and not edit else ""
+    if rl:
+        rl.set_startup_hook((lambda: rl.insert_text(default)) if edit else None)
+        rl.set_completer(completer(words()) if words else None)
     try:
         reply = input(f"{prompt}{suffix}: ").strip()
     except (EOFError, KeyboardInterrupt):
         print(file=sys.stderr)
         raise SystemExit(130)
+    finally:
+        if rl:
+            rl.set_startup_hook(None)
+            rl.set_completer(None)
     return reply or default
+
+
+def line_editor():
+    """readline, set up, when input() would edit a line: both ends a
+    terminal. None elsewhere, and where Python has no readline."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return None
+    return readline_module()
+
+
+@functools.cache
+def readline_module():
+    try:
+        import readline
+    except ImportError:
+        return None
+    # The whole answer is the word to complete: a via has spaces in it, and
+    # a destination its @ and dots.
+    readline.set_completer_delims("")
+    readline.parse_and_bind("bind ^I rl_complete" if uses_libedit(readline)
+                            else "tab: complete")
+    return readline
+
+
+def uses_libedit(readline) -> bool:
+    """Whether Python's readline is libedit, as python-build-standalone's
+    is (uv's and mise's Pythons). It completes, but text inserted from its
+    startup or pre-input hook never reaches the line, so nothing pre-fills."""
+    return (getattr(readline, "backend", "") == "editline"
+            or "libedit" in (readline.__doc__ or ""))
+
+
+def completer(words: Iterable[str]):
+    """A readline completer offering the words that start with the text."""
+    words = list(dict.fromkeys(word for word in words if word))
+
+    def complete(text: str, state: int) -> str | None:
+        matches = [word for word in words if word.startswith(text)]
+        return matches[state] if state < len(matches) else None
+    return complete
 
 
 # --------------------------------------------------------------------------
@@ -623,7 +684,9 @@ def prompt_folder(target: str, current: str = "", label: str = "") -> str:
 
     Returns the folder relative to ~, "" for none. Updating an existing
     folder, blank keeps it and "-" clears it, so the current one is the
-    prompt's default and pre-fills fzf's query. Leaving the picker keeps it
+    prompt's default and pre-fills fzf's query. A "?" typed after a path,
+    as it is on a line the current one pre-fills, browses with that path as
+    the query instead. Leaving the picker keeps it
     as well -- none, for a new session -- rather than end the whole walk, and
     so does a blank at the prompt that stands in for a listing that failed.
     """
@@ -635,8 +698,9 @@ def prompt_folder(target: str, current: str = "", label: str = "") -> str:
         typed = ask(f"  folder relative to ~{where} (blank for none, ? to browse)")
     if typed == "-":
         return ""
-    if typed != "?":
+    if not typed.endswith("?"):
         return typed.strip().rstrip("/")
+    query = typed[:-1].strip() or current
 
     print(f"  listing {target} ...", file=sys.stderr)
     dirs = remote_dirs(target)
@@ -651,7 +715,7 @@ def prompt_folder(target: str, current: str = "", label: str = "") -> str:
 
     chosen = choose(dirs, "folder>",
                   f"remote folder (abort keeps {current or 'none'})",
-                  free_text=True, query=current)
+                  free_text=True, query=query)
     if chosen is None:
         return current
     return chosen.strip().rstrip("/")
@@ -1265,14 +1329,15 @@ CLEAR = "-"
 
 
 def ask_text(prompt: str, current: str = "", editing: bool = False,
-             unset: str = "none") -> str:
+             unset: str = "none",
+             words: Callable[[], Iterable[str]] | None = None) -> str:
     """A string field. New: blank for none. Editing: blank keeps the current
     value and "-" clears it; the hint says which, unset naming what an empty
-    field means. Returns "" for none."""
+    field means. words completes it (see ask). Returns "" for none."""
     if editing and current:
-        reply = ask(f"{prompt} (- for {unset})", current)
+        reply = ask(f"{prompt} (- for {unset})", current, words)
     else:
-        reply = ask(f"{prompt} (blank for {unset})")
+        reply = ask(f"{prompt} (blank for {unset})", words=words)
     return "" if reply.strip() == CLEAR else reply.strip()
 
 
@@ -1293,7 +1358,7 @@ def ask_bool(prompt: str, current: bool | None = None, editing: bool = False,
                 return None
         else:
             reply = ask(f"{prompt} (y/n, - for {unset})",
-                        "yes" if current else "no")
+                        "yes" if current else "no", prefill=False)
             if reply == CLEAR:
                 return None
         answer = yes_no(reply)
@@ -1376,6 +1441,36 @@ def host_candidates(cfg: dict) -> list[tuple[str, str, str]]:
                   for host, note in known_host_candidates(cfg) if host not in machines]
 
 
+def destinations(cfg: dict) -> list[str]:
+    """What a destination prompt completes: the ones registered here, then
+    host_candidates' logins and machines."""
+    return (host_values(cfg, "target")
+            + [host for host, _, _ in host_candidates(cfg)])
+
+
+def known_vias(cfg: dict) -> list[str]:
+    """What the via prompt completes: the hosts' vias, then the ssh-lists
+    entries'. A container is usually one of a few, already typed somewhere."""
+    try:
+        entries = lists.load_all().logins
+    except lists.ToolError:
+        entries = []
+    return host_values(cfg, "via") + [entry.via for entry in entries if entry.via]
+
+
+def host_values(cfg: dict, field: str) -> list[str]:
+    """field's value on each host that sets it, once each."""
+    return list(dict.fromkeys(hcfg[field] for hcfg in cfg["hosts"].values()
+                              if hcfg.get(field)))
+
+
+def session_commands(cfg: dict) -> list[str]:
+    """The sessions' commands, for the command prompt to complete."""
+    return list(dict.fromkeys(
+        scfg["command"] for hcfg in cfg["hosts"].values()
+        for scfg in (hcfg.get("sessions") or {}).values() if scfg.get("command")))
+
+
 def pick_host_candidate(cfg: dict) -> str:
     """Choose a destination for a new host, or type one; "" when there is
     nothing to offer or the picker was left."""
@@ -1407,7 +1502,7 @@ def edit_host(cfg: dict, name: str = "", existing: dict | None = None) -> str | 
         if new_name == CLEAR:
             return None if remove_host(cfg, name) else name
         target = ask("  ssh destination ([user@]host; - for the name itself)",
-                     hcfg.get("target") or name)
+                     hcfg.get("target") or name, lambda: destinations(cfg))
         if target == CLEAR:
             target = ""
     else:
@@ -1439,7 +1534,8 @@ def edit_host(cfg: dict, name: str = "", existing: dict | None = None) -> str | 
         # field of its own. Asked for separately only when the destination
         # names none, and a blank leaves it to ssh (~/.ssh/config, or your
         # own name).
-        target = ask("  ssh destination ([user@]host)", target or name)
+        target = ask("  ssh destination ([user@]host)", target or name,
+                     lambda: destinations(cfg))
         if "@" not in target:
             user = ask("  user on it (blank for ssh's default)")
             if user:
@@ -1453,7 +1549,7 @@ def edit_host(cfg: dict, name: str = "", existing: dict | None = None) -> str | 
     via = hcfg.get("via", "") if editing else lists_via(target or new_name)
     set_field(hcfg, "via", ask_text(
         "  run everything there via (e.g. distrobox enter NAME --)", via,
-        editing or bool(via), unset="the host itself"))
+        editing or bool(via), unset="the host itself", words=lambda: known_vias(cfg)))
     # The host-wide defaults: a yes here is inherited by every session on the
     # host, and edit_session then skips the same question for a new session
     # rather than ask it again.
@@ -1469,7 +1565,8 @@ def edit_host(cfg: dict, name: str = "", existing: dict | None = None) -> str | 
     if hcfg.get("waypipe") or hcfg.get("waypipe_bin"):
         set_field(hcfg, "waypipe_bin", ask_text(
             "  waypipe on it, if not on the non-interactive PATH (e.g. ~/.local/bin/waypipe)",
-            hcfg.get("waypipe_bin", ""), editing, unset="the PATH's"))
+            hcfg.get("waypipe_bin", ""), editing, unset="the PATH's",
+            words=lambda: host_values(cfg, "waypipe_bin")))
 
     if editing and new_name != name:
         hosts.pop(name)
@@ -1486,7 +1583,8 @@ def edit_host(cfg: dict, name: str = "", existing: dict | None = None) -> str | 
     # answer is in front of you, rather than at every registration.
     if editing:
         first = yes_no(ask("  offer this host first? (y/n)",
-                           "yes" if cfg.get("default_host") == name else "no"))
+                           "yes" if cfg.get("default_host") == name else "no",
+                           prefill=False))
         if first:
             cfg["default_host"] = name
         elif cfg.get("default_host") == name:
@@ -1561,7 +1659,8 @@ def edit_session(cfg: dict, host: str, name: str = "",
     set_field(scfg, "folder", folder)
 
     set_field(scfg, "command", ask_text("  command to run", scfg.get("command", ""),
-                                        editing, unset="a shell"))
+                                        editing, unset="a shell",
+                                        words=lambda: session_commands(cfg)))
 
     for field, question in (("ecf", "forward the local Emacs socket?"),
                             ("waypipe", "forward Wayland, for GUI applications?")):
