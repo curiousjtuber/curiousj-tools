@@ -110,7 +110,9 @@ A host whose `tmux`/`waypipe` live in a container gets a `via`, a command prefix
 `distrobox enter dev --`, the same as `via` in the ssh-lists file (`sshtsf -c` offers that
 one). Everything `sshtsf` runs on the host then runs behind it: the tmux session and its
 probes, the Emacs socket cleanup, and waypipe's server (as `--remote-bin 'VIA waypipe'`)
-along with the check for it.
+along with the check for it. A `waypipe_bin` (say `~/.local/bin/waypipe`) instead names a
+waypipe on the host itself that its non-interactive `PATH` misses; it is passed as
+`--remote-bin` and checked there, outside any `via`.
 
 `sshtsf -w` wraps the connection in `waypipe ssh`, and a terminal such as Konsole then sees
 `waypipe`, not the ssh it would otherwise title the tab after. So a waypipe session names the

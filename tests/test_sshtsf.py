@@ -1136,6 +1136,15 @@ class TestWaypipeRemoteProbe(unittest.TestCase):
         self.assertEqual(why, "no waypipe on the non-interactive PATH of devbox"
                               " via distrobox enter dev --")
 
+    def test_host_bin_is_checked_on_the_host_over_remote_bin(self):
+        with mock.patch.object(sshtsf, "WAYPIPE_OPTS", ["--remote-bin", "/opt/wp/waypipe"]), \
+             mock.patch.object(sshtsf.subprocess, "run",
+                               return_value=mock.Mock(returncode=1)) as run:
+            why = sshtsf.waypipe_remote_missing("devbox", "distrobox enter dev --",
+                                                "~/.local/bin/waypipe")
+        self.assertEqual(run.call_args.args[0][-1], 'test -x "$HOME"/.local/bin/waypipe')
+        self.assertEqual(why, "~/.local/bin/waypipe is not executable on devbox")
+
     def test_via_with_remote_bin(self):
         _, argv = self.probe(0, ["--remote-bin", "/opt/wp/bin/waypipe"],
                              via="distrobox enter dev --")
@@ -1157,7 +1166,11 @@ class TestVia(ConfigDirMixin, unittest.TestCase):
     def test_round_trip(self):
         self.assertEqual(sshtsf.load_config()["hosts"]["devbox"]["via"], self.VIA)
 
-    def exec_argv(self, argv: list[str], waypipe: bool, opts=()) -> list[str]:
+    def exec_argv(self, argv: list[str], waypipe: bool, opts=(), host_bin="") -> list[str]:
+        if host_bin:
+            cfg = sshtsf.load_config()
+            cfg["hosts"]["devbox"]["waypipe_bin"] = host_bin
+            sshtsf.save_config(cfg)
         with mock.patch.object(sshtsf, "WAYPIPE_OPTS", list(opts)), \
              mock.patch.object(sshtsf, "ecf_local_socket", return_value=None), \
              mock.patch.object(sshtsf, "waypipe_local_display",
@@ -1166,7 +1179,7 @@ class TestVia(ConfigDirMixin, unittest.TestCase):
              mock.patch.object(sshtsf.os, "execvp") as execvp:
             run_capture(argv + (["-w"] if waypipe else ["-W"]))
         if waypipe:
-            self.assertEqual(probe.call_args.args, ("devbox", self.VIA))
+            self.assertEqual(probe.call_args.args, ("devbox", self.VIA, host_bin))
         return execvp.call_args.args[1]
 
     def test_plain_connection_runs_the_script_behind_it(self):
@@ -1188,6 +1201,14 @@ class TestVia(ConfigDirMixin, unittest.TestCase):
         self.assertEqual(argv[:4], ["waypipe", "--no-gpu", "--remote-bin",
                                     self.VIA + " /opt/wp/waypipe"])
 
+    def test_waypipe_bin_runs_outside_and_the_script_goes_behind_it(self):
+        argv = self.exec_argv(["devbox", "shell"], waypipe=True, host_bin="~/.local/bin/waypipe",
+                              opts=["--remote-bin", "/opt/wp/waypipe", "--no-gpu"])
+        self.assertEqual(argv[:4], ["waypipe", "--no-gpu", "--remote-bin",
+                                    "~/.local/bin/waypipe"])
+        i = argv.index("devbox")
+        self.assertEqual(argv[i + 1:i + 3], [self.VIA, "sh"])
+
     def test_ecf_cleanup_runs_behind_it(self):
         with mock.patch.object(sshtsf, "ecf_local_socket", return_value="/x/server"):
             rc, out, _ = run_capture(["devbox", "api", "--dry-run"])
@@ -1204,6 +1225,19 @@ class TestVia(ConfigDirMixin, unittest.TestCase):
         with mock.patch.object(sshtsf.subprocess, "run", return_value=proc) as run:
             sshtsf.remote_tmux("devbox", self.VIA)
         self.assertEqual(run.call_args.args[0][5:7], ["devbox", self.VIA])
+
+    def test_waypipe_bin_is_asked_only_with_waypipe_on(self):
+        answers = {"name for this [user@]host": "mac", "ssh destination": "me@mac",
+                   "alias": "", "run everything there via": "",
+                   "forward the local Emacs socket": "", "forward Wayland": "y",
+                   "waypipe on it": "~/.local/bin/waypipe"}
+        with mock.patch.object(sshtsf, "ask", side_effect=scripted(answers)), \
+             mock.patch.object(sshtsf, "known_host_candidates", return_value=[]), \
+             mock.patch.object(sshtsf, "route_add_session", return_value=0):
+            sshtsf.route_add_host(sshtsf.load_config(), "me@mac")
+        self.assertEqual(sshtsf.load_config()["hosts"]["mac"],
+                         {"target": "me@mac", "waypipe": True,
+                          "waypipe_bin": "~/.local/bin/waypipe"})
 
     def test_a_new_host_is_offered_the_lists_via(self):
         self.write_lists('logins = [{ login = "me@newbox", via = "distrobox enter nb --" }]\n')

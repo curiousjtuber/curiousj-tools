@@ -52,8 +52,10 @@ With waypipe on, the connection is wrapped in `waypipe ssh`, so applications
 started inside the remote tmux session draw on the local Wayland desktop.
 Remembered the same way; -w / -W override. It needs a Wayland session here
 and waypipe installed at both ends -- on the remote, on the PATH a
-non-interactive ssh gets, or inside the host's via (below). Extra waypipe
-options (--compress, --no-gpu, --xwls, --remote-bin, ...) go in
+non-interactive ssh gets, or inside the host's via (below). A host's
+waypipe_bin names one elsewhere on the host, and is passed as --remote-bin;
+it runs outside any via, which then wraps the session instead. Extra
+waypipe options (--compress, --no-gpu, --xwls, ...) go in
 SSHTSF_WAYPIPE_OPTS. The two forwards are independent and compose. A
 waypipe session names the terminal tab HOST:SESSION itself, since the
 terminal only sees waypipe, not the ssh behind it; the name stays on the
@@ -96,6 +98,7 @@ Config layout (all fields but the host key are optional):
     target = "devbox"       # ssh destination, [user@]host; defaults to the host key
     alias = "c"
     via = "distrobox enter dev --"  # run tmux, waypipe and socat inside this container
+    waypipe_bin = "~/.local/bin/waypipe"  # waypipe on the host, if not on its PATH
     ecf = true              # forward the local Emacs socket, by default
     ecf_port = 41234        # relay via TCP port (for SELinux hosts where sshd cannot bind unix sockets)
 
@@ -231,7 +234,7 @@ def dump_config(cfg: dict) -> str:
     # has to survive a rewrite rather than be dropped as falsy.
     for host, hcfg in sorted((cfg.get("hosts") or {}).items()):
         lines.append(f"[hosts.{toml_key(host)}]")
-        for field in ("target", "alias", "via"):
+        for field in ("target", "alias", "via", "waypipe_bin"):
             if hcfg.get(field):
                 lines.append(f"{field} = {toml_str(hcfg[field])}")
         if hcfg.get("ecf_port"):
@@ -813,7 +816,15 @@ def tab_title(title: str) -> str:
     return f"\x1b]30;{title}\x07\x1b]0;{title}\x07"
 
 
-def waypipe_remote_missing(target: str, via: str = "") -> str:
+def remote_path_word(path: str) -> str:
+    """path quoted for the remote shell, with a leading ~/ left to expand
+    there: a config value is written the way it is typed at a prompt."""
+    if path.startswith("~/"):
+        return '"$HOME"/' + shlex.quote(path[2:])
+    return shlex.quote(path)
+
+
+def waypipe_remote_missing(target: str, via: str = "", host_bin: str = "") -> str:
     """Why `waypipe ssh` would die on the far side, or "" when it should not.
 
     waypipe_local_display, one hop further out: waypipe has to exist at both
@@ -828,15 +839,18 @@ def waypipe_remote_missing(target: str, via: str = "") -> str:
     the PATH the server will get there. A probe that cannot answer -- a host
     that only takes a password, a timeout -- is taken as a yes, leaving the
     real connection to be the judge.
+
+    A host's waypipe_bin is a waypipe on the host itself, outside any via:
+    it is checked there, and it wins over --remote-bin.
     """
-    remote_bin = waypipe_remote_bin()
+    remote_bin = host_bin or waypipe_remote_bin()
     if remote_bin:
-        check = f"test -x {shlex.quote(remote_bin)}"
+        check = f"test -x {remote_path_word(remote_bin)}"
         what = f"{remote_bin} is not executable on {target}"
     else:
         check = "command -v waypipe"
         what = f"no waypipe on the non-interactive PATH of {target}"
-    if via:
+    if via and not host_bin:
         # sh -c for command -v, a shell builtin that via may not be able to
         # start on its own; sh leaves the PATH as via set it.
         check = f"{via} sh -c {shlex.quote(check)}"
@@ -866,14 +880,14 @@ def remote_user_guess(target: str) -> str:
     return sshutil.login_name()
 
 
-def waypipe_usable(target: str, via: str = "") -> bool:
+def waypipe_usable(target: str, via: str = "", host_bin: str = "") -> bool:
     """Whether a waypipe forward can go ahead; if not, says why on stderr."""
     display, why = waypipe_local_display()
     if display is None:
         print(f"sshtsf: no local Wayland display ({why}); connecting without it",
               file=sys.stderr)
         return False
-    why = waypipe_remote_missing(target, via)
+    why = waypipe_remote_missing(target, via, host_bin)
     if why:
         print(f"sshtsf: {why}; connecting without Wayland", file=sys.stderr)
         return False
@@ -1060,7 +1074,7 @@ def remote_script(session: str, scfg: dict, env: list[tuple[str, str]],
 
 
 def ssh_argv(target: str, script: str, ecf: EcfForward | None, waypipe: bool,
-             via: str = "") -> list[str]:
+             via: str = "", host_bin: str = "") -> list[str]:
     """The command line that connects: ssh, or waypipe ssh, running script,
     behind via if the host has one."""
     # No ExitOnForwardFailure: a bind that fails despite the cleanup is ssh's
@@ -1078,9 +1092,10 @@ def ssh_argv(target: str, script: str, ecf: EcfForward | None, waypipe: bool,
     #
     # With waypipe, via goes in front of waypipe's server rather than the
     # script: the server starts the script as its own child, so it is inside
-    # already, and a second via would try to enter from within.
+    # already, and a second via would try to enter from within. A host's
+    # waypipe_bin runs outside, so then the script takes the via itself.
     argv = ["ssh"] + sshopts + ["-t", target] + \
-        remote_words(script, "" if waypipe else via)
+        remote_words(script, "" if waypipe and not host_bin else via)
 
     if waypipe:
         # waypipe takes its options before the mode word and passes everything
@@ -1092,18 +1107,20 @@ def ssh_argv(target: str, script: str, ecf: EcfForward | None, waypipe: bool,
         # per-connection name is fine, because the session is told the name
         # above, and a prompt hook that re-reads `tmux show-environment` can
         # carry it into the panes that predate this connection.
-        argv = ["waypipe"] + waypipe_opts(via) + ["ssh"] + argv[1:]
+        argv = ["waypipe"] + waypipe_opts(via, host_bin) + ["ssh"] + argv[1:]
     return argv
 
 
-def waypipe_opts(via: str) -> list[str]:
-    """WAYPIPE_OPTS, with --remote-bin put behind via when there is one.
+def waypipe_opts(via: str, host_bin: str = "") -> list[str]:
+    """WAYPIPE_OPTS, with --remote-bin replaced by the host's waypipe_bin, or
+    else put behind via when there is one.
 
     waypipe hands --remote-bin to ssh as a single word, and ssh joins its
     words for the remote shell to split again, so a value with spaces is
-    run as a command line there -- which is what makes 'via waypipe' work.
+    run as a command line there -- which is what makes 'via waypipe' work,
+    and lets a waypipe_bin of ~/... expand there.
     """
-    if not via:
+    if not via and not host_bin:
         return WAYPIPE_OPTS
     opts, skip = [], False
     for word in WAYPIPE_OPTS:
@@ -1113,6 +1130,8 @@ def waypipe_opts(via: str) -> list[str]:
             skip = True
         elif not word.startswith("--remote-bin="):
             opts.append(word)
+    if host_bin:
+        return opts + ["--remote-bin", host_bin]
     return opts + ["--remote-bin", f"{via} {waypipe_remote_bin() or 'waypipe'}"]
 
 
@@ -1131,14 +1150,16 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
     scfg = cfg["hosts"][host].get("sessions", {}).get(session, {})
     target = ssh_target(cfg, host)
     via = host_via(cfg, host)
+    host_bin = cfg["hosts"][host].get("waypipe_bin", "")
     waypipe = (resolve_flag(cfg, host, session, "waypipe", over.waypipe)
-               and waypipe_usable(target, via))
+               and waypipe_usable(target, via, host_bin))
     ecf = None
     if resolve_flag(cfg, host, session, "ecf", over.ecf):
         port = scfg.get("ecf_port") or cfg["hosts"][host].get("ecf_port")
         ecf = ecf_forward(target, port, dry_run, via)
     env = session_env(target, waypipe, ecf is not None)
-    argv = ssh_argv(target, remote_script(session, scfg, env, ecf), ecf, waypipe, via)
+    argv = ssh_argv(target, remote_script(session, scfg, env, ecf), ecf, waypipe, via,
+                    host_bin)
 
     if dry_run:
         if ecf:
@@ -1384,6 +1405,10 @@ def edit_host(cfg: dict, name: str = "", existing: dict | None = None) -> str | 
             hcfg.get("ecf_port"), editing))
     set_field(hcfg, "waypipe", ask_bool("  forward Wayland, for every session?",
                                         hcfg.get("waypipe"), editing))
+    if hcfg.get("waypipe") or hcfg.get("waypipe_bin"):
+        set_field(hcfg, "waypipe_bin", ask_text(
+            "  waypipe on it, if not on the non-interactive PATH (e.g. ~/.local/bin/waypipe)",
+            hcfg.get("waypipe_bin", ""), editing, unset="the PATH's"))
 
     if editing and new_name != name:
         hosts.pop(name)
