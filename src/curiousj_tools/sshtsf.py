@@ -112,9 +112,11 @@ Config layout (all fields but the host key are optional):
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -810,10 +812,70 @@ def waypipe_remote_bin() -> str:
     return ""
 
 
-def tab_title(title: str) -> str:
-    """The escapes that name the terminal tab: Konsole's OSC 30, then the
-    generic window title (OSC 0) for terminals whose tab shows that."""
-    return f"\x1b]30;{title}\x07\x1b]0;{title}\x07"
+def konsole_tab_format() -> str | None:
+    """This Konsole tab's title format, or None outside Konsole or when it
+    cannot be read.
+
+    Konsole's OSC 30 does not title the tab once: it replaces the tab's
+    format, the "%d : %n" that follows the directory and foreground process,
+    so the name outlives the session unless the format is sent back after.
+    No escape reads it; D-Bus does.
+    """
+    service = os.environ.get("KONSOLE_DBUS_SERVICE")
+    session = os.environ.get("KONSOLE_DBUS_SESSION")
+    if not service or not session:
+        return None
+    try:
+        proc = subprocess.run(
+            ["busctl", "--user", "--json=short", "call", service, session,
+             "org.kde.konsole.Session", "tabTitleFormat", "i", "0"],
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        return json.loads(proc.stdout)["data"][0]
+    except (ValueError, KeyError, IndexError, TypeError):
+        return None
+
+
+def tab_title(title: str, konsole_format: str | None) -> str:
+    """The escapes that name the terminal tab. In Konsole, its OSC 30; it
+    ignores the xterm title stack, so OSC 0 there would outlive the session
+    in the window title. Elsewhere, the window title (OSC 0), pushed first."""
+    if konsole_format is not None:
+        return f"\x1b]30;{title}\x07"
+    return f"\x1b[22;0t\x1b]0;{title}\x07"
+
+
+def tab_title_restore(konsole_format: str | None) -> str:
+    """The escapes that undo tab_title's."""
+    if konsole_format is not None:
+        return f"\x1b]30;{konsole_format}\x07"
+    return "\x1b[23;0t"
+
+
+def run_titled(argv: list[str], title: str) -> int:
+    """Run argv with the tab named title, and give the tab its name back
+    when argv ends. argv's exit status is returned."""
+    konsole_format = konsole_tab_format()
+    sys.stdout.write(tab_title(title, konsole_format))
+    sys.stdout.flush()
+    # ^C before ssh has the terminal in raw mode would end this process and
+    # leave the name up; a handler rather than SIG_IGN, which argv would
+    # inherit, so ^C still reaches argv.
+    previous = signal.signal(signal.SIGINT, lambda *_: None)
+    try:
+        rc = subprocess.run(argv).returncode
+    except OSError as exc:
+        sys.exit(f"sshtsf: cannot run {argv[0]}: {exc}")
+    finally:
+        signal.signal(signal.SIGINT, previous)
+        sys.stdout.write(tab_title_restore(konsole_format))
+        sys.stdout.flush()
+    # Killed by a signal: the status a shell would report.
+    return 128 - rc if rc < 0 else rc
 
 
 def remote_path_word(path: str) -> str:
@@ -1173,11 +1235,10 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
     if waypipe and sys.stdout.isatty():
         # Konsole names a tab after its foreground process and only knows an
         # ssh session when that process is ssh itself. Behind waypipe it sees
-        # waypipe, so name the tab here. Nothing runs after the exec, so the
-        # name stays on the tab once the session ends; a plain session is
-        # left to the terminal, which resets its own title on logout.
-        sys.stdout.write(tab_title(f"{host}:{session}"))
-        sys.stdout.flush()
+        # waypipe, so name the tab here, and stay to put the name back after.
+        # A plain session is exec'd and left to the terminal: ssh has to be
+        # the foreground process for Konsole to see it.
+        return run_titled(argv, f"{host}:{session}")
     try:
         os.execvp(argv[0], argv)
     except OSError as exc:

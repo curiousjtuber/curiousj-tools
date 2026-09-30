@@ -755,25 +755,57 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         cfg["hosts"]["devbox"]["sessions"]["api"]["waypipe"] = True
         sshtsf.save_config(cfg)
 
-    def connect_for_real(self, argv: list[str], tty: bool):
-        """Run up to the exec with the forwards' probes answered, and say
-        what reached stdout."""
+    def connect_for_real(self, argv: list[str], tty: bool,
+                         konsole_format: str | None = None, run=None):
+        """Run up to the exec, or the run a titled session waits on, with the
+        forwards' probes answered, and say what reached stdout."""
+        run = run or mock.Mock(return_value=mock.Mock(returncode=0))
         with mock.patch.object(sshtsf, "ecf_local_socket", return_value=None), \
              mock.patch.object(sshtsf, "waypipe_local_display",
                                return_value=("/run/user/1000/wayland-0", "")), \
              mock.patch.object(sshtsf, "waypipe_remote_missing", return_value=""), \
+             mock.patch.object(sshtsf, "konsole_tab_format", return_value=konsole_format), \
+             mock.patch.object(sshtsf.subprocess, "run", run), \
              mock.patch.object(sshtsf.os, "execvp") as execvp:
             rc, out, err = run_capture(argv, tty=tty)
+        self.run_mock = run
         return rc, out, err, execvp
 
-    def test_waypipe_session_names_the_tab(self):
+    def test_waypipe_session_names_the_konsole_tab_and_restores_its_format(self):
         # Konsole sees waypipe, not the ssh behind it, so the tab is named
-        # here: its own OSC 30, then the window title other terminals show.
+        # here; its OSC 30 replaces the tab's format, which goes back after.
         self.waypipe_on()
-        _, out, err, execvp = self.connect_for_real(["devbox", "api"], tty=True)
-        self.assertEqual(execvp.call_args.args[0], "waypipe")
-        self.assertEqual(out, "\033]30;devbox:api\007\033]0;devbox:api\007")
+        rc, out, err, execvp = self.connect_for_real(["devbox", "api"], tty=True,
+                                                     konsole_format="%d : %n")
+        execvp.assert_not_called()
+        self.assertEqual(self.run_mock.call_args.args[0][0], "waypipe")
+        self.assertEqual(out, "\033]30;devbox:api\007\033]30;%d : %n\007")
+        self.assertEqual(rc, 0)
         self.assertIn("devbox -> api +waypipe\n", err)
+
+    def test_waypipe_session_elsewhere_pushes_and_pops_the_title(self):
+        self.waypipe_on()
+        _, out, _, _ = self.connect_for_real(["devbox", "api"], tty=True)
+        self.assertEqual(self.run_mock.call_args.args[0][0], "waypipe")
+        self.assertEqual(out, "\033[22;0t\033]0;devbox:api\007\033[23;0t")
+
+    def test_titled_session_passes_on_its_exit_status(self):
+        self.waypipe_on()
+        run = mock.Mock(return_value=mock.Mock(returncode=255))
+        rc, _, _, _ = self.connect_for_real(["devbox", "api"], tty=True, run=run)
+        self.assertEqual(rc, 255)
+        run = mock.Mock(return_value=mock.Mock(returncode=-15))
+        rc, _, _, _ = self.connect_for_real(["devbox", "api"], tty=True, run=run)
+        self.assertEqual(rc, 143)
+
+    def test_titled_session_that_cannot_start_restores_the_title(self):
+        self.waypipe_on()
+        run = mock.Mock(side_effect=FileNotFoundError("waypipe"))
+        rc, out, err, _ = self.connect_for_real(["devbox", "api"], tty=True,
+                                                konsole_format="%d : %n", run=run)
+        self.assertEqual(rc, 1)
+        self.assertTrue(out.endswith("\033]30;%d : %n\007"))
+        self.assertIn("sshtsf: cannot run waypipe", err)
 
     def test_plain_session_leaves_the_tab_to_the_terminal(self):
         _, out, _, execvp = self.connect_for_real(["devbox", "api"], tty=True)
@@ -785,6 +817,26 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         _, out, _, execvp = self.connect_for_real(["devbox", "api"], tty=False)
         self.assertEqual(execvp.call_args.args[0], "waypipe")
         self.assertEqual(out, "")
+
+    def test_konsole_tab_format_is_read_over_dbus(self):
+        env = {"KONSOLE_DBUS_SERVICE": "org.kde.konsole-1952",
+               "KONSOLE_DBUS_SESSION": "/Sessions/5"}
+        ok = mock.Mock(returncode=0, stdout='{"type":"s","data":["%d : %n"]}\n')
+        with mock.patch.dict(os.environ, env), \
+             mock.patch.object(sshtsf.subprocess, "run", return_value=ok) as run:
+            self.assertEqual(sshtsf.konsole_tab_format(), "%d : %n")
+        self.assertEqual(run.call_args.args[0][-6:],
+                         ["org.kde.konsole-1952", "/Sessions/5", "org.kde.konsole.Session",
+                          "tabTitleFormat", "i", "0"])
+        with mock.patch.dict(os.environ, env), \
+             mock.patch.object(sshtsf.subprocess, "run", side_effect=FileNotFoundError):
+            self.assertIsNone(sshtsf.konsole_tab_format())
+
+    def test_konsole_tab_format_needs_konsole(self):
+        with mock.patch.dict(os.environ, {"KONSOLE_DBUS_SERVICE": "", "KONSOLE_DBUS_SESSION": ""}), \
+             mock.patch.object(sshtsf.subprocess, "run") as run:
+            self.assertIsNone(sshtsf.konsole_tab_format())
+        run.assert_not_called()
 
     def test_dry_run_prints_the_command_and_no_title(self):
         self.waypipe_on()

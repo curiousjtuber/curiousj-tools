@@ -117,7 +117,9 @@ waypipe on the host itself that its non-interactive `PATH` misses; it is passed 
 
 `sshtsf -w` wraps the connection in `waypipe ssh`, and a terminal such as Konsole then sees
 `waypipe`, not the ssh it would otherwise title the tab after. So a waypipe session names the
-tab `HOST:SESSION` itself, and the name stays on the tab after the session ends.
+tab `HOST:SESSION` itself, and gives the tab its name back when the session ends. In Konsole that
+takes `busctl` (systemd), to read the tab's title format over D-Bus; elsewhere it takes a terminal
+that keeps a title stack (xterm's `CSI 22 t`), as most do.
 
 ### Emacs routing (ecf)
 
