@@ -184,7 +184,8 @@ table when it needs `commands` run after login (`distrobox enter dev -nw`, `cd s
 with them. `via` is the batch counterpart, for `pssh`: a command line its command is run through
 there, handed `sh -c '...'`. A path is relative to `~` unless absolute, with an optional
 `git_url` and `git_branch` for `pssh -c` to clone it from. Both carry `attributes`, flags or
-`key=value` pairs, for the operations and the `-a`/`-A` flags to select on.
+`key=value` pairs, for the operations and the `-a`/`-A` flags to select on. A path's `logins`, a
+condition on the logins' attributes, names the logins it belongs on: see below.
 
 ```toml
 logins = [
@@ -247,7 +248,10 @@ pssh -s 'sudo apt upgrade'           # one login at a time in the foreground, qu
 
 A path a host does not have is skipped, unless `-c` is given and the entry has a `git_url`,
 in which case it is cloned first and the command runs in the fresh clone. One where the command
-fails marks that login failed.
+fails marks that login failed. A path whose `logins` a login does not match is not cloned there,
+nor reported missing, but where that login has the checkout anyway it is worked on like any
+other: `logins = "dev"` keeps a work checkout off the other hosts without leaving one already
+there to go stale.
 
 `pssh` runs the command in a non-interactive shell: no aliases, no shell functions, no `cd`
 carrying over between calls, and no login `commands` either. `xssh` gives each one a login

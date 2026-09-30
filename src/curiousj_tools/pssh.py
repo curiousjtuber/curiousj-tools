@@ -26,15 +26,19 @@ come from (TOML, YAML or JSON; -f names them, see `ssh-logins -h`):
     git_url = "git@github.com:me/webapp.git"    # optional: what to clone it from
     git_branch = "main"                     # optional: -b for the clone
     attributes = ["git", "py-project"]      # optional: what -A and operations select on
+    logins = "dev"                          # optional: the logins it belongs on
 
 -c/--clone clones a missing path from its git_url before running the
 command there (one without a git_url is still skipped), so a fresh host
-gets its checkouts on the first run. -C/--pick-paths chooses paths the way
--p chooses logins (fzf, else a numbered menu; see `pick-lines -h`), paths
-first when both are given; -A/--path-attr TERM keeps the paths whose
-attributes satisfy TERM, as -a does for logins. So `pssh -P git status -s`
-shows every checkout on every login, and `pssh -A git -c 'git pull'` brings
-the git ones up to date.
+gets its checkouts on the first run. A path with 'logins', a condition on
+the logins' attributes as an operation's is, is cloned only on the logins
+matching it, and its absence elsewhere goes unreported; a login it does not
+match that has the checkout anyway still has the command run in it.
+-C/--pick-paths chooses paths the way -p chooses logins (fzf, else a
+numbered menu; see `pick-lines -h`), paths first when both are given;
+-A/--path-attr TERM keeps the paths whose attributes satisfy TERM, as -a
+does for logins. So `pssh -P git status -s` shows every checkout on every
+login, and `pssh -A git -c 'git pull'` brings the git ones up to date.
 
 -o/--op NAME runs an operation instead of a COMMAND, one that says itself
 what it runs and where. git-pull, uv-tool-update, mise-update, cachy-update,
@@ -150,14 +154,17 @@ def paths_list(found: lists.Lists, pick_paths: bool = False,
 # The per-login script. POSIX sh on purpose: parallel and ssh run it through
 # whichever shell the host has. The command comes in $cmd, set before the
 # calls that use it, so one function serves every operation.
-RUN = '''run() { # run DIR [URL [BRANCH]]: $cmd in DIR, cloned from URL first when missing
+RUN = '''run() { # run [-q] DIR [URL [BRANCH]]: $cmd in DIR, cloned from URL first when missing;
+    # -q: DIR is not for this login, so its absence goes unsaid
+    q=
+    if [ "$1" = -q ]; then q=1; shift; fi
     d=$1
     case $d in /*) ;; *) d=$HOME/$d ;; esac
     if [ ! -d "$d" ] && [ -n "$2" ]; then
         echo "== $d: cloning $2"
         git clone -q ${3:+-b "$3"} -- "$2" "$d" || { echo "== $d: clone FAILED"; rc=1; return; }
     fi
-    if [ ! -d "$d" ]; then echo "== $d: missing, skipped"; return; fi
+    if [ ! -d "$d" ]; then [ -n "$q" ] || echo "== $d: missing, skipped"; return; fi
     echo "== $d"
     ( cd "$d" && eval "$cmd" ) || { echo "== $d: FAILED"; rc=1; }
 }'''
@@ -167,17 +174,27 @@ def set_cmd(cmd: str) -> str:
     return "cmd=" + shlex.quote(cmd)
 
 
-def path_calls(pairs: list[tuple[PathInfo, str]], clone: bool = False) -> list[str]:
+def belongs(p: PathInfo, entry: Login | None) -> bool:
+    """Whether the path is one for the login, by its 'logins' condition: a
+    missing one is cloned there, or reported. Every path is worked on where
+    it already is. No login: every path belongs."""
+    return entry is None or p.logins.matches(entry.attributes)
+
+
+def path_calls(pairs: list[tuple[PathInfo, str]], clone: bool = False,
+               entry: Login | None = None) -> list[str]:
     """A 'run' per path with its command, set whenever it changes; the url
-    and branch along when a missing path is to be cloned."""
+    and branch along when a missing path is to be cloned, '-q' for a path
+    not the login's."""
     lines: list[str] = []
     current = None
     for p, cmd in pairs:
         if cmd != current:
             lines.append(set_cmd(cmd))
             current = cmd
-        words = [p.path]
-        if clone and p.git_url:
+        mine = belongs(p, entry)
+        words = [p.path] if mine else ["-q", p.path]
+        if clone and mine and p.git_url:
             words.append(p.git_url)
             if p.git_branch:
                 words.append(p.git_branch)
@@ -199,9 +216,10 @@ def script(lines: list[str]) -> str:
     return "rc=0\n" + RUN + "\n" + "\n".join(lines) + "\nexit $rc"
 
 
-def paths_script(path_list: list[PathInfo], cmd: str, clone: bool = False) -> str:
+def paths_script(path_list: list[PathInfo], cmd: str, clone: bool = False,
+                 entry: Login | None = None) -> str:
     """cmd in each path in turn, cloning missing ones first when asked."""
-    return script(path_calls([(p, cmd) for p in path_list], clone))
+    return script(path_calls([(p, cmd) for p in path_list], clone, entry))
 
 
 def expand(names: list[str], ops: dict[str, Operation]) -> list[Operation]:
@@ -303,7 +321,7 @@ def login_script(entry: Login, ops: list[Operation], path_list: list[PathInfo],
             pairs = [(p, cmd) for p in path_list if (cmd := per_path_command(op, p))]
             if pairs:
                 lines.append(header(op.name))
-                lines.extend(path_calls(pairs, clone or op.clone))
+                lines.extend(path_calls(pairs, clone or op.clone, entry))
         else:
             cmd = per_login_command(op, entry)
             if cmd is not None:
@@ -480,14 +498,14 @@ def cli(opts: logins.LoginOpts, dry_run: bool, serial: bool, interactive: bool,
             groups = runs([(e, s) for e, s in scripts if s], interactive)
         else:
             cmd = command_line(list(command))
-            if paths:
-                cmd = paths_script(paths_list(found, pick_paths, path_attrs), cmd, clone)
+            path_list = paths_list(found, pick_paths, path_attrs) if paths else []
             entries = logins.select(opts, found=found)
             if paths:
                 skipped = list(dict.fromkeys(tag(e) for e in entries if shares_home(e)))
                 entries = [e for e in entries if not shares_home(e)]
                 why = SHARED_HOME
-            groups = runs([(e, cmd) for e in entries], interactive)
+            groups = runs([(e, paths_script(path_list, cmd, clone, e) if paths else cmd)
+                           for e in entries], interactive)
     except ToolError as e:
         print(f"pssh: {e}", file=sys.stderr)
         return cmdline.EXIT_ERROR

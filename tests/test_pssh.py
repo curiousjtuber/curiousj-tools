@@ -156,6 +156,22 @@ class DirsScript(unittest.TestCase):
             f"== {home}/missing: missing, skipped",
             f"== {home}/bad", f"== {home}/bad: FAILED"])
 
+    def test_a_path_not_the_logins_is_worked_on_only_where_it_is(self):
+        """Its logins condition unmet, a path is neither cloned nor reported
+        missing, but a checkout already there is worked on as any other."""
+        dev = PathInfo("dev", "url", logins=cond("dev"))
+        script = pssh.paths_script([dev, D("mine", "u")], "true", clone=True, entry=Login("a"))
+        self.assertIn("\nrun -q dev\nrun mine u\n", script)
+        self.assertIn("\nrun dev url\n", pssh.paths_script([dev], "true", True,
+                                                           Login("a", attributes={"dev": None})))
+        with tempfile.TemporaryDirectory() as home:
+            os.mkdir(os.path.join(home, "there"))
+            paths = [PathInfo("there", logins=cond("dev")), PathInfo("gone", logins=cond("dev"))]
+            proc = sh(pssh.paths_script(paths, "echo in $PWD", entry=Login("a")),
+                      dict(os.environ, HOME=home))
+        self.assertEqual((proc.returncode, proc.stdout.splitlines()),
+                         (0, [f"== {home}/there", f"in {home}/there"]))
+
     def test_absolute_dirs_stay_absolute(self):
         self.assertIn("== /opt/x: missing, skipped", sh(pssh.paths_script([D("/opt/x")], "true")).stdout)
 
@@ -297,6 +313,12 @@ class LoginScript(unittest.TestCase):
         self.assertIsNone(pssh.login_script(Login("a"), [gated], self.PATHS))
         script = pssh.login_script(Login("a", attributes={"dev": None}), [gated], self.PATHS)
         self.assertEqual(self.lines(script).count("run p"), 1)
+
+    def test_a_path_not_the_logins_is_not_cloned_there(self):
+        paths = [PathInfo("p", "u", attributes={"git": None}, logins=cond("dev"))]
+        self.assertIn("\nrun -q p\n", pssh.login_script(Login("a"), [GIT_PULL], paths))
+        self.assertIn("\nrun p u\n", pssh.login_script(Login("a", attributes={"dev": None}),
+                                                        [GIT_PULL], paths))
 
     def test_clone_from_the_op_or_the_flag(self):
         plain = Operation("gp", "git pull", paths=attrs.EVERYTHING)
@@ -549,6 +571,14 @@ class Main(unittest.TestCase):
                             ops=OPS.values())
         self.assertEqual(rc, 0)
         self.assertIn("\necho '== git-pull'\ncmd='git pull'\nrun p u\nexit $rc\n-- on:\n   c\n   localhost\n", out)
+
+    def test_paths_run_per_login_where_a_path_is_not_everyones(self):
+        entries = [Login("a"), Login("b", attributes={"dev": None})]
+        rc, out, _, _ = dry(["-n", "-c", "true"], entries=entries,
+                            path_list=[PathInfo("p", "u", logins=cond("dev"))])
+        self.assertEqual(rc, 0)
+        self.assertIn("\nrun -q p\nexit $rc\n-- on:\n   a\n", out)
+        self.assertIn("\nrun p u\nexit $rc\n-- on:\n   b\n", out)
 
     def test_a_shared_home_is_left_out_of_paths_and_reported_by_its_tag(self):
         shared = Login("a", via="dbx --", attributes={"shared-home": None, "mise": None})

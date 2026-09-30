@@ -2,7 +2,7 @@
 logins:
   - build.example.com                    # [user@]host, as ssh takes it
   - login: alice@devbox                  # a mapping where a login needs more
-    attributes: [cachyos, mise]          # what operations and -a select on
+    attributes: [cachyos, mise, dev]     # what operations and -a select on
   - login: my-mac.local
     commands: [cd src, exec zsh]         # run after login in the pane xssh opens
     attributes: [mac, brew, mise]
@@ -20,6 +20,8 @@ paths:
     git_url: git@github.com:me/webapp.git
     git_branch: main                     # optional: -b for the clone
     attributes: [git, py-project]
+    logins: dev                          # optional: cloned only on the logins matching;
+                                         # pulled elsewhere too, where already there
   - path: /opt/tools/mytool              # no git_url: never cloned, skipped where absent
     operations: {git-pull: git pull --ff-only}   # this path's own way of being pulled
 operations:                              # `pssh -o NAME`, `xssh -o NAME`, beside the built-in ones

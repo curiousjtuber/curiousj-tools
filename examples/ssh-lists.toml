@@ -8,7 +8,7 @@ logins = [
     "build.example.com",                 # [user@]host, as ssh takes it
     # a table where a login needs more: attributes are what operations and
     # '-a' select on, flags or key=value
-    { login = "alice@devbox", attributes = ["cachyos", "mise"] },
+    { login = "alice@devbox", attributes = ["cachyos", "mise", "dev"] },
     # commands run after login in the pane xssh opens; end in something
     # interactive, or the pane ends. operations: this login's own command for
     # an operation, run whatever the operation's condition says
@@ -31,6 +31,8 @@ path = "src/webapp"
 git_url = "git@github.com:me/webapp.git"
 git_branch = "main"                      # optional: -b for the clone
 attributes = ["git", "py-project"]
+logins = "dev"                           # optional: cloned only on the logins matching;
+                                         # pulled elsewhere too, where already there
 
 [[paths]]
 path = "/opt/tools/mytool"               # no git_url: never cloned, skipped where absent

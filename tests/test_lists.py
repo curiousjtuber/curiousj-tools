@@ -114,11 +114,17 @@ class Parse(unittest.TestCase):
                  "paths entry 1: unknown key 'url'; known: path, git_url, git_branch, attributes, operations")
         self.bad({"paths": [{"path": ""}]}, "paths entry 1: needs a path")
         self.bad({"paths": [{"path": "p", "git_url": 3}]}, "paths entry 1 (p): git_url has to be a string")
+        self.bad({"paths": [{"path": "p", "logins": 3}]}, "paths entry 1 (p): logins: a condition is")
 
     def test_bare_strings_and_null_commands(self):
         found = lists.parse({"logins": ["a", {"login": "b", "commands": None, "via": None}], "paths": ["p"]})
         self.assertEqual(found.logins, [Login("a"), Login("b")])
         self.assertEqual(found.paths, [PathInfo("p")])
+
+    def test_a_path_names_the_logins_it_is_cloned_on(self):
+        found = lists.parse({"paths": ["p", {"path": "q", "logins": {"any": ["dev", "mac"]}}]}, "F")
+        self.assertEqual([p.logins for p in found.paths],
+                         [attrs.EVERYTHING, attrs.condition({"any": ["dev", "mac"]}, "T")])
 
     def test_attributes_and_operations_ride_on_entries(self):
         found = lists.parse({

@@ -18,6 +18,8 @@ or .json. Three parts, all optional:
     git_url = "git@github.com:me/webapp.git"    # optional: what `pssh -c` clones it from
     git_branch = "main"                     # optional: -b for that clone
     attributes = ["git", "py-project"]
+    logins = "dev"                          # optional: the logins it is cloned on; elsewhere
+                                            # it is worked on only where it already is
 
     [operations.git-pull]                   # `pssh -o git-pull`
     command = "git pull --rebase --autostash"
@@ -127,6 +129,7 @@ class PathInfo:
     git_branch: str | None = None
     attributes: dict[str, str | None] = field(default_factory=dict)
     operations: dict[str, str] = field(default_factory=dict)
+    logins: Condition = EVERYTHING  # where it is cloned when missing
     file: str = field(default="", compare=False, repr=False)
 
 
@@ -299,7 +302,7 @@ def entries(data: dict, key: str, path: str) -> list:
 
 
 LOGIN_KEYS = ("login", "commands", "via", "attributes", "operations")
-PATH_KEYS = ("path", "git_url", "git_branch", "attributes", "operations")
+PATH_KEYS = ("path", "git_url", "git_branch", "attributes", "operations", "logins")
 
 
 def login_entry(raw: Any, n: int, path: str) -> Login:
@@ -326,7 +329,8 @@ def path_entry(raw: Any, n: int, path: str) -> PathInfo:
             raise ToolError(f"{where}: {key} has to be a string")
     return PathInfo(fields["path"], fields.get("git_url") or None, fields.get("git_branch") or None,
                     checked(attrs.attributes, fields.get("attributes"), where),
-                    entry_operations(fields.get("operations"), where), path)
+                    entry_operations(fields.get("operations"), where),
+                    checked(attrs.condition, fields.get("logins"), f"{where}: logins"), path)
 
 
 def entry_operations(raw: Any, where: str) -> dict[str, str]:
