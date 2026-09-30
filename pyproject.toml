@@ -1,7 +1,7 @@
 [project]
 name = "curiousj-tools"
 version = "0.1.0"
-description = "Small ssh/tmux/Emacs command-line tools: sshtsf, xssh, pssh, ssh-logins, pick-lines, emacsclient-auto, ec-browse, and their shell functions"
+description = "Small ssh/tmux/Emacs command-line tools: sshtsf, xssh, pssh, ssh-logins, pick-lines, emacsclient-auto, ec-browse, ec-magit, and their shell functions"
 readme = "README.md"
 license = "MIT"
 authors = [{ name = "CuriousJ", email = "curious.j.tuber@gmail.com" }]
@@ -27,6 +27,7 @@ ssh-logins = "curiousj_tools.logins:main"
 pick-lines = "curiousj_tools.pick:main"
 emacsclient-auto = "curiousj_tools.emacsclient_auto:main"
 ec-browse = "curiousj_tools.ec_browse:main"
+ec-magit = "curiousj_tools.ec_magit:main"
 curiousj-tools = "curiousj_tools.shellinit:main"
 
 [dependency-groups]

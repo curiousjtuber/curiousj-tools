@@ -37,7 +37,7 @@ a name typed is fine too.
 The same two lists are shown when a name does not resolve.
 
 With ecf on, the connection also reverse-forwards the local Emacs server
-socket, so emacsclient / $EDITOR / magit on the remote open in the local
+socket, so emacsclient / $EDITOR / ec-magit on the remote open in the local
 Emacs, provided the remote's EDITOR is 'emacsclient-auto' (this package; see
 README). The tmux session is also told the destination as dialed, as
 EMACS_REMOTE_TARGET, for the remote's TRAMP prefix. It is remembered per

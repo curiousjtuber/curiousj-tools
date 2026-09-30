@@ -12,6 +12,7 @@ as the editor on all of them. Python 3.11+, click and ruamel.yaml.
 | `pick-lines` | the multi-select picker behind `-p` and `-C`/`--pick-paths`: fzf when present, else a numbered menu |
 | `emacsclient-auto` | `emacsclient` that reaches a forwarded Emacs when its socket is live, the local server otherwise; use it as `$EDITOR` on hosts you reach with `sshtsf -e` |
 | `ec-browse` | opens URLs in whichever Emacs `emacsclient-auto` reaches; use it as `$BROWSER` |
+| `ec-magit` | opens magit-status for each directory in whichever Emacs `emacsclient-auto` reaches, each in a new frame (`-n`: the selected one) |
 | `curiousj-tools init` | prints the shell functions that go with them, for an rc file to eval: `emacs-remote` and the `tmux-env-refresh` prompt hook; see [Shell integration](#shell-integration) |
 
 ## Install
@@ -56,7 +57,7 @@ Optional dependencies, by command:
 | GNU `parallel` | `pssh` |
 | `fzf` | pickers everywhere; without it they fall back to a numbered menu |
 | `waypipe`, `socat` | `sshtsf -w` (Wayland forwarding) and `sshtsf` `ecf_port` relays |
-| `emacsclient` | `emacsclient-auto`, `ec-browse`, `sshtsf -e` |
+| `emacsclient` | `emacsclient-auto`, `ec-browse`, `ec-magit`, `sshtsf -e` |
 
 `sshtsf` treats every tool but `ssh` as optional: a missing `waypipe` (here or on the remote),
 a missing `socat` on the remote or no running Emacs server is a warning on stderr, and the
@@ -142,7 +143,10 @@ program's help. Its own knobs are environment variables: `EMACSCLIENT_TRAMP_PREF
 never route remote), `EMACSCLIENT_FORWARD_SOCKET` (default `/tmp/emacs-remote-socket-USER`),
 `EMACSCLIENT_BIN` (the real client, otherwise found on `PATH`) and `EMACSCLIENT_AUTO_DEBUG=1`
 (say which branch was taken, on stderr). `ec-browse` takes `EC_BROWSE_EMACSCLIENT` and
-`EC_BROWSE_FUNCTION` (default `browse-url`).
+`EC_BROWSE_FUNCTION` (default `browse-url`). `ec-magit` takes `emacsclient-auto`'s knobs and
+makes the same decision itself, since it has to know it: the directory gets the TRAMP prefix
+only when the call goes to the forwarded Emacs, so with the forward gone the local Emacs is not
+sent back over ssh to its own host.
 
 ### Shell integration
 
