@@ -79,9 +79,9 @@ name -- keeps its first definition, with a warning naming both files.
 
 Ahead of them all come the operations curiousj-tools ships, in
 'operations.toml' beside this module: git-pull, uv-tool-update, mise-update,
-cachy-update, brew-upgrade, apt-upgrade, system-update and update-all
-(`pssh -L` lists them). A file's operation of the same name takes a
-built-in's place, without a warning.
+cachy-update, brew-upgrade, apt-upgrade, distrobox-upgrade, system-update
+and update-all (`pssh -L` lists them). A file's operation of the same name
+takes a built-in's place, without a warning.
 """
 
 from __future__ import annotations

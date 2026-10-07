@@ -290,8 +290,9 @@ attributes the lists give the logins and paths:
 | `cachy-update` | `cachy-update` on the logins tagged `cachyos`, one at a time |
 | `brew-upgrade` | `brew update && brew upgrade` on the logins tagged `mac` or `brew` |
 | `apt-upgrade` | `sudo apt update && sudo apt upgrade` on the logins tagged `ubuntu` or `debian`, one at a time |
+| `distrobox-upgrade` | `distrobox upgrade --all` on the logins tagged `distrobox`: every container of the host, through its own package manager, one login at a time |
 | `system-update` | a group: `cachy-update`, `brew-upgrade` and `apt-upgrade`, each login running the one that applies |
-| `update-all` | a group: `git-pull`, `uv-tool-update`, `mise-update`, `system-update` |
+| `update-all` | a group: `git-pull`, `uv-tool-update`, `mise-update`, `system-update`, `distrobox-upgrade` |
 
 A lists file adds its own, and one of the same name takes a built-in's place:
 

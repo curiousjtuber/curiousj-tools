@@ -362,7 +362,7 @@ class Builtins(unittest.TestCase):
     """The operations the package ships, read ahead of the lists files."""
 
     NAMES = ["git-pull", "uv-tool-update", "mise-update", "cachy-update", "brew-upgrade",
-             "apt-upgrade", "system-update", "update-all"]
+             "apt-upgrade", "distrobox-upgrade", "system-update", "update-all"]
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

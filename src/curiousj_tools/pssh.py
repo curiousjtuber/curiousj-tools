@@ -42,8 +42,9 @@ login, and `pssh -A git -c 'git pull'` brings the git ones up to date.
 
 -o/--op NAME runs an operation instead of a COMMAND, one that says itself
 what it runs and where. git-pull, uv-tool-update, mise-update, cachy-update,
-brew-upgrade, apt-upgrade, system-update and update-all come built in; the
-lists files add their own, and replace a built-in by defining its name:
+brew-upgrade, apt-upgrade, distrobox-upgrade, system-update and update-all
+come built in; the lists files add their own, and replace a built-in by
+defining its name:
 
     [operations.git-pull]
     command = "git pull --rebase --autostash"
