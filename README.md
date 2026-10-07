@@ -290,7 +290,7 @@ attributes the lists give the logins and paths:
 | `uv-tool-update` | `uv tool install --force --reinstall --editable .` in every path tagged `py-project` |
 | `mise-update` | `mise self-update` and `mise upgrade` on the logins tagged `mise` |
 | `cachy-update` | `cachy-update` on the logins tagged `cachyos`, one at a time |
-| `brew-upgrade` | `brew update && brew upgrade` on the logins tagged `mac` or `brew`, one at a time |
+| `brew-upgrade` | `brew update && brew upgrade` on the logins tagged `mac`, `brew` or `linuxbrew`, one at a time |
 | `apt-upgrade` | `sudo apt update && sudo apt upgrade` on the logins tagged `ubuntu` or `debian`, one at a time |
 | `pacman-upgrade` | `sudo pacman -Syu` on the logins tagged `arch`, one at a time |
 | `dnf-upgrade` | `sudo dnf upgrade` on the logins tagged `fedora`, one at a time |
