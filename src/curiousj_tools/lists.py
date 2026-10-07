@@ -1,7 +1,7 @@
 """The lists behind ssh-logins, xssh and pssh: logins to reach, paths to work in, operations to run.
 
 TOML, YAML or JSON, told apart by the extension: ssh-lists.toml, .yaml, .yml
-or .json. Three parts, all optional:
+or .json. Four parts, all optional:
 
     logins = [
         "alice@devbox",                     # [user@]host, as ssh takes it
@@ -34,6 +34,10 @@ or .json. Three parts, all optional:
     [operations.system-update]              # a group: each login runs the members it matches
     operations = ["cachy-update", "brew-upgrade"]
 
+    [path]                                  # put ahead of PATH by pssh, whose shell reads no rc file
+    default = ["$HOME/.local/bin"]          # on every login
+    mise = ["$HOME/.local/share/mise/shims"]    # on the logins the term holds for
+
 A login is a string or a table ('[[logins]]' tables work too, when none is
 a bare string); so is a path. A condition ('logins', 'paths') is a term, a
 list of terms that all have to hold, or a table with 'all', 'any', 'none';
@@ -45,6 +49,12 @@ operation no [operations.*] table defines:
     [[paths]]
     path = "src/legacy"
     operations = { git-pull = "git pull --ff-only" }
+
+A login's 'path' adds its own directories ahead of the rest, or as a table
+replaces a [path] key for that login: `path = ["$HOME/bin"]` is short for
+`path = { add = ["$HOME/bin"] }`, and `path = { mise = [] }` leaves the
+mise directories out there. Its PATH is then: add, each tag's directories
+in [path] order, default, the login's own PATH, without repeats.
 
 In YAML the same reads:
 
@@ -63,6 +73,8 @@ In YAML the same reads:
         command: git pull --rebase --autostash
         paths: git
         clone: true
+    path:
+      default: [$HOME/.local/bin]
 
 Several files make one list. Which are read:
 
@@ -75,13 +87,16 @@ Several files make one list. Which are read:
 
 Files merge in that order, those of a directory by name. An entry given
 twice -- a login with the same commands and via, a path, an operation
-name -- keeps its first definition, with a warning naming both files.
+name, a [path] key -- keeps its first definition, with a warning naming
+both files.
 
 Ahead of them all come the operations curiousj-tools ships, in
 'operations.toml' beside this module: git-pull, uv-tool-update, mise-update,
 cachy-update, brew-upgrade, apt-upgrade, distrobox-upgrade, system-update
-and update-all (`pssh -L` lists them). A file's operation of the same name
-takes a built-in's place, without a warning.
+and update-all (`pssh -L` lists them), and its [path]: ~/.local/bin for
+every login, and the mise shims, Linuxbrew and Homebrew directories for the
+logins tagged mise, linuxbrew and mac. A file's operation or [path] key of
+the same name takes a built-in's place, without a warning.
 """
 
 from __future__ import annotations
@@ -117,6 +132,7 @@ class Login:
     via: str | None = None
     attributes: dict[str, str | None] = field(default_factory=dict)
     operations: dict[str, str] = field(default_factory=dict)  # name -> its own command
+    path: dict[str, list[str]] = field(default_factory=dict)  # add, or a [path] key it replaces
     file: str = field(default="", compare=False, repr=False)
 
 
@@ -157,13 +173,28 @@ class Operation:
 
 
 @dataclass
+class PathDirs:
+    """Directories pssh puts ahead of PATH: on every login ('default'), or
+    on the logins a term holds for."""
+
+    key: str  # "default", or the term
+    term: attrs.Term | None
+    dirs: list[str]
+    file: str = field(default="", compare=False, repr=False)
+
+
+PATH_RESERVED = ("add", "default")  # a login's own additions; everyone's directories
+
+
+@dataclass
 class Lists:
-    """The files merged: their three parts and where they were read from."""
+    """The files merged: their four parts and where they were read from."""
 
     logins: list[Login] = field(default_factory=list)
     paths: list[PathInfo] = field(default_factory=list)
     operations: dict[str, Operation] = field(default_factory=dict)
     files: list[str] = field(default_factory=list)
+    path: dict[str, PathDirs] = field(default_factory=dict)  # in order: tags, as emitted
 
 
 def warn(message: str) -> None:
@@ -278,9 +309,9 @@ def parse(data: Any, path: str = NAME) -> Lists:
         raise ToolError(f"{path}: the file has to be a table (mapping) with logins, paths "
                         "and operations")
     for key in data:
-        if key not in ("logins", "paths", "operations"):
-            raise ToolError(f"{path}: unknown key {key!r}; the parts are logins, paths "
-                            "and operations")
+        if key not in ("logins", "paths", "operations", "path"):
+            raise ToolError(f"{path}: unknown key {key!r}; the parts are logins, paths, "
+                            "operations and path")
     logins = [login_entry(e, n, path) for n, e in enumerate(entries(data, "logins", path), 1)]
     paths = [path_entry(e, n, path) for n, e in enumerate(entries(data, "paths", path), 1)]
     raw_ops = data.get("operations")
@@ -289,7 +320,7 @@ def parse(data: Any, path: str = NAME) -> Lists:
     if not isinstance(raw_ops, dict):
         raise ToolError(f"{path}: operations has to be a table of name = {{ command = ... }}")
     operations = {name: operation_entry(name, raw, path) for name, raw in raw_ops.items()}
-    return Lists(logins, paths, operations, [path])
+    return Lists(logins, paths, operations, [path], path_table(data.get("path"), path))
 
 
 def entries(data: dict, key: str, path: str) -> list:
@@ -301,7 +332,7 @@ def entries(data: dict, key: str, path: str) -> list:
     return found
 
 
-LOGIN_KEYS = ("login", "commands", "via", "attributes", "operations")
+LOGIN_KEYS = ("login", "commands", "via", "attributes", "operations", "path")
 PATH_KEYS = ("path", "git_url", "git_branch", "attributes", "operations", "logins")
 
 
@@ -318,7 +349,8 @@ def login_entry(raw: Any, n: int, path: str) -> Login:
         raise ToolError(f"{where}: via has to be a command line to run the command through")
     return Login(fields["login"], list(commands), via.strip() if via else None,
                  checked(attrs.attributes, fields.get("attributes"), where),
-                 entry_operations(fields.get("operations"), where), path)
+                 entry_operations(fields.get("operations"), where),
+                 entry_path(fields.get("path"), where), file=path)
 
 
 def path_entry(raw: Any, n: int, path: str) -> PathInfo:
@@ -345,6 +377,66 @@ def entry_operations(raw: Any, where: str) -> dict[str, str]:
         if not isinstance(command, str) or not command.strip():
             raise ToolError(f"{where}: operations {name!r} has to be a command line")
     return {name: command.strip() for name, command in raw.items()}
+
+
+def entry_path(raw: Any, where: str) -> dict[str, list[str]]:
+    """A login's path: a list of its own directories, or a table of add =
+    [dirs] and, replacing the files' for this login, default or tag = [dirs]."""
+    if raw is None:
+        return {}
+    if isinstance(raw, list):
+        raw = {"add": raw}
+    if not isinstance(raw, dict):
+        raise ToolError(f"{where}: path has to be a list of directories, or a table of add, "
+                        "default or tag = [dirs]")
+    out: dict[str, list[str]] = {}
+    for key, dirs in raw.items():
+        name = key if key in PATH_RESERVED else str(checked(attrs.term, key, f"{where}: path"))
+        out[name] = dir_list(dirs, f"{where}: path {key!r}")
+    return out
+
+
+def path_table(raw: Any, path: str) -> dict[str, PathDirs]:
+    """A file's [path]: default = [dirs] for every login, tag = [dirs] for
+    the logins the term holds for; keys as the term prints."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ToolError(f"{path}: path has to be a table of default or tag = [dirs]")
+    out: dict[str, PathDirs] = {}
+    for key, dirs in raw.items():
+        if key == "add":
+            raise ToolError(f"{path}: path 'add' is a login's own; a file's keys are default "
+                            "or a tag")
+        term = None if key == "default" else checked(attrs.term, key, f"{path}: path")
+        name = "default" if term is None else str(term)
+        if name in out:
+            raise ToolError(f"{path}: path {name!r} is given twice")
+        out[name] = PathDirs(name, term, dir_list(dirs, f"{path}: path {key!r}"), path)
+    return out
+
+
+def dir_list(raw: Any, where: str) -> list[str]:
+    if not isinstance(raw, list) or not all(isinstance(d, str) for d in raw):
+        raise ToolError(f"{where} has to be a list of directories")
+    for d in raw:
+        if not d.strip() or ":" in d or "\n" in d:
+            raise ToolError(f"{where}: a directory is one line without ':', not {d!r}")
+    return [d.strip() for d in raw]
+
+
+def login_path(found: Lists | None, entry: Login) -> list[str]:
+    """What pssh puts ahead of PATH on a login: its own additions, the
+    directories of each [path] tag whose term holds for it, in order, then
+    the default -- each as the login's own table replaces it -- no
+    directory twice."""
+    tables = found.path if found is not None else {}
+    layers = [entry.path.get("add", [])]
+    layers += [entry.path.get(key, table.dirs) for key, table in tables.items()
+               if table.term is not None and table.term.holds(entry.attributes)]
+    default = tables.get("default")
+    layers.append(entry.path.get("default", default.dirs if default else []))
+    return list(dict.fromkeys(d for layer in layers for d in layer))
 
 
 OPERATION_KEYS = ("command", "operations", "logins", "paths", "clone", "serial")
@@ -412,13 +504,14 @@ def table(raw: Any, main: str, allowed: tuple[str, ...], where: str) -> dict:
 
 def merge(parts: Sequence[Lists], builtin: Lists | None = None) -> Lists:
     """The parts as one, in order, first definition of anything kept with a
-    warning for the others, over the builtin operations, which a part's
-    replaces in place; then checked as a whole, and a name only entries
-    define given a table entry of its own, without a command, so every
-    operation a run can name is in the table. Raises ToolError."""
+    warning for the others, over the builtin operations and [path], which a
+    part's replace in place; then checked as a whole, and a name only
+    entries define given a table entry of its own, without a command, so
+    every operation a run can name is in the table. Raises ToolError."""
     out = Lists()
     if builtin is not None:
         out.operations.update(builtin.operations)
+        out.path.update(builtin.path)
     seen: dict[tuple, str] = {}
     for part in parts:
         out.files.extend(part.files)
@@ -432,6 +525,9 @@ def merge(parts: Sequence[Lists], builtin: Lists | None = None) -> Lists:
         for name, op in part.operations.items():
             if keep(seen, ("operation", name), op.file, f"operation {name}"):
                 out.operations[name] = op
+        for key, table in part.path.items():
+            if keep(seen, ("path", key), table.file, f"path {key}"):
+                out.path[key] = table
     for name, scope in check(out).items():
         out.operations[name] = Operation(name, paths=EVERYTHING if scope == "path" else None)
     return out
@@ -447,9 +543,16 @@ def keep(seen: dict[tuple, str], key: tuple, file: str, what: str) -> bool:
 
 def check(found: Lists) -> dict[str, str]:
     """The operations as a whole: members that exist, no cycles, an entry's
-    own operations agreeing with the table's on where they run. Changes
-    nothing; returns the names only entries define, each with "login" or
-    "path" for where it runs. Raises ToolError."""
+    own operations agreeing with the table's on where they run, a login's
+    path replacing [path] keys that exist. Changes nothing; returns the
+    names only entries define, each with "login" or "path" for where it
+    runs. Raises ToolError."""
+    for entry in found.logins:
+        for key in entry.path:
+            if key not in PATH_RESERVED and key not in found.path:
+                known = ", ".join(k for k in found.path if k != "default") or "none"
+                raise ToolError(f"{entry.file}: logins entry ({entry.login}): path {key!r} is no "
+                                f"tag any file's [path] defines; known: {known}")
     ops = found.operations
     for op in ops.values():
         for member in op.members:

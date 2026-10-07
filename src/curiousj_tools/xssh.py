@@ -15,8 +15,11 @@ shell rc: aliases work and 'cd' persists between commands. A login with
 'commands' in the lists file runs them after login instead of stopping at
 the shell -- `ssh -t LOGIN 'cd src; exec zsh'`, or `distrobox enter dev -nw` --
 so the last one should be what you want to type into: an interactive
-shell, a container entered. The pane ends when it exits. Each entry naming
-this machine gets a local pane running its 'commands', if it has any (see
+shell, a container entered. The pane ends when it exits. That shell is no
+login shell, so the lists' [path] directories are exported ahead of PATH
+before the commands, as pssh does, and `distrobox` in ~/.local/bin is
+found without the commands saying where. Each entry naming this machine
+gets a local pane running its 'commands', if it has any (see
 `ssh-logins -h`), from ~, so its container gets one here too. (A login's
 'via' is pssh's business; the pane types 'commands' only.)
 
@@ -44,6 +47,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from typing import Sequence
 
 import click
 
@@ -58,18 +62,26 @@ from .lists import Login, ToolError
 LOCAL_PANE = "cd ~; exec $SHELL"
 
 
-def local_pane(entry: Login) -> str:
+def local_pane(entry: Login, dirs: Sequence[str] = ()) -> str:
     """The local pane: at ~ like a fresh ssh login, then the commands
-    this 'localhost' took over from an entry naming this machine, else a shell."""
-    return "; ".join(["cd ~", *entry.commands]) if entry.commands else LOCAL_PANE
+    this 'localhost' took over from an entry naming this machine, with the
+    PATH additions ahead of them, else a shell."""
+    return "; ".join(["cd ~", *with_path(entry.commands, dirs)]) if entry.commands else LOCAL_PANE
 
 
-def pane_command(entry: Login) -> str:
+def with_path(commands: list[str], dirs: Sequence[str]) -> list[str]:
+    """The commands with the PATH export first: `ssh -t LOGIN '...'` is no
+    login shell, so without it ~/.local/bin and the like are not on PATH."""
+    export = pssh.path_export(dirs) if commands else None
+    return [export, *commands] if export else list(commands)
+
+
+def pane_command(entry: Login, dirs: Sequence[str] = ()) -> str:
     if entry.login == "localhost":
-        return local_pane(entry)
+        return local_pane(entry, dirs)
     if not entry.commands:
         return f"ssh {entry.login}"
-    return f"ssh -t {entry.login} {shlex.quote('; '.join(entry.commands))}"
+    return f"ssh -t {entry.login} {shlex.quote('; '.join(with_path(entry.commands, dirs)))}"
 
 
 def xpanes_expands_ampersand() -> bool:
@@ -89,20 +101,21 @@ def for_xpanes(cmd: str, ampersand: bool) -> str:
     return cmd.replace("\\", "\\\\").replace("&", "\\&") if ampersand else cmd
 
 
-def pane_commands(entries: list[Login]) -> list[str]:
-    return [pane_command(e) for e in entries]
+def pane_commands(entries: list[Login], found: lists.Lists | None = None) -> list[str]:
+    return [pane_command(e, lists.login_path(found, e)) for e in entries]
 
 
-def op_pane_command(entry: Login, script_text: str) -> str:
+def op_pane_command(entry: Login, script_text: str, dirs: Sequence[str] = ()) -> str:
     """The pane for a login's share of an operation: the script, wrapped as
-    pssh runs it (via and all), then what the plain pane would run -- the
-    login's commands, else a shell. xpanes types the command into the pane
-    with tmux send-keys, so it must hold no newline: the script travels
-    base64-encoded and is decoded on the login."""
-    line = pssh.wrap(script_text, entry.via)
+    pssh runs it (via, PATH additions and all), then what the plain pane
+    would run -- the login's commands, with the PATH additions ahead of
+    them again, outside the script's shell, else a shell. xpanes types the
+    command into the pane with tmux send-keys, so it must hold no newline:
+    the script travels base64-encoded and is decoded on the login."""
+    line = pssh.wrap(script_text, entry.via, dirs=dirs)
     encoded = base64.b64encode(line.encode()).decode()
-    then = ("; ".join(entry.commands) if entry.commands and entry.login != "localhost"
-            else local_pane(entry))
+    then = ("; ".join(with_path(entry.commands, dirs))
+            if entry.commands and entry.login != "localhost" else local_pane(entry, dirs))
     inner = f'sh -c "$(echo {encoded} | base64 -d)"; {then}'
     if entry.login == "localhost":
         return inner
@@ -110,7 +123,8 @@ def op_pane_command(entry: Login, script_text: str) -> str:
 
 
 def op_panes(entries: list[Login], ops: list[lists.Operation], path_list: list[lists.PathInfo],
-             clone: bool = False) -> tuple[list[Login], list[str], list[str]]:
+             clone: bool = False, found: lists.Lists | None = None
+             ) -> tuple[list[Login], list[str], list[str]]:
     """(the logins taking part, their pane commands, the logins left out)."""
     kept, commands, skipped = [], [], []
     for entry in entries:
@@ -119,7 +133,7 @@ def op_panes(entries: list[Login], ops: list[lists.Operation], path_list: list[l
             skipped.append(pssh.tag(entry))
             continue
         kept.append(entry)
-        commands.append(op_pane_command(entry, script_text))
+        commands.append(op_pane_command(entry, script_text, lists.login_path(found, entry)))
     return kept, commands, skipped
 
 
@@ -150,14 +164,15 @@ def cli(opts: logins.LoginOpts, ops: tuple[str, ...], list_ops: bool,
             path_list = (pssh.paths_list(found, pick_paths, path_attrs)
                          if any(op.per_path for op in leaves) else [])
             entries, commands, skipped = op_panes(logins.select(opts, found=found), leaves,
-                                                 path_list, clone)
+                                                 path_list, clone, found)
             for login in skipped:
                 print(f"xssh: {login}: no operation applies, no pane", file=sys.stderr)
             if not entries:
                 raise ToolError("no login takes part")
         else:
-            entries = logins.select(opts)
-            commands = pane_commands(entries)
+            found = lists.load_all(opts.files)
+            entries = logins.select(opts, found=found)
+            commands = pane_commands(entries, found)
         # A pane of either kind types the login's commands, the one place an
         # '&' or a backslash comes from, so the bash is asked only then.
         ampersand = any(e.commands for e in entries) and xpanes_expands_ampersand()

@@ -105,7 +105,7 @@ class Parse(unittest.TestCase):
         self.bad({"logins": [3]}, "logins entry 1: a string or a table")
         self.bad({"logins": [{"commands": ["x"]}]}, "logins entry 1: needs a login")
         self.bad({"logins": [{"login": "a", "user": "u"}]},
-                 "unknown key 'user'; known: login, commands, via, attributes, operations")
+                 "unknown key 'user'; known: login, commands, via, attributes, operations, path")
         self.bad({"logins": [{"login": "a", "via": 3}]}, "logins entry 1 (a): via has to be a command line")
         self.bad({"logins": [{"login": "a", "via": " "}]}, "via has to be")
         self.bad({"logins": [{"login": "a", "commands": "x"}]}, "logins entry 1 (a): commands")
@@ -115,6 +115,36 @@ class Parse(unittest.TestCase):
         self.bad({"paths": [{"path": ""}]}, "paths entry 1: needs a path")
         self.bad({"paths": [{"path": "p", "git_url": 3}]}, "paths entry 1 (p): git_url has to be a string")
         self.bad({"paths": [{"path": "p", "logins": 3}]}, "paths entry 1 (p): logins: a condition is")
+
+    def test_path_table_and_a_logins_path(self):
+        found = lists.parse({"path": {"default": ["$HOME/.local/bin"], "mise": [" $HOME/.local/share/mise/shims "],
+                                      "arch=x86_64": ["/opt/x"], " !mac ": []},
+                             "logins": [{"login": "a", "path": ["$HOME/bin"]},
+                                        {"login": "b", "path": {"add": ["$HOME/bin"], "default": [],
+                                                                "arch=x86_64": ["/opt/y"]}}]}, "F")
+        self.assertEqual(list(found.path), ["default", "mise", "arch=x86_64", "!mac"])
+        self.assertEqual(found.path["mise"].dirs, ["$HOME/.local/share/mise/shims"])
+        self.assertEqual(found.path["arch=x86_64"].term, attrs.Term("arch", "x86_64"))
+        self.assertEqual(found.path["!mac"].term, attrs.Term("mac", negated=True))
+        self.assertIsNone(found.path["default"].term)
+        self.assertEqual(found.path["mise"].file, "F")
+        self.assertEqual(found.logins[0].path, {"add": ["$HOME/bin"]})
+        self.assertEqual(found.logins[1].path, {"add": ["$HOME/bin"], "default": [], "arch=x86_64": ["/opt/y"]})
+        self.assertEqual(lists.parse({"path": None, "logins": [{"login": "a", "path": None}]}).path, {})
+
+    def test_path_errors(self):
+        self.bad({"path": ["/x"]}, "path has to be a table of default or tag = [dirs]")
+        self.bad({"path": {"add": ["/x"]}}, "path 'add' is a login's own")
+        self.bad({"path": {"mise": "/x"}}, "path 'mise' has to be a list of directories")
+        self.bad({"path": {"mise": [3]}}, "path 'mise' has to be a list of directories")
+        self.bad({"path": {"mise": ["/a:/b"]}}, "path 'mise': a directory is one line without ':', not '/a:/b'")
+        self.bad({"path": {"mise": [" "]}}, "a directory is one line")
+        self.bad({"path": {"a b": ["/x"]}}, "path: ")
+        self.bad({"path": {"mise": ["/x"], " mise": ["/y"]}}, "path 'mise' is given twice")
+        self.bad({"logins": [{"login": "a", "path": "/x"}]},
+                 "logins entry 1 (a): path has to be a list of directories, or a table of add, default or tag = [dirs]")
+        self.bad({"logins": [{"login": "a", "path": {"mise": "/x"}}]}, "(a): path 'mise' has to be a list")
+        self.bad({"logins": [{"login": "a", "path": {"!": []}}]}, "(a): path: ")
 
     def test_bare_strings_and_null_commands(self):
         found = lists.parse({"logins": ["a", {"login": "b", "commands": None, "via": None}], "paths": ["p"]})
@@ -358,8 +388,49 @@ class Merge(unittest.TestCase):
         self.assertIsNone(found.operations["up"].command)
 
 
+class LoginPath(unittest.TestCase):
+    """What goes ahead of PATH on a login: add, the tags' in order, default."""
+
+    FOUND = lists.parse({"path": {"default": ["$HOME/.local/bin"], "mise": ["shims"],
+                                  "linuxbrew": ["lb/bin", "lb/sbin"], "!mac": ["nomac"]}})
+
+    def test_layers_in_order_without_repeats(self):
+        entry = Login("a", attributes={"linuxbrew": None, "mise": None},
+                      path={"add": ["$HOME/bin", "shims"]})
+        self.assertEqual(lists.login_path(self.FOUND, entry),
+                         ["$HOME/bin", "shims", "lb/bin", "lb/sbin", "nomac", "$HOME/.local/bin"])
+        self.assertEqual(lists.login_path(self.FOUND, Login("a", attributes={"mac": None})), ["$HOME/.local/bin"])
+
+    def test_a_login_replaces_a_tags_or_the_default(self):
+        entry = Login("a", attributes={"mise": None, "mac": None},
+                      path={"mise": ["my-shims"], "default": [], "linuxbrew": ["ignored: no tag"]})
+        self.assertEqual(lists.login_path(self.FOUND, entry), ["my-shims"])
+        self.assertEqual(lists.login_path(self.FOUND, Login("a", attributes={"mise": None}, path={"mise": []})),
+                         ["nomac", "$HOME/.local/bin"])
+
+    def test_without_lists_or_tables_only_the_logins_own(self):
+        self.assertEqual(lists.login_path(None, Login("a")), [])
+        self.assertEqual(lists.login_path(None, Login("a", path={"add": ["x"], "default": ["d"]})), ["x", "d"])
+        self.assertEqual(lists.login_path(lists.Lists(), Login("a")), [])
+
+    def test_merge_keeps_the_first_key_and_checks_a_logins_tags(self):
+        with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            found = lists.merge([lists.parse({"path": {"mise": ["one"], "mac": ["m"]}}, "A"),
+                                 lists.parse({"path": {"mise": ["two"], "default": ["d"]}}, "B")])
+        self.assertEqual({k: t.dirs for k, t in found.path.items()}, {"mise": ["one"], "mac": ["m"], "default": ["d"]})
+        self.assertEqual(err.getvalue(), "ssh-lists: duplicate path mise in B; keeping the one in A\n")
+        with self.assertRaises(ToolError) as cm:
+            lists.merge([lists.parse({"path": {"mise": ["one"]},
+                                      "logins": [{"login": "a", "path": {"add": ["x"], "brew": []}}]}, "A")])
+        self.assertEqual(str(cm.exception),
+                         "A: logins entry (a): path 'brew' is no tag any file's [path] defines; known: mise")
+
+
 class Builtins(unittest.TestCase):
-    """The operations the package ships, read ahead of the lists files."""
+    """The operations and PATH additions the package ships, read ahead of
+    the lists files."""
+
+    PATH_KEYS = ["default", "mise", "linuxbrew", "mac"]
 
     NAMES = ["git-pull", "uv-tool-update", "mise-update", "cachy-update", "brew-upgrade",
              "apt-upgrade", "distrobox-upgrade", "system-update", "update-all"]
@@ -378,11 +449,29 @@ class Builtins(unittest.TestCase):
             found = lists.load_all(paths, {"HOME": self.tmp.name})
         return found, err.getvalue()
 
-    def test_the_shipped_file_is_operations_only_and_consistent(self):
+    def test_the_shipped_file_is_operations_and_path_only_and_consistent(self):
         builtin = lists.builtin_operations()
         self.assertEqual(list(builtin.operations), self.NAMES)
+        self.assertEqual(list(builtin.path), self.PATH_KEYS)
+        self.assertEqual(builtin.path["default"].dirs, ["$HOME/.local/bin"])
         self.assertEqual((builtin.logins, builtin.paths), ([], []))
-        self.assertEqual(list(lists.merge([], builtin).operations), self.NAMES)
+        merged = lists.merge([], builtin)
+        self.assertEqual((list(merged.operations), list(merged.path)), (self.NAMES, self.PATH_KEYS))
+        for op in builtin.operations.values():  # [path] took the prefixes' place
+            self.assertNotIn("PATH=", op.command or "")
+
+    def test_a_files_path_key_replaces_the_shipped_one_in_place(self):
+        found, err = self.load("path: {default: [], mise: [/opt/mise/shims], go: [/usr/local/go/bin]}\n")
+        self.assertEqual(err, "")
+        self.assertEqual(list(found.path), self.PATH_KEYS + ["go"])
+        self.assertEqual(found.path["default"].dirs, [])
+        self.assertEqual(found.path["mise"].dirs, ["/opt/mise/shims"])
+        self.assertTrue(found.path["linuxbrew"].file.endswith("operations.toml"))
+        self.assertEqual(lists.login_path(found, Login("a", attributes={"mise": None, "go": None})),
+                         ["/opt/mise/shims", "/usr/local/go/bin"])
+        found, err = self.load("path: {mise: [one]}\n", "path: {mise: [two]}\n")
+        self.assertEqual(found.path["mise"].dirs, ["one"])
+        self.assertIn("duplicate path mise", err)
 
     def test_read_first_and_not_counted_among_the_files(self):
         found, err = self.load("operations: {mine: {command: x}}\n")
@@ -428,9 +517,10 @@ class ExampleFiles(unittest.TestCase):
 
     def test_examples_agree(self):
         toml, yaml = self.load("ssh-lists.toml"), self.load("ssh-lists.yaml")
-        self.assertEqual((toml.logins, toml.paths, toml.operations),
-                         (yaml.logins, yaml.paths, yaml.operations))
+        self.assertEqual((toml.logins, toml.paths, toml.operations, toml.path),
+                         (yaml.logins, yaml.paths, yaml.operations, yaml.path))
         self.assertTrue(toml.logins and toml.paths)
+        self.assertTrue(set(toml.path) > set(Builtins.PATH_KEYS))
         self.assertTrue(set(toml.operations) > set(Builtins.NAMES))
 
     def test_operations_file_adds_to_the_yaml_without_a_warning(self):
@@ -481,7 +571,7 @@ class ReadmeBlocks(unittest.TestCase):
         for lang, body in self.blocks():
             first.setdefault(lang, body)
         toml, yaml = self.parsed("toml", first["toml"]), self.parsed("yaml", first["yaml"])
-        self.assertEqual((toml.logins, toml.paths), (yaml.logins, yaml.paths))
+        self.assertEqual((toml.logins, toml.paths, toml.path), (yaml.logins, yaml.paths, yaml.path))
 
 
 if __name__ == "__main__":

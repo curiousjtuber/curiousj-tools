@@ -184,8 +184,9 @@ xssh      [-f FILE]... -L|--list-ops
 
 All three read the same lists, the `.toml` (or `.yaml`, `.yml`, `.json`) files in
 `~/.config/ssh-lists/` (see [where they live](#where-the-lists-files-live)): the `logins` to reach,
-the `paths` to work in, and the `operations` to run there. A login is a `[user@]host` string, or a
-table when it needs `commands` run after login (`distrobox enter dev -nw`, `cd src`, `exec zsh`):
+the `paths` to work in, the `operations` to run there, and the `path` additions `pssh` makes
+before running anything. A login is a `[user@]host` string, or a table when it needs `commands`
+run after login (`distrobox enter dev -nw`, `cd src`, `exec zsh`):
 `xssh` runs them in that login's pane, so end them in something interactive, or the pane ends
 with them. `via` is the batch counterpart, for `pssh`: a command line its command is run through
 there, handed `sh -c '...'`. A path is relative to `~` unless absolute, with an optional
@@ -260,8 +261,9 @@ other: `logins = "dev"` keeps a work checkout off the other hosts without leavin
 there to go stale.
 
 `pssh` runs the command in a non-interactive shell: no aliases, no shell functions, no `cd`
-carrying over between calls, and no login `commands` either. `xssh` gives each one a login
-shell, so all of those work there. A login listed plainly and again with a `via` is run in both
+carrying over between calls, no login `commands`, and not the `PATH` a login shell would have
+either, which the lists' [`path`](#path) makes up for. `xssh` gives each one a login shell, so
+all of those work there. A login listed plainly and again with a `via` is run in both
 places by `pssh`, and once per place: inside `distrobox enter dev -nw -- sh -c '...'` the `~` is
 the container's own home, so a `git pull` there keeps the container's checkouts current
 alongside the host's -- from that host too, where both entries are `localhost`. Its output is
@@ -352,6 +354,47 @@ pull-all()   { pssh -o git-pull "$@"; }      # pull-all -n, pull-all -A py-proje
 sys-update() { pssh -o system-update "$@"; }
 ```
 
+### PATH
+
+An `ssh host cmd` shell is neither a login shell nor interactive, so a `PATH` set in `.profile`
+or `.zprofile` never reaches `pssh`, and `~/.local/bin`, the Homebrew directories or the mise
+shims are missing from it. The lists' `[path]` table says what goes ahead of `PATH` there, and
+`pssh` exports it right after the `cd ~`, before the command, the paths script or the
+operations (`-n` shows the line): `default` on every login, and each other key, a term on the
+logins' attributes, on the logins it holds for. These come built in, in the same
+[operations.toml](src/curiousj_tools/operations.toml):
+
+```toml
+[path]
+default = ["$HOME/.local/bin"]
+mise = ["$HOME/.local/share/mise/shims"]
+linuxbrew = ["/home/linuxbrew/.linuxbrew/bin", "/home/linuxbrew/.linuxbrew/sbin"]
+mac = ["/opt/homebrew/bin", "/opt/homebrew/sbin"]
+```
+
+A login's `PATH` is then its own additions, each tag's directories in table order, `default`,
+and the `PATH` it had, no directory twice. A lists file adds keys and, giving one of these
+names, takes the built-in's place (`default = []` turns it off); a key is a term as the
+conditions use them, so `"arch=x86_64" = [...]` and `"!mac" = [...]` work too, quoted in TOML
+and, for `!mac`, in YAML. A login adds its own directories with a list, or, as a table, adds
+with `add` and replaces a key for itself (a key some file defines; a tag's replacement still
+applies only where the tag holds):
+
+```toml
+[path]
+go = ["/usr/local/go/bin"]
+
+[[logins]]
+login = "frame.local"
+attributes = ["mise", "go"]
+path = { add = ["$HOME/bin"], mise = [] }     # its own first; the shims left out here
+```
+
+Directories are one double-quoted shell word on the login, so `$HOME` expands there and a
+space survives; `"` and `\` are escaped, nothing else. `xssh` puts the same line ahead of a
+login's `commands`, since `ssh -t LOGIN '...'` is no login shell either (a bare `ssh LOGIN`
+pane is, and gets none), so the commands need not say where `distrobox` is.
+
 ### Where the lists files live
 
 Several files make one list, merged in this order:
@@ -363,9 +406,10 @@ Several files make one list, merged in this order:
 | a search path | `$SSH_LISTS_PATH`, colon-separated directories, otherwise: every `.toml`, `.yaml`, `.yml`, `.json` file in each, by name |
 | default | `~/.config/ssh-lists` (`$XDG_CONFIG_HOME/ssh-lists`), the same |
 
-An entry defined twice -- a login with the same `commands` and `via`, a path, an operation name
--- keeps its first definition, with a warning naming both files, so a second file can add to
-the first but not change it. A directory's files merge in name order, so the one that should
+An entry defined twice -- a login with the same `commands` and `via`, a path, an operation name,
+a `[path]` key -- keeps its first definition, with a warning naming both files, so a second file
+can add to the first but not change it (a built-in operation or `[path]` key is the exception:
+a file's takes its place silently). A directory's files merge in name order, so the one that should
 win sorts first.
 The search path is for keeping the files in a private repo checked out on every host, and the
 several files for keeping a host's own additions out of it:

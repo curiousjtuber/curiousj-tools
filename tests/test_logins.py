@@ -32,13 +32,13 @@ class DropSelf(unittest.TestCase):
         # the container listed beside the host got no pane or run on it.
         inside = Login("my-mac", ["dbx.sh"], via="dbx.sh --", attributes={"dbx": None})
         me = Login("alice@my-mac.local", ["exec zsh"], attributes={"mac": None, "brew": None},
-                   operations={"sys": "brew upgrade"}, file="F")
+                   operations={"sys": "brew upgrade"}, path={"add": ["$HOME/bin"]}, file="F")
         entries = [Login("a"), inside, me, Login("my-mac", attributes={"other": None})]
         local = logins.local_logins(entries, SELF, "alice")
         self.assertEqual(local, [
             Login("localhost", ["dbx.sh"], via="dbx.sh --", attributes={"dbx": None}),
             Login("localhost", ["exec zsh"], attributes={"mac": None, "brew": None},
-                  operations={"sys": "brew upgrade"}),
+                  operations={"sys": "brew upgrade"}, path={"add": ["$HOME/bin"]}),
             Login("localhost", attributes={"other": None})])
         self.assertEqual(local[1].file, "F")
 

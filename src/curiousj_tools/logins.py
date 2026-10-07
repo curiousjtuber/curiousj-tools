@@ -121,7 +121,7 @@ def local_logins(entries: list[Login], names: set[str], user: str) -> list[Login
     reached here as from any other host. A bare 'localhost' first when no
     entry names the machine itself, without a via."""
     local = [Login("localhost", list(e.commands), e.via, dict(e.attributes),
-                   dict(e.operations), e.file)
+                   dict(e.operations), {k: list(v) for k, v in e.path.items()}, file=e.file)
              for e in entries if is_self(e, names, user)]
     if all(e.via is not None for e in local):
         local.insert(0, Login("localhost"))

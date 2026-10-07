@@ -1,3 +1,4 @@
+import contextlib
 import io
 import os
 import shutil
@@ -424,6 +425,60 @@ class Wrap(unittest.TestCase):
                          [f"== {home}/ok", f"in {home}/ok", f"== {home}/bad: missing, skipped"])
 
 
+class PathExport(unittest.TestCase):
+    """The lists' [path] additions, exported ahead of PATH after the cd ~."""
+
+    def test_one_quoted_word_ahead_of_path(self):
+        self.assertIsNone(pssh.path_export([]))
+        self.assertEqual(pssh.path_export(["$HOME/.local/bin", "/opt/x"]),
+                         'export PATH="$HOME/.local/bin:/opt/x:$PATH"')
+        self.assertEqual(pssh.path_export(['a"b', "c\\d"]), 'export PATH="a\\"b:c\\\\d:$PATH"')
+        self.assertEqual(pssh.shell_command("uptime", dirs=["$HOME/.local/bin"]),
+                         'cd ~\nexport PATH="$HOME/.local/bin:$PATH"\nuptime')
+        self.assertTrue(pssh.shell_command("uptime", True, ["/x"])
+                        .startswith('zsh -ic \'cd ~\nexport PATH="/x:$PATH"\nuptime'))
+        self.assertEqual(pssh.wrap("uptime", "dbx --", dirs=["/x"]),
+                         'dbx -- sh -c \'cd ~\nexport PATH="/x:$PATH"\nuptime\'')
+
+    def test_the_command_finds_what_the_dirs_hold(self):
+        with tempfile.TemporaryDirectory() as home:
+            bindir = os.path.join(home, "my bin")  # the space: one quoted word, not split
+            os.mkdir(bindir)
+            os.mkdir(os.path.join(home, "ok"))
+            with open(os.path.join(bindir, "hello-tool"), "w") as f:
+                f.write("#!/bin/sh\necho hi from $0\n")
+            os.chmod(os.path.join(bindir, "hello-tool"), 0o755)
+            proc = sh(pssh.shell_command("hello-tool", dirs=[bindir]))
+            self.assertEqual(proc.stdout, f"hi from {bindir}/hello-tool\n", proc.stderr)
+            # from a paths script through a via, $HOME expanding on the login
+            line = pssh.wrap(pssh.paths_script([D("ok")], "hello-tool"), f"env HOME={home}",
+                             dirs=["$HOME/my bin"])
+            proc = sh(line)
+        self.assertEqual(proc.stdout.splitlines(), [f"== {home}/ok", f"hi from {bindir}/hello-tool"])
+
+    def test_runs_split_the_logins_whose_dirs_differ(self):
+        found = lists.parse({"path": {"default": ["d"], "mise": ["m"]}})
+        a, b, c = Login("a"), Login("b", attributes={"mise": None}), Login("c")
+        groups = pssh.runs([(a, "uptime"), (b, "uptime"), (c, "uptime")], found=found)
+        self.assertEqual({line: [e.login for e in es] for line, es in groups.items()},
+                         {'cd ~\nexport PATH="d:$PATH"\nuptime': ["a", "c"],
+                          'cd ~\nexport PATH="m:d:$PATH"\nuptime': ["b"]})
+        self.assertEqual(list(pssh.runs([(a, "uptime")])), ["cd ~\nuptime"])
+
+    def test_dry_run_shows_the_export_for_a_command_paths_and_an_operation(self):
+        found = Lists([Login("a", path={"add": ["$HOME/bin"]})], [PathInfo("p")],
+                      {"up": Operation("up", "mise up")}, ["F"],
+                      lists.path_table({"default": ["$HOME/.local/bin"]}, "F"))
+        export = 'cd ~\nexport PATH="$HOME/bin:$HOME/.local/bin:$PATH"\n'
+        for argv, then in ((["uptime"], "uptime\n"), (["-P", "uptime"], "rc=0\nrun() {"),
+                           (["-o", "up"], "rc=0\nrun() {")):
+            with mock.patch.object(lists, "load_all", return_value=found), \
+                    mock.patch.object(logins, "select", return_value=found.logins), \
+                    mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+                self.assertEqual(pssh.main(["-n", "-f", "F"] + argv), 0)
+            self.assertTrue(out.getvalue().startswith(export + then), out.getvalue())
+
+
 class ParallelArgv(unittest.TestCase):
     def test_localhost_is_colon_tagged_localhost(self):
         self.assertEqual(pssh.parallel_argv(Login("localhost"), "uptime"),
@@ -463,7 +518,10 @@ class Main(unittest.TestCase):
     def run_main(self, argv, entries, results=()):
         """pssh.main with the parallels mocked: (exit status, their argvs)."""
         procs = [mock.Mock(wait=mock.Mock(return_value=r)) for r in results]
-        with mock.patch.object(logins, "select", return_value=entries), \
+        # plain mode reads the lists too: the real file given, else none at all
+        loaded = (contextlib.nullcontext() if "-f" in argv
+                  else mock.patch.object(lists, "load_all", return_value=Lists()))
+        with mock.patch.object(logins, "select", return_value=entries), loaded, \
                 mock.patch("shutil.which", return_value="/usr/bin/parallel"), \
                 mock.patch.object(pssh.subprocess, "Popen",
                                   side_effect=procs or None,
@@ -491,6 +549,7 @@ class Main(unittest.TestCase):
         running = mock.Mock(wait=mock.Mock(side_effect=[KeyboardInterrupt, 0]),
                             poll=mock.Mock(return_value=None))
         with mock.patch.object(logins, "select", return_value=[Login("a")]), \
+                mock.patch.object(lists, "load_all", return_value=Lists()), \
                 mock.patch("shutil.which", return_value="/usr/bin/parallel"), \
                 mock.patch.object(pssh.subprocess, "Popen", return_value=running), \
                 mock.patch.object(logins, "confirm_new_hosts"):
@@ -500,7 +559,7 @@ class Main(unittest.TestCase):
     def test_dirs_mode_wraps_the_command(self):
         _, argvs = self.run_main(["-P", "-f", self.file, "git", "status", "-s"], [Login("localhost")])
         cmd = argvs[0][8]
-        self.assertTrue(cmd.startswith("cd ~\nrc=0\nrun() {"))
+        self.assertTrue(cmd.startswith('cd ~\nexport PATH="$HOME/.local/bin:$PATH"\nrc=0\nrun() {'))
         self.assertIn("\nrun a\nrun b\nexit $rc", cmd)
         self.assertIn("git status -s", cmd)
 
@@ -626,6 +685,7 @@ class Main(unittest.TestCase):
         self.assertEqual(run.call_args.args[0][:3], ["ssh", "-t", "a"])
         self.assertIn("pssh: localhost: no operation applies, skipped", err.getvalue())
         with mock.patch.object(logins, "select", return_value=[Login("a")]), \
+                mock.patch.object(lists, "load_all", return_value=Lists()), \
                 mock.patch("shutil.which", return_value=None), \
                 mock.patch.object(pssh.subprocess, "run", return_value=mock.Mock(returncode=0)) as run, \
                 mock.patch.object(logins, "confirm_new_hosts"), \
@@ -657,8 +717,9 @@ class Main(unittest.TestCase):
                 mock.patch("getpass.getuser", return_value="alice"), \
                 mock.patch("sys.stdout", new_callable=io.StringIO) as out:
             self.assertEqual(pssh.main(["-n", "-f", self.file, "uptime"]), 0)
-        self.assertEqual(out.getvalue(), "cd ~\nuptime\n-- on:\n   b\n   localhost\n"
-                                         "dbx.sh -- sh -c 'cd ~\nuptime'\n-- on:\n   localhost\n")
+        export = 'export PATH="$HOME/.local/bin:$PATH"\n'  # the built-in default, inside the via too
+        self.assertEqual(out.getvalue(), f"cd ~\n{export}uptime\n-- on:\n   b\n   localhost\n"
+                                         f"dbx.sh -- sh -c 'cd ~\n{export}uptime'\n-- on:\n   localhost\n")
 
     def test_op_mode_reads_the_files_once(self):
         found = Lists([Login("a")], [], {"up": UP}, ["F"])
@@ -671,6 +732,7 @@ class Main(unittest.TestCase):
 
     def test_unconfirmed_host_key_aborts_before_parallel(self):
         with mock.patch.object(logins, "select", return_value=[Login("new"), Login("localhost")]), \
+                mock.patch.object(lists, "load_all", return_value=Lists()), \
                 mock.patch("shutil.which", return_value="/usr/bin/parallel"), \
                 mock.patch.object(logins, "confirm_new_hosts",
                                   side_effect=logins.ToolError("new: host key not confirmed")), \
@@ -682,6 +744,7 @@ class Main(unittest.TestCase):
 
     def test_abort_propagates(self):
         with mock.patch("shutil.which", return_value="/usr/bin/parallel"), \
+                mock.patch.object(lists, "load_all", return_value=Lists()), \
                 mock.patch.object(logins, "select", side_effect=pick.Abort):
             self.assertEqual(pssh.main(["-p", "uptime"]), 130)
 

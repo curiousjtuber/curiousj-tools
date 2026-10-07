@@ -112,9 +112,12 @@ read. Answering no, or an unreachable host, aborts the run.
 
 The remote shell reads no rc file, so aliases and shell functions are not
 there and 'cd' does not carry over between calls -- put the cd in the
-command. -i runs the command inside `zsh -ic` on each login instead, which
-brings aliases and functions back at the cost of a full shell start-up per
-login. Every run, local included, starts in the home directory, as an ssh
+command. Nor is the PATH a login shell would have: the lists' [path] makes
+up for that, directories exported ahead of PATH before the command runs,
+~/.local/bin on every login by default and more on the logins tagged for it
+(see ssh-lists -h; -n shows the line). -i runs the command inside `zsh -ic`
+on each login instead, which brings aliases and functions back at the cost
+of a full shell start-up per login. Every run, local included, starts in the home directory, as an ssh
 login does. Flags come first: the first word that is not an option starts
 the command, so `pssh uptime -p` passes -p to uptime; '--' does the same
 explicitly.
@@ -127,6 +130,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+from typing import Sequence
 
 import click
 
@@ -331,36 +335,51 @@ def login_script(entry: Login, ops: list[Operation], path_list: list[PathInfo],
     return script(lines) if lines else None
 
 
-def shell_command(cmd: str, interactive: bool = False) -> str:
-    """The string parallel hands each host's shell.
+def path_export(dirs: Sequence[str]) -> str | None:
+    """The line putting dirs ahead of PATH, or None for none: one double-quoted
+    word, so $HOME expands on the login; only \\ and " are escaped."""
+    if not dirs:
+        return None
+    quoted = ":".join(d.replace("\\", "\\\\").replace('"', '\\"') for d in dirs)
+    return f'export PATH="{quoted}:$PATH"'
+
+
+def shell_command(cmd: str, interactive: bool = False, dirs: Sequence[str] = ()) -> str:
+    """The string parallel hands each host's shell: from ~, with dirs ahead
+    of PATH, the command.
 
     From ~ everywhere: an ssh login lands there, but parallel runs the local
     ':' job in the current directory, which would make 'ls' mean two things.
+    The export comes inside the -i shell too, so it beats the rc file.
     """
-    cmd = "cd ~\n" + cmd
+    export = path_export(dirs)
+    cmd = "cd ~\n" + (export + "\n" if export else "") + cmd
     if interactive:
         cmd = "zsh -ic " + shlex.quote(cmd)
     return cmd
 
 
-def wrap(cmd: str, via: str | None, interactive: bool = False) -> str:
+def wrap(cmd: str, via: str | None, interactive: bool = False, dirs: Sequence[str] = ()) -> str:
     """The string parallel hands a login's shell: shell_command, run through
     via when the login has one -- as `zsh -ic `...'` under -i, which is
-    already a command line, else as `sh -c `...'`."""
-    cmd = shell_command(cmd, interactive)
+    already a command line, else as `sh -c `...'`. The PATH export is inside
+    the via, so it is the container's PATH it goes ahead of."""
+    cmd = shell_command(cmd, interactive, dirs)
     if not via:
         return cmd
     return via + " " + (cmd if interactive else "sh -c " + shlex.quote(cmd))
 
 
-def runs(pairs: list[tuple[Login, str]], interactive: bool = False) -> dict[str, list[Login]]:
+def runs(pairs: list[tuple[Login, str]], interactive: bool = False,
+         found: lists.Lists | None = None) -> dict[str, list[Login]]:
     """What runs where: each distinct final command with its logins, in list
-    order, from (login, its command) pairs. A login listed twice with the
-    same via is one run; one listed plainly and with a via is two, one for
-    each place."""
+    order, from (login, its command) pairs, each with its PATH additions
+    from found. A login listed twice with the same via is one run; one
+    listed plainly and with a via is two, one for each place; logins whose
+    PATH additions differ are separate runs."""
     out: dict[str, list[Login]] = {}
     for entry, cmd in pairs:
-        line = wrap(cmd, entry.via, interactive)
+        line = wrap(cmd, entry.via, interactive, lists.login_path(found, entry))
         group = out.setdefault(line, [])
         if all(e.login != entry.login for e in group):
             group.append(entry)
@@ -478,7 +497,7 @@ def cli(opts: logins.LoginOpts, dry_run: bool, serial: bool, interactive: bool,
     skipped: list[str] = []  # tagged, so a host and its container tell apart
     why = "no operation applies"
     try:
-        found = lists.load_all(opts.files) if paths or ops else None
+        found = lists.load_all(opts.files) if ops else None  # a command: after need_parallel
         leaves = expand(list(ops), found.operations) if ops else []
         askers = [op.name for op in leaves if op.serial]
         if askers and not serial:
@@ -496,9 +515,10 @@ def cli(opts: logins.LoginOpts, dry_run: bool, serial: bool, interactive: bool,
             entries = logins.select(opts, found=found)
             scripts = [(e, login_script(e, leaves, path_list, clone)) for e in entries]
             skipped = list(dict.fromkeys(tag(e) for e, s in scripts if s is None))
-            groups = runs([(e, s) for e, s in scripts if s], interactive)
+            groups = runs([(e, s) for e, s in scripts if s], interactive, found)
         else:
             cmd = command_line(list(command))
+            found = lists.load_all(opts.files)
             path_list = paths_list(found, pick_paths, path_attrs) if paths else []
             entries = logins.select(opts, found=found)
             if paths:
@@ -506,7 +526,7 @@ def cli(opts: logins.LoginOpts, dry_run: bool, serial: bool, interactive: bool,
                 entries = [e for e in entries if not shares_home(e)]
                 why = SHARED_HOME
             groups = runs([(e, paths_script(path_list, cmd, clone, e) if paths else cmd)
-                           for e in entries], interactive)
+                           for e in entries], interactive, found)
     except ToolError as e:
         print(f"pssh: {e}", file=sys.stderr)
         return cmdline.EXIT_ERROR

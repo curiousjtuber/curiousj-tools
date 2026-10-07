@@ -1,11 +1,12 @@
-# The operations curiousj-tools ships: read ahead of the lists files, so
-# `pssh -o NAME` has them with no file defining them, and an operation of
-# the same name in a lists file takes one's place. They select on the
-# attributes of the lists' logins and paths: tag a checkout 'git' for
-# git-pull, a login 'mise' for mise-update, and so on. `pssh -L` lists them.
+# The operations and the PATH additions curiousj-tools ships: read ahead of
+# the lists files, so `pssh -o NAME` has them with no file defining them,
+# and an operation or [path] key of the same name in a lists file takes
+# one's place. They select on the attributes of the lists' logins and
+# paths: tag a checkout 'git' for git-pull, a login 'mise' for mise-update
+# and the mise shims, and so on. `pssh -L` lists the operations.
 #
 # pssh runs them through a non-interactive ssh shell, which reads no rc file:
-# the PATH additions reach what a login shell would have found there.
+# [path] puts ahead of PATH what a login shell would have found there.
 
 [operations.git-pull]                   # every git checkout, cloned where missing
 command = "git pull --rebase --autostash"
@@ -13,12 +14,13 @@ paths = "git"
 clone = true
 
 [operations.uv-tool-update]             # each python checkout installed as an editable uv tool,
-command = "PATH=$HOME/.local/share/mise/shims:$PATH uv tool install --force --reinstall --editable ."
+command = "uv tool install --force --reinstall --editable ."
 paths = "py-project"                    # so a host runs its checkout as git-pull leaves it;
-                                        # rerun for new commands or dependencies
+                                        # rerun for new commands or dependencies; uv is found
+                                        # in ~/.local/bin, or the mise shims on a 'mise' login
 
 [operations.mise-update]
-command = "export PATH=$HOME/.local/bin:$PATH; mise self-update -y && mise upgrade"
+command = "mise self-update -y && mise upgrade"
 logins = "mise"
 
 [operations.cachy-update]               # asks questions, so one login at a time
@@ -27,7 +29,7 @@ logins = "cachyos"
 serial = true
 
 [operations.brew-upgrade]
-command = "export PATH=/opt/homebrew/bin:$PATH; brew update && brew upgrade"
+command = "brew update && brew upgrade"
 logins = { any = ["mac", "brew"] }
 
 [operations.apt-upgrade]                # sudo and apt ask, so one login at a time too
@@ -45,3 +47,9 @@ operations = ["cachy-update", "brew-upgrade", "apt-upgrade"]
 
 [operations.update-all]
 operations = ["git-pull", "uv-tool-update", "mise-update", "system-update", "distrobox-upgrade"]
+
+[path]                                  # ahead of PATH on every login, and on those tagged
+default = ["$HOME/.local/bin"]
+mise = ["$HOME/.local/share/mise/shims"]
+linuxbrew = ["/home/linuxbrew/.linuxbrew/bin", "/home/linuxbrew/.linuxbrew/sbin"]
+mac = ["/opt/homebrew/bin", "/opt/homebrew/sbin"]
