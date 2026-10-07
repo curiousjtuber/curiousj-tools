@@ -38,13 +38,23 @@ command = "sudo apt update && sudo apt upgrade"
 logins = { any = ["ubuntu", "debian"] }
 serial = true
 
+[operations.pacman-upgrade]             # plain Arch; a CachyOS login is tagged cachyos instead
+command = "sudo pacman -Syu"
+logins = "arch"
+serial = true
+
+[operations.dnf-upgrade]
+command = "sudo dnf upgrade"
+logins = "fedora"
+serial = true
+
 [operations.distrobox-upgrade]          # every container of the host, each through its own
 command = "distrobox upgrade --all"     # package manager; sudo may ask, so one login at a time
 logins = "distrobox"
 serial = true
 
 [operations.system-update]              # each login runs the member that applies to it
-operations = ["cachy-update", "brew-upgrade", "apt-upgrade"]
+operations = ["cachy-update", "brew-upgrade", "apt-upgrade", "pacman-upgrade", "dnf-upgrade"]
 
 [operations.update-all]
 operations = ["git-pull", "uv-tool-update", "mise-update", "system-update", "distrobox-upgrade"]

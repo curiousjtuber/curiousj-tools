@@ -433,7 +433,8 @@ class Builtins(unittest.TestCase):
     PATH_KEYS = ["default", "mise", "linuxbrew", "mac"]
 
     NAMES = ["git-pull", "uv-tool-update", "mise-update", "cachy-update", "brew-upgrade",
-             "apt-upgrade", "distrobox-upgrade", "system-update", "update-all"]
+             "apt-upgrade", "pacman-upgrade", "dnf-upgrade", "distrobox-upgrade", "system-update",
+             "update-all"]
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

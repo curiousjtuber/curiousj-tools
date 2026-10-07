@@ -292,8 +292,10 @@ attributes the lists give the logins and paths:
 | `cachy-update` | `cachy-update` on the logins tagged `cachyos`, one at a time |
 | `brew-upgrade` | `brew update && brew upgrade` on the logins tagged `mac` or `brew`, one at a time |
 | `apt-upgrade` | `sudo apt update && sudo apt upgrade` on the logins tagged `ubuntu` or `debian`, one at a time |
+| `pacman-upgrade` | `sudo pacman -Syu` on the logins tagged `arch`, one at a time |
+| `dnf-upgrade` | `sudo dnf upgrade` on the logins tagged `fedora`, one at a time |
 | `distrobox-upgrade` | `distrobox upgrade --all` on the logins tagged `distrobox`: every container of the host, through its own package manager, one login at a time |
-| `system-update` | a group: `cachy-update`, `brew-upgrade` and `apt-upgrade`, each login running the one that applies |
+| `system-update` | a group: `cachy-update`, `brew-upgrade`, `apt-upgrade`, `pacman-upgrade` and `dnf-upgrade`, each login running the one that applies |
 | `update-all` | a group: `git-pull`, `uv-tool-update`, `mise-update`, `system-update`, `distrobox-upgrade` |
 
 A lists file adds its own, and one of the same name takes a built-in's place:
@@ -308,13 +310,14 @@ clone = true                       # as -c
 command = "mise upgrade"
 logins = "mise"                    # per login: on every login whose attributes match (absent: all)
 
-[operations.dnf-upgrade]
-command = "sudo dnf upgrade"
-logins = "fedora"
+[operations.zypper-upgrade]
+command = "sudo zypper update"
+logins = "opensuse"
 serial = true                      # asks questions: run one login at a time, as -s
 
 [operations.system-update]         # a group: each login runs the members that apply to it
-operations = ["cachy-update", "brew-upgrade", "apt-upgrade", "dnf-upgrade"]
+operations = ["cachy-update", "brew-upgrade", "apt-upgrade", "pacman-upgrade", "dnf-upgrade",
+              "zypper-upgrade"]
 ```
 
 A condition is a term, a list of terms that all have to hold, or a table with any of `all`,

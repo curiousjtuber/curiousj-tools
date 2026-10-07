@@ -43,8 +43,8 @@ operations = { git-pull = "git pull --ff-only" }   # this path's own way of bein
 # Operations: `pssh -o NAME` runs one on every login it applies to, `xssh -o
 # NAME` opens a synchronized pane per such login instead. git-pull,
 # uv-tool-update, mise-update, cachy-update, brew-upgrade, apt-upgrade,
-# distrobox-upgrade, system-update and update-all come built in (`pssh -L`
-# lists them); these add to them. A condition is a term ('mise',
+# pacman-upgrade, dnf-upgrade, distrobox-upgrade, system-update and
+# update-all come built in (`pssh -L` lists them); these add to them. A condition is a term ('mise',
 # 'arch=x86_64', '!mise', 'arch!=x86_64'), a list of terms that all hold, or
 # a table with all, any, none.
 
