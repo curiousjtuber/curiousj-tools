@@ -28,9 +28,10 @@ command = "cachy-update"
 logins = "cachyos"
 serial = true
 
-[operations.brew-upgrade]
+[operations.brew-upgrade]               # a cask upgrade may ask for sudo: one login at a time
 command = "brew update && brew upgrade"
 logins = { any = ["mac", "brew"] }
+serial = true
 
 [operations.apt-upgrade]                # sudo and apt ask, so one login at a time too
 command = "sudo apt update && sudo apt upgrade"
