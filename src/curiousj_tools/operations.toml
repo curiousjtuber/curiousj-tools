@@ -48,6 +48,11 @@ command = "sudo dnf upgrade"
 logins = "fedora"
 serial = true
 
+[operations.flatpak-update]             # asks to proceed, and a system install may ask polkit
+command = "flatpak update"              # for a password: one login at a time
+logins = "flatpak"
+serial = true
+
 [operations.distrobox-upgrade]          # every container of the host, each through its own
 command = "distrobox upgrade --all"     # package manager; sudo may ask, so one login at a time
 logins = "distrobox"
@@ -57,7 +62,8 @@ serial = true
 operations = ["cachy-update", "brew-upgrade", "apt-upgrade", "pacman-upgrade", "dnf-upgrade"]
 
 [operations.update-all]
-operations = ["git-pull", "uv-tool-update", "mise-update", "system-update", "distrobox-upgrade"]
+operations = ["git-pull", "uv-tool-update", "mise-update", "system-update", "flatpak-update",
+              "distrobox-upgrade"]
 
 [path]                                  # ahead of PATH on every login, and on those tagged
 default = ["$HOME/.local/bin"]

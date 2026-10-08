@@ -294,9 +294,10 @@ attributes the lists give the logins and paths:
 | `apt-upgrade` | `sudo apt update && sudo apt upgrade` on the logins tagged `ubuntu` or `debian`, one at a time |
 | `pacman-upgrade` | `sudo pacman -Syu` on the logins tagged `arch`, one at a time |
 | `dnf-upgrade` | `sudo dnf upgrade` on the logins tagged `fedora`, one at a time |
+| `flatpak-update` | `flatpak update` on the logins tagged `flatpak`, one at a time |
 | `distrobox-upgrade` | `distrobox upgrade --all` on the logins tagged `distrobox`: every container of the host, through its own package manager, one login at a time |
 | `system-update` | a group: `cachy-update`, `brew-upgrade`, `apt-upgrade`, `pacman-upgrade` and `dnf-upgrade`, each login running the one that applies |
-| `update-all` | a group: `git-pull`, `uv-tool-update`, `mise-update`, `system-update`, `distrobox-upgrade` |
+| `update-all` | a group: `git-pull`, `uv-tool-update`, `mise-update`, `system-update`, `flatpak-update`, `distrobox-upgrade` |
 
 A lists file adds its own, and one of the same name takes a built-in's place:
 

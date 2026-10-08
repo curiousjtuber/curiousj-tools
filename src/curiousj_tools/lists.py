@@ -93,11 +93,11 @@ both files.
 Ahead of them all come the operations curiousj-tools ships, in
 'operations.toml' beside this module: git-pull, uv-tool-update, mise-update,
 cachy-update, brew-upgrade, apt-upgrade, pacman-upgrade, dnf-upgrade,
-distrobox-upgrade, system-update and update-all (`pssh -L` lists them), and
-its [path]: ~/.local/bin for
-every login, and the mise shims, Linuxbrew and Homebrew directories for the
-logins tagged mise, linuxbrew and mac. A file's operation or [path] key of
-the same name takes a built-in's place, without a warning.
+flatpak-update, distrobox-upgrade, system-update and update-all (`pssh -L`
+lists them), and its [path]: ~/.local/bin for every login, and the mise
+shims, Linuxbrew and Homebrew directories for the logins tagged mise,
+linuxbrew and mac. A file's operation or [path] key of the same name takes a
+built-in's place, without a warning.
 """
 
 from __future__ import annotations
