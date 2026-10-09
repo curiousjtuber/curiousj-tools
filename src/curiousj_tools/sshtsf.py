@@ -40,7 +40,10 @@ With ecf on, the connection also reverse-forwards the local Emacs server
 socket, so emacsclient / $EDITOR / ec-magit on the remote open in the local
 Emacs, provided the remote's EDITOR is 'emacsclient-auto' (this package; see
 README). The tmux session is also told the destination as dialed, as
-EMACS_REMOTE_TARGET, for the remote's TRAMP prefix. It is remembered per
+EMACS_REMOTE_TARGET, for the remote's TRAMP prefix. Run from inside such a
+session, with no Emacs of its own, it forwards the Emacs forwarded here on
+to the next host -- the one emacsclient here reaches -- and the target it
+tells that host hops back through this one. It is remembered per
 host or per session; -e / -E override for one call. If the remote runs
 SELinux (Fedora, Bazzite) and sshd is blocked from creating Unix sockets,
 give the host a TCP port to relay through (asked by -c when ecf is on; an
@@ -1060,12 +1063,59 @@ def waypipe_usable(target: str, via: str = "", host_bin: str = "",
 
 class EcfForward(NamedTuple):
     """An Emacs socket forward that can go ahead: the local socket, where it
-    lands on the remote, the TCP port it is relayed through if any, and the
-    cleanup command that settled the remote path, for a dry run to print."""
+    lands on the remote, the TCP port it is relayed through if any, the
+    cleanup command that settled the remote path, for a dry run to print,
+    and the TRAMP hops from the Emacs to this machine when the socket is
+    itself a forward (ecf_source), "" for this machine's own Emacs."""
     local: str
     remote: str
     port: int | None
     cleanup: list[str]
+    hops: str = ""
+
+
+class EcfSource(NamedTuple):
+    """The Emacs this end's emacsclient reaches: its socket, and the TRAMP
+    hops from it to here, as emacs-remote would write them less the leading
+    method -- "me@home", or "me@home|ssh:me@devbox" two hops out."""
+    socket: str
+    hops: str
+
+
+def ecf_forwarded_socket() -> EcfSource | None:
+    """The Emacs forwarded here by an `sshtsf -e` from the previous hop, if
+    this is such a session and the forward still answers.
+
+    The same decision emacsclient-auto makes, by the same knobs, so the
+    forward goes to the Emacs that $EDITOR here would open in: its TRAMP
+    prefix names the hops back, and its socket is live when an Emacs answers
+    on it, a stale file after a disconnect not counting. The prefix with its
+    leading method and trailing colon off is what emacs-remote on the next
+    host puts them back on to.
+    """
+    socket, prefix = emacsclient_auto.settings(os.environ)
+    if not prefix:
+        return None
+    real = emacsclient_auto.find_emacsclient(dict(os.environ))
+    if not real or not emacsclient_auto.socket_live(socket, real, os.environ):
+        return None
+    hops = prefix.strip("/").rstrip(":").partition(":")[2]
+    return EcfSource(socket, hops) if hops else None
+
+
+def ecf_source() -> EcfSource | None:
+    """The Emacs to forward: the one forwarded here, else the local server.
+
+    The forwarded one first, as emacsclient-auto itself prefers it: run from
+    inside an `sshtsf -e` session, `sshtsf -e` carries that Emacs one host
+    further, and a machine with no Emacs of its own -- the common case for a
+    hop in the middle -- is no longer a dead end for the forward.
+    """
+    forwarded = ecf_forwarded_socket()
+    if forwarded:
+        return forwarded
+    local = ecf_local_socket()
+    return EcfSource(local, "") if local else None
 
 
 def ecf_forward(target: str, port: int | None, dry_run: bool,
@@ -1087,16 +1137,20 @@ def ecf_forward(target: str, port: int | None, dry_run: bool,
     forward is dropped with the reason rather than attempted. A dry run
     dials nothing, and guesses the login the way ssh would by default.
     """
-    local = ecf_local_socket()
-    if local is None:
+    source = ecf_source()
+    if source is None:
         print("sshtsf: no local Emacs server socket (start Emacs first); "
               "connecting without the forward", file=sys.stderr)
         return None
+    local, hops = source
+    if hops:
+        print(f"sshtsf: forwarding the Emacs forwarded here, behind {hops}, on",
+              file=sys.stderr)
     cleanup = sshutil.probe_ssh(target) + remote_words(
         f'p={shlex.quote(ECF_REMOTE_SOCKET)}-$(id -un); rm -f "$p" && echo "$p"', via)
     if dry_run:
         return EcfForward(local, f"{ECF_REMOTE_SOCKET}-{remote_user_guess(target)}",
-                          port, cleanup)
+                          port, cleanup, hops)
     try:
         proc = subprocess.run(cleanup, text=True, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE)
@@ -1110,11 +1164,11 @@ def ecf_forward(target: str, port: int | None, dry_run: bool,
         print(f"sshtsf: could not clear the Emacs socket on {target} ({why}); "
               "connecting without the forward", file=sys.stderr)
         return None
-    return EcfForward(local, remote, port, cleanup)
+    return EcfForward(local, remote, port, cleanup, hops)
 
 
 def session_env(target: str, waypipe: WaypipeForward | None,
-                ecf: bool) -> list[tuple[str, str]]:
+                ecf: EcfForward | None) -> list[tuple[str, str]]:
     """What the session has to be told about this connection, as (name, shell
     word) pairs; the word is spliced into an `sh -c` script as-is, so a
     literal is quoted here and a '"$VAR"' is left for the remote sh to expand."""
@@ -1150,8 +1204,28 @@ def session_env(target: str, waypipe: WaypipeForward | None,
         # here. The destination as dialed, user@ and all, since TRAMP resolves
         # it through the same ssh_config; the rc lines prepend the login user
         # when there is none.
-        env.append(("EMACS_REMOTE_TARGET", shlex.quote(target)))
+        #
+        # When the Emacs is itself behind a forward, its TRAMP path has to
+        # come back the way the forward went, through this machine: the far
+        # Emacs need not be able to reach the next host directly, while this
+        # one is reaching it right now. So the hops to here, then this hop,
+        # in TRAMP's multi-hop form. The rc lines only prepend a user to a
+        # target with none at all, which a chain never is, so the login is
+        # filled in here instead -- by the remote, `id -un`, the way the
+        # cleanup names the socket, since that is the account it landed in.
+        if ecf.hops:
+            user = "" if "@" in target else "$(id -un)@"
+            env.append(("EMACS_REMOTE_TARGET",
+                        f'"{dq(ecf.hops)}|ssh:{user}{dq(target)}"'))
+        else:
+            env.append(("EMACS_REMOTE_TARGET", shlex.quote(target)))
     return env
+
+
+def dq(word: str) -> str:
+    """word made safe inside a double-quoted shell string, for a value that
+    has to sit beside an expansion."""
+    return word.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$").replace("`", "\\`")
 
 
 def remote_script(session: str, scfg: dict, env: list[tuple[str, str]],
@@ -1339,7 +1413,7 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
     if resolve_flag(cfg, host, session, "ecf", over.ecf):
         port = scfg.get("ecf_port") or cfg["hosts"][host].get("ecf_port")
         ecf = ecf_forward(target, port, dry_run, via)
-    env = session_env(target, waypipe, ecf is not None)
+    env = session_env(target, waypipe, ecf)
     argv = ssh_argv(target, remote_script(session, scfg, env, ecf), ecf, waypipe, via,
                     host_bin)
 

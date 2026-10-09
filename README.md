@@ -145,6 +145,15 @@ so `sshtsf -e` also sets `EMACS_REMOTE_TARGET` in the tmux session to the exact 
 it dialed. `emacs-remote`, from [Shell integration](#shell-integration), sets all of that up
 from it, and is on by itself in an interactive ssh login.
 
+Run from inside such a session, `sshtsf -e` carries the forwarded Emacs one host further
+rather than looking for one of its own: it forwards whichever Emacs `emacsclient` there
+reaches, which is the forwarded one while it answers (the same decision `emacsclient-auto`
+makes, from the same knobs), and the local server otherwise. The next host's
+`EMACS_REMOTE_TARGET` then hops back through this one, `me@home|ssh:me@devbox`, which
+`emacs-remote` turns into TRAMP's multi-hop form, so the far Emacs opens files along the path
+the forward took and need not reach the last host directly. A machine with no Emacs is no
+longer a dead end for `-e`.
+
 `EMACS_REMOTE_TARGET` is set on every ecf attach, so a shell that was already running in the
 session still holds the previous connection's name until it re-reads
 `tmux show-environment`; `tmux-env-refresh` does that at every prompt.

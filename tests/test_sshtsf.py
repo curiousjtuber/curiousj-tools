@@ -123,8 +123,13 @@ class ConfigDirMixin:
         patcher.start()
         self.addCleanup(patcher.stop)
         # No ssh-lists file unless a test writes one: the real one would
-        # otherwise be offered when a host is registered.
-        patcher = mock.patch.dict(os.environ, {"SSH_LISTS_FILE": "/nonexistent/ssh-lists.toml"})
+        # otherwise be offered when a host is registered. And not inside an
+        # `sshtsf -e` session, whatever the test run is in: a live forward
+        # here would be forwarded on where a test expects the local server.
+        patcher = mock.patch.dict(os.environ, {
+            "SSH_LISTS_FILE": "/nonexistent/ssh-lists.toml",
+            "EMACSCLIENT_TRAMP_PREFIX": "",
+            "EMACSCLIENT_FORWARD_SOCKET": os.path.join(self.tmp.name, "no-forward")})
         patcher.start()
         self.addCleanup(patcher.stop)
         self.cfg_path = cfg_path
@@ -1209,6 +1214,84 @@ class TestProbes(ConfigDirMixin, unittest.TestCase):
 
 
 SATELLITE = " || exit 1; command -v xwayland-satellite || exit 3"
+
+
+class TestEcfChain(ConfigDirMixin, unittest.TestCase):
+    """Run inside an `sshtsf -e` session, -e carries that Emacs one host on."""
+
+    FORWARD = "/tmp/emacs-remote-socket-me"
+
+    def setUp(self):
+        super().setUp()
+        sshtsf.save_config(SAMPLE)
+
+    def dry_run(self, prefix: str, live: bool, local=None, target="") -> tuple[str, str]:
+        if target:
+            cfg = sshtsf.load_config()
+            cfg["hosts"]["devbox"]["target"] = target
+            sshtsf.save_config(cfg)
+        env = {"EMACSCLIENT_TRAMP_PREFIX": prefix, "EMACSCLIENT_FORWARD_SOCKET": self.FORWARD}
+        with mock.patch.dict(os.environ, env), \
+             mock.patch.object(sshtsf.emacsclient_auto, "find_emacsclient",
+                               return_value="/usr/bin/emacsclient"), \
+             mock.patch.object(sshtsf.emacsclient_auto, "socket_live",
+                               return_value=live) as probe, \
+             mock.patch.object(sshtsf, "ecf_local_socket", return_value=local):
+            rc, out, err = run_capture(["devbox", "api", "--dry-run"])
+        self.assertEqual(rc, 0)
+        if prefix:
+            self.assertEqual(probe.call_args.args[:2], (self.FORWARD, "/usr/bin/emacsclient"))
+        else:
+            probe.assert_not_called()
+        return out.strip().splitlines()[-1], err
+
+    def test_the_forwarded_emacs_goes_on_with_a_target_that_hops_back(self):
+        cmd, err = self.dry_run("/ssh:me@laptop:", live=True)
+        self.assertIn(f"ssh -R /tmp/emacs-remote-socket-me:{self.FORWARD} -t devbox ", cmd)
+        self.assertIn('tmux set-environment -t =api EMACS_REMOTE_TARGET '
+                      '"me@laptop|ssh:$(id -un)@devbox"; ', cmd)
+        self.assertIn("forwarding the Emacs forwarded here, behind me@laptop, on", err)
+
+    def test_a_dialed_user_is_kept_and_the_chain_grows(self):
+        cmd, _ = self.dry_run("/ssh:me@laptop|ssh:me@devbox:", live=True,
+                              target="me@build.local")
+        self.assertIn('EMACS_REMOTE_TARGET "me@laptop|ssh:me@devbox|ssh:me@build.local"; ', cmd)
+        self.assertNotIn("$(id -un)@", cmd.split("EMACS_REMOTE_TARGET")[1])
+
+    def test_the_forwarded_emacs_wins_over_a_local_one(self):
+        # As emacsclient-auto decides it: what $EDITOR here opens in.
+        cmd, _ = self.dry_run("/ssh:me@laptop:", live=True, local="/x/server")
+        self.assertIn(f"-R /tmp/emacs-remote-socket-me:{self.FORWARD} ", cmd)
+
+    def test_a_dead_forward_falls_back_to_the_local_server(self):
+        cmd, err = self.dry_run("/ssh:me@laptop:", live=False, local="/x/server")
+        self.assertIn("-R /tmp/emacs-remote-socket-me:/x/server ", cmd)
+        self.assertIn("EMACS_REMOTE_TARGET devbox; ", cmd)
+        self.assertNotIn("forwarding the Emacs", err)
+
+    def test_neither_is_the_old_warning(self):
+        cmd, err = self.dry_run("/ssh:me@laptop:", live=False)
+        self.assertNotIn("-R", cmd)
+        self.assertIn("no local Emacs server socket (start Emacs first)", err)
+
+    def test_no_prefix_means_not_a_session_and_no_probe(self):
+        cmd, _ = self.dry_run("", live=True, local="/x/server")
+        self.assertIn("-R /tmp/emacs-remote-socket-me:/x/server ", cmd)
+
+    def test_hops_come_off_the_prefix(self):
+        with mock.patch.object(sshtsf.emacsclient_auto, "find_emacsclient",
+                               return_value="/usr/bin/emacsclient"), \
+             mock.patch.object(sshtsf.emacsclient_auto, "socket_live", return_value=True):
+            for prefix, hops in (("/ssh:me@laptop:", "me@laptop"),
+                                 ("/sshx:laptop:", "laptop"),
+                                 ("/ssh:a@b|ssh:c@d:", "a@b|ssh:c@d")):
+                with mock.patch.dict(os.environ, {"EMACSCLIENT_TRAMP_PREFIX": prefix}):
+                    self.assertEqual(sshtsf.ecf_forwarded_socket().hops, hops, prefix)
+            with mock.patch.dict(os.environ, {"EMACSCLIENT_TRAMP_PREFIX": "/ssh::"}):
+                self.assertIsNone(sshtsf.ecf_forwarded_socket())
+
+    def test_dq(self):
+        self.assertEqual(sshtsf.dq('a"b$c`d\\e'), 'a\\"b\\$c\\`d\\\\e')
 
 
 class TestWaypipeRemoteProbe(unittest.TestCase):
