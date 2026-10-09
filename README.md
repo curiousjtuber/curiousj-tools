@@ -115,6 +115,15 @@ along with the check for it. A `waypipe_bin` (say `~/.local/bin/waypipe`) instea
 waypipe on the host itself that its non-interactive `PATH` misses; it is passed as
 `--remote-bin` and checked there, outside any `via`.
 
+X11 applications ride the same forward when the remote has `xwayland-satellite` next to
+its waypipe: the probe for waypipe asks after it in the same round trip, and a yes adds
+`--xwls`, which runs the satellite on the remote on the first X11 connection and sets
+`DISPLAY` there, over anything `ssh -X` gave. Nothing is needed on this end beyond
+waypipe. A host's `xwls = true` forces it, for a host the probe cannot ask (one that only
+takes a password); `xwls = false` keeps X11 off it. Either is set by `sshtsf -c HOST`, or
+by hand. Without the satellite, X11 applications still work the old way, `ssh -X` in
+`~/.ssh/config`.
+
 `sshtsf -w` wraps the connection in `waypipe ssh`, and a terminal such as Konsole then sees
 `waypipe`, not the ssh it would otherwise title the tab after. So a waypipe session names the
 tab `HOST:SESSION` itself, and gives the tab its name back when the session ends. In Konsole that

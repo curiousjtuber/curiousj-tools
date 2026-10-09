@@ -13,6 +13,7 @@ target = "devbox"       # ssh destination, [user@]host; defaults to the host key
 alias = "c"
 via = "distrobox enter dev --"  # run tmux, waypipe and socat inside this container
 waypipe_bin = "~/.local/bin/waypipe"  # waypipe on the host, if not on its PATH
+xwls = false            # X11 applications over waypipe: unset asks the host for xwayland-satellite
 ecf = true              # forward the local Emacs socket, by default
 ecf_port = 41234        # relay via TCP port (for SELinux hosts where sshd cannot bind unix sockets)
 

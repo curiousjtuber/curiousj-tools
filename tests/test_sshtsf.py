@@ -741,7 +741,7 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         with mock.patch.object(sshtsf, "ecf_local_socket", return_value="/x/server"), \
              mock.patch.object(sshtsf, "waypipe_local_display",
                                return_value=("/run/user/1000/wayland-0", "")), \
-             mock.patch.object(sshtsf, "waypipe_remote_missing", return_value=""):
+             mock.patch.object(sshtsf, "waypipe_remote", return_value=sshtsf.RemoteWaypipe("", False)):
             rc, out, _ = run_capture(["devbox", "api", "--dry-run"])
         self.assertEqual(rc, 0)
         cmd = out.strip().splitlines()[1]
@@ -825,7 +825,7 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         with mock.patch.object(sshtsf, "ecf_local_socket", return_value=None), \
              mock.patch.object(sshtsf, "waypipe_local_display",
                                return_value=("/run/user/1000/wayland-0", "")), \
-             mock.patch.object(sshtsf, "waypipe_remote_missing", return_value=""), \
+             mock.patch.object(sshtsf, "waypipe_remote", return_value=sshtsf.RemoteWaypipe("", False)), \
              mock.patch.object(sshtsf, "konsole_tab_format", return_value=konsole_format), \
              mock.patch.object(sshtsf.subprocess, "run", run), \
              mock.patch.object(sshtsf.os, "execvp") as execvp:
@@ -911,7 +911,7 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
     def test_waypipe_flag_without_local_display_warns_and_connects(self):
         with mock.patch.object(sshtsf, "waypipe_local_display",
                                return_value=(None, "waypipe is not on PATH")), \
-             mock.patch.object(sshtsf, "waypipe_remote_missing") as probe:
+             mock.patch.object(sshtsf, "waypipe_remote") as probe:
             rc, out, err = run_capture(["-w", "devbox", "web", "--dry-run"])
         self.assertEqual(rc, 0)
         self.assertTrue(out.strip().startswith("ssh "))
@@ -923,8 +923,8 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
     def test_waypipe_flag_missing_on_remote_warns_and_connects(self):
         with mock.patch.object(sshtsf, "waypipe_local_display",
                                return_value=("/run/user/1000/wayland-0", "")), \
-             mock.patch.object(sshtsf, "waypipe_remote_missing",
-                               return_value="no waypipe on the non-interactive PATH of devbox"):
+             mock.patch.object(sshtsf, "waypipe_remote", return_value=sshtsf.RemoteWaypipe(
+                 "no waypipe on the non-interactive PATH of devbox", False)):
             rc, out, err = run_capture(["-w", "devbox", "web", "--dry-run"])
         self.assertEqual(rc, 0)
         cmd = out.strip()
@@ -1176,7 +1176,7 @@ class TestProbes(ConfigDirMixin, unittest.TestCase):
             sshtsf.live_sessions("devbox")
             sshtsf.remote_tmux("devbox")
             sshtsf.remote_dirs("devbox")
-            sshtsf.waypipe_remote_missing("devbox")
+            sshtsf.waypipe_remote("devbox")
             run_capture(["devbox", "api"])  # the cleanup ahead of the connection
         argvs = [call.args[0] for call in run.call_args_list]
         self.assertEqual(len(argvs), 5)
@@ -1192,7 +1192,7 @@ class TestProbes(ConfigDirMixin, unittest.TestCase):
             self.assertEqual(rows, [])
             self.assertIn("cannot run ssh", why)
             self.assertEqual(sshtsf.remote_dirs("devbox"), [])
-            self.assertEqual(sshtsf.waypipe_remote_missing("devbox"), "")
+            self.assertEqual(sshtsf.waypipe_remote("devbox"), ("", False))
             rc, out, _ = run_capture(["-L", "devbox"])
             self.assertEqual(rc, 0)
             self.assertIn("devbox:\n    (cannot run ssh:", out)
@@ -1208,62 +1208,137 @@ class TestProbes(ConfigDirMixin, unittest.TestCase):
         self.assertNotIn("-R", execvp.call_args.args[1])
 
 
+SATELLITE = " || exit 1; command -v xwayland-satellite || exit 3"
+
+
 class TestWaypipeRemoteProbe(unittest.TestCase):
     def probe(self, returncode, opts=(), via=""):
         proc = mock.Mock(returncode=returncode)
         with mock.patch.object(sshtsf, "WAYPIPE_OPTS", list(opts)), \
              mock.patch.object(sshtsf.subprocess, "run", return_value=proc) as run:
-            why = sshtsf.waypipe_remote_missing("devbox", via)
-        return why, run.call_args.args[0]
+            answer = sshtsf.waypipe_remote("devbox", via)
+        return answer, run.call_args.args[0]
 
-    def test_present(self):
-        why, argv = self.probe(0)
-        self.assertEqual(why, "")
-        self.assertEqual(argv, PROBE + ["-o", "BatchMode=yes", "devbox", "command -v waypipe"])
+    def test_present_with_satellite(self):
+        answer, argv = self.probe(0)
+        self.assertEqual(answer, ("", True))
+        self.assertEqual(argv, PROBE + ["-o", "BatchMode=yes", "devbox",
+                                        "command -v waypipe" + SATELLITE])
+
+    def test_present_without_satellite(self):
+        answer, _ = self.probe(3)
+        self.assertEqual(answer, ("", False))
 
     def test_missing(self):
-        why, _ = self.probe(1)
-        self.assertEqual(why, "no waypipe on the non-interactive PATH of devbox")
+        answer, _ = self.probe(1)
+        self.assertEqual(answer, ("no waypipe on the non-interactive PATH of devbox", False))
+        self.assertEqual(self.probe(127)[0].missing,
+                         "no waypipe on the non-interactive PATH of devbox")
 
     def test_ssh_failure_is_not_an_answer(self):
-        why, _ = self.probe(255)
-        self.assertEqual(why, "")
+        # A yes for waypipe, which the connection judges for itself; a no
+        # for --xwls, which would otherwise set a DISPLAY nothing serves.
+        answer, _ = self.probe(255)
+        self.assertEqual(answer, ("", False))
 
     def test_timeout_is_not_an_answer(self):
         with mock.patch.object(sshtsf.subprocess, "run",
                                side_effect=sshtsf.subprocess.TimeoutExpired("ssh", 20)):
-            self.assertEqual(sshtsf.waypipe_remote_missing("devbox"), "")
+            self.assertEqual(sshtsf.waypipe_remote("devbox"), ("", False))
 
     def test_remote_bin_is_probed_instead_of_path(self):
-        why, argv = self.probe(1, ["--compress", "zstd", "--remote-bin", "/opt/wp/bin/waypipe"])
-        self.assertEqual(argv[-1], "test -x /opt/wp/bin/waypipe")
-        self.assertEqual(why, "/opt/wp/bin/waypipe is not executable on devbox")
+        answer, argv = self.probe(1, ["--compress", "zstd", "--remote-bin", "/opt/wp/bin/waypipe"])
+        self.assertEqual(argv[-1], "test -x /opt/wp/bin/waypipe" + SATELLITE)
+        self.assertEqual(answer.missing, "/opt/wp/bin/waypipe is not executable on devbox")
 
     def test_remote_bin_with_equals(self):
         _, argv = self.probe(0, ["--remote-bin=/opt/wp/bin/waypipe"])
-        self.assertEqual(argv[-1], "test -x /opt/wp/bin/waypipe")
+        self.assertEqual(argv[-1], "test -x /opt/wp/bin/waypipe" + SATELLITE)
 
     def test_via_asks_inside_the_container(self):
-        why, argv = self.probe(1, via="distrobox enter dev --")
+        answer, argv = self.probe(1, via="distrobox enter dev --")
         self.assertEqual(argv, PROBE + ["-o", "BatchMode=yes", "devbox",
-                                        "distrobox enter dev -- sh -c 'command -v waypipe'"])
-        self.assertEqual(why, "no waypipe on the non-interactive PATH of devbox"
-                              " via distrobox enter dev --")
+                                        "distrobox enter dev -- sh -c "
+                                        + shlex.quote("command -v waypipe" + SATELLITE)])
+        self.assertEqual(answer.missing, "no waypipe on the non-interactive PATH of devbox"
+                                         " via distrobox enter dev --")
 
     def test_host_bin_is_checked_on_the_host_over_remote_bin(self):
         with mock.patch.object(sshtsf, "WAYPIPE_OPTS", ["--remote-bin", "/opt/wp/waypipe"]), \
              mock.patch.object(sshtsf.subprocess, "run",
                                return_value=mock.Mock(returncode=1)) as run:
-            why = sshtsf.waypipe_remote_missing("devbox", "distrobox enter dev --",
-                                                "~/.local/bin/waypipe")
-        self.assertEqual(run.call_args.args[0][-1], 'test -x "$HOME"/.local/bin/waypipe')
-        self.assertEqual(why, "~/.local/bin/waypipe is not executable on devbox")
+            answer = sshtsf.waypipe_remote("devbox", "distrobox enter dev --",
+                                           "~/.local/bin/waypipe")
+        self.assertEqual(run.call_args.args[0][-1],
+                         'test -x "$HOME"/.local/bin/waypipe' + SATELLITE)
+        self.assertEqual(answer.missing, "~/.local/bin/waypipe is not executable on devbox")
 
     def test_via_with_remote_bin(self):
         _, argv = self.probe(0, ["--remote-bin", "/opt/wp/bin/waypipe"],
                              via="distrobox enter dev --")
-        self.assertEqual(argv[-1],
-                         "distrobox enter dev -- sh -c 'test -x /opt/wp/bin/waypipe'")
+        self.assertEqual(argv[-1], "distrobox enter dev -- sh -c "
+                         + shlex.quote("test -x /opt/wp/bin/waypipe" + SATELLITE))
+
+
+class TestXwls(ConfigDirMixin, unittest.TestCase):
+    """X11 applications ride the Wayland forward when the remote can take them."""
+
+    def setUp(self):
+        super().setUp()
+        sshtsf.save_config(SAMPLE)
+
+    def dry_run(self, satellite: bool, xwls=None, opts=()) -> tuple[str, str]:
+        cfg = sshtsf.load_config()
+        cfg["hosts"]["devbox"]["sessions"]["api"]["waypipe"] = True
+        if xwls is not None:
+            cfg["hosts"]["devbox"]["xwls"] = xwls
+        sshtsf.save_config(cfg)
+        with mock.patch.object(sshtsf, "WAYPIPE_OPTS", list(opts)), \
+             mock.patch.object(sshtsf, "ecf_local_socket", return_value=None), \
+             mock.patch.object(sshtsf, "waypipe_local_display",
+                               return_value=("/run/user/1000/wayland-0", "")), \
+             mock.patch.object(sshtsf, "waypipe_remote",
+                               return_value=sshtsf.RemoteWaypipe("", satellite)), \
+             mock.patch.object(sshtsf.os, "execvp") as execvp:
+            _, _, err = run_capture(["devbox", "api"])
+        return " ".join(execvp.call_args.args[1]), err
+
+    def test_satellite_on_the_remote_turns_it_on(self):
+        cmd, err = self.dry_run(satellite=True)
+        self.assertTrue(cmd.startswith("waypipe --xwls ssh -t devbox "), cmd)
+        self.assertIn('tmux set-environment -t =api DISPLAY "$DISPLAY"; ', cmd)
+        self.assertIn("devbox -> api +waypipe +xwls\n", err)
+
+    def test_no_satellite_leaves_it_off(self):
+        cmd, err = self.dry_run(satellite=False)
+        self.assertTrue(cmd.startswith("waypipe ssh -t devbox "), cmd)
+        self.assertNotIn("DISPLAY \"$DISPLAY\"", cmd)
+        self.assertIn("devbox -> api +waypipe\n", err)
+
+    def test_host_xwls_false_keeps_it_off(self):
+        cmd, _ = self.dry_run(satellite=True, xwls=False)
+        self.assertTrue(cmd.startswith("waypipe ssh -t devbox "), cmd)
+
+    def test_host_xwls_true_forces_it(self):
+        # For a host the probe cannot ask, say one that only takes a password.
+        cmd, _ = self.dry_run(satellite=False, xwls=True)
+        self.assertTrue(cmd.startswith("waypipe --xwls ssh -t devbox "), cmd)
+
+    def test_an_xwls_in_the_env_knob_is_not_doubled(self):
+        cmd, _ = self.dry_run(satellite=True, opts=["--no-gpu", "--xwls"])
+        self.assertTrue(cmd.startswith("waypipe --no-gpu --xwls ssh -t devbox "), cmd)
+        self.assertEqual(cmd.count("--xwls"), 1)
+        # ... and the knob is the user's word, which a host's no does not undo.
+        cmd, _ = self.dry_run(satellite=False, xwls=False, opts=["--xwls"])
+        self.assertTrue(cmd.startswith("waypipe --xwls ssh -t devbox "), cmd)
+
+    def test_xwls_survives_a_rewrite_either_way(self):
+        for value in (True, False):
+            cfg = sshtsf.load_config()
+            cfg["hosts"]["devbox"]["xwls"] = value
+            sshtsf.save_config(cfg)
+            self.assertIs(sshtsf.load_config()["hosts"]["devbox"]["xwls"], value)
+            self.assertIn(f"xwls = {str(value).lower()}", sshtsf.dump_config(cfg))
 
 
 class TestVia(ConfigDirMixin, unittest.TestCase):
@@ -1289,7 +1364,7 @@ class TestVia(ConfigDirMixin, unittest.TestCase):
              mock.patch.object(sshtsf, "ecf_local_socket", return_value=None), \
              mock.patch.object(sshtsf, "waypipe_local_display",
                                return_value=("/run/user/1000/wayland-0", "")), \
-             mock.patch.object(sshtsf, "waypipe_remote_missing", return_value="") as probe, \
+             mock.patch.object(sshtsf, "waypipe_remote", return_value=sshtsf.RemoteWaypipe("", False)) as probe, \
              mock.patch.object(sshtsf.os, "execvp") as execvp:
             run_capture(argv + (["-w"] if waypipe else ["-W"]))
         if waypipe:
@@ -1428,6 +1503,24 @@ class TestConfigure(ConfigDirMixin, unittest.TestCase):
         self.assertEqual(cfg["hosts"]["build"],
                          {"target": "build.internal", "alias": "b", "ecf": True})
         self.assertEqual(cfg["default_host"], "build")
+
+    def test_xwls_is_asked_when_editing_a_waypipe_host(self):
+        # A new host is not asked (see the registering tests above, which
+        # fail on a prompt they lack): unset is the right answer there.
+        answers = {"name": "", "ssh destination": "", "alias": "",
+                   "run everything there via": "", "forward the local Emacs socket": "",
+                   "relay it": "", "forward Wayland": "y", "waypipe on it": "",
+                   "offer this host first": ""}
+        rc, _, cfg = self.configure(["build"], {
+            **answers, "X11 applications over waypipe": "n"}, picked=sshtsf.HOST_SETTINGS)
+        self.assertEqual(rc, 0)
+        self.assertIs(cfg["hosts"]["build"]["xwls"], False)
+        rc, _, cfg = self.configure(["build"], {
+            **answers, "forward Wayland": "", "X11 applications over waypipe": "-"},
+            picked=sshtsf.HOST_SETTINGS)
+        self.assertEqual(rc, 0)
+        self.assertNotIn("xwls", cfg["hosts"]["build"])
+        self.assertIs(cfg["hosts"]["build"]["waypipe"], True)
 
     def test_rename_host_follows_default_and_last(self):
         rc, _, cfg = self.configure(["devbox"], {

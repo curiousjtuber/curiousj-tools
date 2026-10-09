@@ -54,9 +54,12 @@ Remembered the same way; -w / -W override. It needs a Wayland session here
 and waypipe installed at both ends -- on the remote, on the PATH a
 non-interactive ssh gets, or inside the host's via (below). A host's
 waypipe_bin names one elsewhere on the host, and is passed as --remote-bin;
-it runs outside any via, which then wraps the session instead. Extra
-waypipe options (--compress, --no-gpu, --xwls, ...) go in
-SSHTSF_WAYPIPE_OPTS. The two forwards are independent and compose. A
+it runs outside any via, which then wraps the session instead. X11
+applications ride the same forward when the remote has xwayland-satellite
+beside its waypipe (--xwls, which also sets DISPLAY there, over anything
+ssh -X gave); a host's xwls = true/false forces that either way. Extra
+waypipe options (--compress, --no-gpu, ...) go in SSHTSF_WAYPIPE_OPTS. The
+two forwards are independent and compose. A
 waypipe session names the terminal tab HOST:SESSION itself, since the
 terminal only sees waypipe, not the ssh behind it; the name stays on the
 tab after the session ends.
@@ -99,6 +102,7 @@ Config layout (all fields but the host key are optional):
     alias = "c"
     via = "distrobox enter dev --"  # run tmux, waypipe and socat inside this container
     waypipe_bin = "~/.local/bin/waypipe"  # waypipe on the host, if not on its PATH
+    xwls = false            # X11 applications over waypipe: unset asks the host for xwayland-satellite
     ecf = true              # forward the local Emacs socket, by default
     ecf_port = 41234        # relay via TCP port (for SELinux hosts where sshd cannot bind unix sockets)
 
@@ -150,9 +154,11 @@ ECF_REMOTE_SOCKET = (os.environ.get("SSHTSF_ECF_SOCKET")
                      or emacsclient_auto.SOCKET_PREFIX)
 
 # Extra options spliced into the waypipe argv, e.g. --compress zstd, --no-gpu,
-# --xwls, or --remote-bin for a host where waypipe is not on the PATH a
+# or --remote-bin for a host where waypipe is not on the PATH a
 # non-interactive ssh gets. An env knob rather than config fields, so waypipe's
-# whole option set is reachable without teaching this file any of it.
+# whole option set is reachable without teaching this file any of it. --xwls
+# is the one it does know: added on its own when the remote can run it, and a
+# host's xwls field has the last word (waypipe_opts).
 WAYPIPE_OPTS = shlex.split(os.environ.get("SSHTSF_WAYPIPE_OPTS") or "")
 
 # Put ahead of PATH on the remote before anything is run there. A
@@ -243,7 +249,7 @@ def dump_config(cfg: dict) -> str:
                 lines.append(f"{field} = {toml_str(hcfg[field])}")
         if hcfg.get("ecf_port"):
             lines.append(f"ecf_port = {hcfg['ecf_port']}")
-        for field in BOOL_FIELDS:
+        for field in BOOL_FIELDS + ("xwls",):
             if field in hcfg:
                 lines.append(f"{field} = {toml_bool(hcfg[field])}")
         lines.append("")
@@ -950,8 +956,21 @@ def remote_path_word(path: str) -> str:
     return shlex.quote(path)
 
 
-def waypipe_remote_missing(target: str, via: str = "", host_bin: str = "") -> str:
-    """Why `waypipe ssh` would die on the far side, or "" when it should not.
+class RemoteWaypipe(NamedTuple):
+    """The far side's answer about waypipe: why `waypipe ssh` would die there,
+    or "" when it should not, and whether xwayland-satellite is next to it,
+    for --xwls."""
+    missing: str
+    xwls: bool
+
+
+# What the probe exits with for a waypipe that has no xwayland-satellite
+# beside it: apart from the 1 or 127 of a missing waypipe and ssh's own 255.
+NO_SATELLITE = 3
+
+
+def waypipe_remote(target: str, via: str = "", host_bin: str = "") -> RemoteWaypipe:
+    """Ask the remote whether `waypipe ssh` can run there, and with --xwls.
 
     waypipe_local_display, one hop further out: waypipe has to exist at both
     ends, and a remote without it fails after the handshake with waypipe's own
@@ -959,12 +978,18 @@ def waypipe_remote_missing(target: str, via: str = "", host_bin: str = "") -> st
     costs a BatchMode round trip, paid only when waypipe is on, and buys the
     choice between a plain connection and none.
 
+    The same round trip asks after xwayland-satellite, which --xwls spawns on
+    the first X11 connection. A server told --xwls without it still sets
+    DISPLAY, over whatever ssh -X gave, and the X11 application that trusts
+    it fails to open the display -- so the option waits for a yes here.
+
     Honours --remote-bin in SSHTSF_WAYPIPE_OPTS, the knob for exactly the host
     whose non-interactive PATH lacks waypipe, and the host's via, which is
-    where ssh_argv starts the server: the question is asked behind it, of
+    where ssh_argv starts the server: both questions are asked behind it, of
     the PATH the server will get there. A probe that cannot answer -- a host
-    that only takes a password, a timeout -- is taken as a yes, leaving the
-    real connection to be the judge.
+    that only takes a password, a timeout -- is a yes for waypipe, leaving the
+    real connection to be the judge, and a no for satellite, since a dead
+    DISPLAY is worse than none; a host's xwls = true overrides that.
 
     A host's waypipe_bin is a waypipe on the host itself, outside any via:
     it is checked there, and it wins over --remote-bin.
@@ -976,6 +1001,9 @@ def waypipe_remote_missing(target: str, via: str = "", host_bin: str = "") -> st
     else:
         check = "command -v waypipe"
         what = f"no waypipe on the non-interactive PATH of {target}"
+    # `;` and `||`, which fish takes as well as sh: the host side runs in
+    # the login shell, whatever that is.
+    check = f"{check} || exit 1; command -v xwayland-satellite || exit {NO_SATELLITE}"
     if via and not host_bin:
         # sh -c for command -v, a shell builtin that via may not be able to
         # start on its own; sh leaves the PATH as via set it.
@@ -986,12 +1014,14 @@ def waypipe_remote_missing(target: str, via: str = "", host_bin: str = "") -> st
             sshutil.probe_ssh(target, batch=True) + [check],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
     except (subprocess.TimeoutExpired, OSError):
-        return ""
+        return RemoteWaypipe("", False)
     # 255 is ssh itself failing to connect; anything else is the remote
     # shell's verdict.
-    if proc.returncode in (0, 255):
-        return ""
-    return what
+    if proc.returncode == 0:
+        return RemoteWaypipe("", True)
+    if proc.returncode in (NO_SATELLITE, 255):
+        return RemoteWaypipe("", False)
+    return RemoteWaypipe(what, False)
 
 
 def remote_user_guess(target: str) -> str:
@@ -1006,18 +1036,26 @@ def remote_user_guess(target: str) -> str:
     return sshutil.login_name()
 
 
-def waypipe_usable(target: str, via: str = "", host_bin: str = "") -> bool:
-    """Whether a waypipe forward can go ahead; if not, says why on stderr."""
+class WaypipeForward(NamedTuple):
+    """A Wayland forward that can go ahead, and whether X11 applications
+    ride it too (--xwls)."""
+    xwls: bool
+
+
+def waypipe_usable(target: str, via: str = "", host_bin: str = "",
+                   xwls: bool | None = None) -> WaypipeForward | None:
+    """The waypipe forward that can go ahead, or None, saying why on stderr.
+    xwls is the host's word on X11 applications; None leaves it to the probe."""
     display, why = waypipe_local_display()
     if display is None:
         print(f"sshtsf: no local Wayland display ({why}); connecting without it",
               file=sys.stderr)
-        return False
-    why = waypipe_remote_missing(target, via, host_bin)
-    if why:
-        print(f"sshtsf: {why}; connecting without Wayland", file=sys.stderr)
-        return False
-    return True
+        return None
+    remote = waypipe_remote(target, via, host_bin)
+    if remote.missing:
+        print(f"sshtsf: {remote.missing}; connecting without Wayland", file=sys.stderr)
+        return None
+    return WaypipeForward(xwls=remote.xwls if xwls is None else bool(xwls))
 
 
 class EcfForward(NamedTuple):
@@ -1075,7 +1113,8 @@ def ecf_forward(target: str, port: int | None, dry_run: bool,
     return EcfForward(local, remote, port, cleanup)
 
 
-def session_env(target: str, waypipe: bool, ecf: bool) -> list[tuple[str, str]]:
+def session_env(target: str, waypipe: WaypipeForward | None,
+                ecf: bool) -> list[tuple[str, str]]:
     """What the session has to be told about this connection, as (name, shell
     word) pairs; the word is spliced into an `sh -c` script as-is, so a
     literal is quoted here and a '"$VAR"' is left for the remote sh to expand."""
@@ -1094,6 +1133,13 @@ def session_env(target: str, waypipe: bool, ecf: bool) -> list[tuple[str, str]]:
         # runs earlier and would expand it to the remote's own display, or to
         # nothing. So `sh -c` below, with $WAYLAND_DISPLAY left for it to expand.
         env.append(("WAYLAND_DISPLAY", '"$WAYLAND_DISPLAY"'))
+        if waypipe.xwls:
+            # DISPLAY, which the server sets alongside, has been in tmux's
+            # default update-environment all along -- but a tmux.conf that
+            # names its own list (to keep SSH_AUTH_SOCK, say) drops it, and
+            # then an X11 application opens on the remote's own screen, or
+            # on the display a previous connection left. Told the same way.
+            env.append(("DISPLAY", '"$DISPLAY"'))
     if ecf:
         # Tell the session the name this end dialed, so the remote's rc file
         # can build a TRAMP prefix the local Emacs can actually connect back
@@ -1199,8 +1245,9 @@ def remote_script(session: str, scfg: dict, env: list[tuple[str, str]],
         + ("; [ -z \"$SOCAT_PID\" ] || kill $SOCAT_PID 2>/dev/null" if port else ""))
 
 
-def ssh_argv(target: str, script: str, ecf: EcfForward | None, waypipe: bool,
-             via: str = "", host_bin: str = "") -> list[str]:
+def ssh_argv(target: str, script: str, ecf: EcfForward | None,
+             waypipe: WaypipeForward | None, via: str = "",
+             host_bin: str = "") -> list[str]:
     """The command line that connects: ssh, or waypipe ssh, running script,
     behind via if the host has one."""
     # No ExitOnForwardFailure: a bind that fails despite the cleanup is ssh's
@@ -1233,32 +1280,41 @@ def ssh_argv(target: str, script: str, ecf: EcfForward | None, waypipe: bool,
         # per-connection name is fine, because the session is told the name
         # above, and a prompt hook that re-reads `tmux show-environment` can
         # carry it into the panes that predate this connection.
-        argv = ["waypipe"] + waypipe_opts(via, host_bin) + ["ssh"] + argv[1:]
+        argv = (["waypipe"] + waypipe_opts(via, host_bin, waypipe.xwls)
+                + ["ssh"] + argv[1:])
     return argv
 
 
-def waypipe_opts(via: str, host_bin: str = "") -> list[str]:
+def waypipe_opts(via: str, host_bin: str = "", xwls: bool = False) -> list[str]:
     """WAYPIPE_OPTS, with --remote-bin replaced by the host's waypipe_bin, or
-    else put behind via when there is one.
+    else put behind via when there is one, and --xwls added for xwls.
 
     waypipe hands --remote-bin to ssh as a single word, and ssh joins its
     words for the remote shell to split again, so a value with spaces is
     run as a command line there -- which is what makes 'via waypipe' work,
     and lets a waypipe_bin of ~/... expand there.
+
+    An --xwls already in WAYPIPE_OPTS is left alone, and left in: the knob
+    says what the remote can do, and a host's xwls = false says the same of
+    the remote, so the two are not made to fight.
     """
-    if not via and not host_bin:
-        return WAYPIPE_OPTS
-    opts, skip = [], False
-    for word in WAYPIPE_OPTS:
-        if skip:
-            skip = False
-        elif word == "--remote-bin":
-            skip = True
-        elif not word.startswith("--remote-bin="):
-            opts.append(word)
-    if host_bin:
-        return opts + ["--remote-bin", host_bin]
-    return opts + ["--remote-bin", f"{via} {waypipe_remote_bin() or 'waypipe'}"]
+    opts = list(WAYPIPE_OPTS)
+    if via or host_bin:
+        opts, skip = [], False
+        for word in WAYPIPE_OPTS:
+            if skip:
+                skip = False
+            elif word == "--remote-bin":
+                skip = True
+            elif not word.startswith("--remote-bin="):
+                opts.append(word)
+        if host_bin:
+            opts += ["--remote-bin", host_bin]
+        else:
+            opts += ["--remote-bin", f"{via} {waypipe_remote_bin() or 'waypipe'}"]
+    if xwls and "--xwls" not in opts:
+        opts.append("--xwls")
+    return opts
 
 
 def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
@@ -1277,8 +1333,8 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
     target = ssh_target(cfg, host)
     via = host_via(cfg, host)
     host_bin = cfg["hosts"][host].get("waypipe_bin", "")
-    waypipe = (resolve_flag(cfg, host, session, "waypipe", over.waypipe)
-               and waypipe_usable(target, via, host_bin))
+    waypipe = (waypipe_usable(target, via, host_bin, cfg["hosts"][host].get("xwls"))
+               if resolve_flag(cfg, host, session, "waypipe", over.waypipe) else None)
     ecf = None
     if resolve_flag(cfg, host, session, "ecf", over.ecf):
         port = scfg.get("ecf_port") or cfg["hosts"][host].get("ecf_port")
@@ -1295,7 +1351,8 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
 
     remember(cfg, host, session)
     print(f"sshtsf: {target} -> {session}{' +ecf' if ecf else ''}"
-          f"{' +waypipe' if waypipe else ''}", file=sys.stderr)
+          f"{' +waypipe' if waypipe else ''}{' +xwls' if waypipe and waypipe.xwls else ''}",
+          file=sys.stderr)
     if waypipe and sys.stdout.isatty():
         # Konsole names a tab after its foreground process and only knows an
         # ssh session when that process is ssh itself. Behind waypipe it sees
@@ -1567,6 +1624,12 @@ def edit_host(cfg: dict, name: str = "", existing: dict | None = None) -> str | 
             "  waypipe on it, if not on the non-interactive PATH (e.g. ~/.local/bin/waypipe)",
             hcfg.get("waypipe_bin", ""), editing, unset="the PATH's",
             words=lambda: host_values(cfg, "waypipe_bin")))
+    # Only when editing: unset asks the host for xwayland-satellite, which is
+    # the right answer for a new host, and both overrides are the rarer thing.
+    if editing and (hcfg.get("waypipe") or "xwls" in hcfg):
+        set_field(hcfg, "xwls", ask_bool(
+            "  X11 applications over waypipe too (--xwls)?", hcfg.get("xwls"), editing,
+            unset="whatever the host has"))
 
     if editing and new_name != name:
         hosts.pop(name)
