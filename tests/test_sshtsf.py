@@ -9,7 +9,9 @@ from __future__ import annotations
 import contextlib
 import io
 import os
+import pty
 import shlex
+import sys
 import tempfile
 import textwrap
 import unittest
@@ -874,9 +876,26 @@ class TestDryRun(ConfigDirMixin, unittest.TestCase):
         self.assertTrue(out.endswith("\033]30;%d : %n\007"))
         self.assertIn("sshtsf: cannot run waypipe", err)
 
+    def test_titled_session_that_drops_resets_the_terminal(self):
+        self.waypipe_on()
+        run = mock.Mock(return_value=mock.Mock(returncode=255))
+        _, out, _, _ = self.connect_for_real(["devbox", "api"], tty=True,
+                                             konsole_format="%d : %n", run=run)
+        self.assertEqual(out, "\033]30;devbox:api\007\033]30;%d : %n\007"
+                         + sshtsf.TERMINAL_RESET)
+
     def test_plain_session_leaves_the_tab_to_the_terminal(self):
         _, out, _, execvp = self.connect_for_real(["devbox", "api"], tty=True)
         self.assertEqual(execvp.call_args.args[0], "ssh")
+        self.assertEqual(out, "")
+
+    def test_plain_session_in_the_foreground_runs_as_its_own_job(self):
+        with mock.patch.object(sshtsf, "foreground_tty", return_value=0), \
+             mock.patch.object(sshtsf, "run_foreground", return_value=255) as run:
+            rc, out, _, execvp = self.connect_for_real(["devbox", "api"], tty=True)
+        execvp.assert_not_called()
+        self.assertEqual(run.call_args.args[0][0], "ssh")
+        self.assertEqual(rc, 255)
         self.assertEqual(out, "")
 
     def test_tab_title_needs_a_terminal(self):
@@ -1728,3 +1747,51 @@ class TestConfigure(ConfigDirMixin, unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestRunForeground(unittest.TestCase):
+    """run_foreground for real, in a pty of its own: the terminal handed to
+    the job and back, and the reset only after a drop."""
+
+    def run_in_pty(self, script: str) -> tuple[int, bytes]:
+        """run_foreground(sh -c script) as the job of a fresh terminal; its
+        return, and what reached the terminal."""
+        pid, master = pty.fork()
+        if pid == 0:
+            try:
+                # pytest's capture stands in for both; the job's are the pty.
+                sys.stdin, sys.stdout = open(0, closefd=False), open(1, "w", closefd=False)
+                rc = sshtsf.run_foreground(
+                    ["sh", "-c", 'test "$(ps -o tpgid= -p $$)" -eq $$ || exit 99; '
+                     + script], sshtsf.foreground_tty())
+                os.write(1, b"back:%d" % (os.tcgetpgrp(0) == os.getpgrp()))
+                os._exit(rc)
+            except BaseException:
+                os._exit(98)
+        out = b""
+        while True:
+            try:
+                chunk = os.read(master, 1024)
+            except OSError:
+                break
+            if not chunk:
+                break
+            out += chunk
+        os.close(master)
+        _, status = os.waitpid(pid, 0)
+        return os.waitstatus_to_exitcode(status), out
+
+    def test_a_drop_resets_the_terminal(self):
+        rc, out = self.run_in_pty("exit 255")
+        self.assertEqual(rc, 255)
+        self.assertEqual(out, sshtsf.TERMINAL_RESET.encode() + b"back:1")
+
+    def test_a_clean_end_leaves_the_terminal_alone(self):
+        rc, out = self.run_in_pty("exit 3")
+        self.assertEqual(rc, 3)
+        self.assertEqual(out, b"back:1")
+
+    def test_a_killed_job_resets_the_terminal(self):
+        rc, out = self.run_in_pty("kill -TERM $$")
+        self.assertEqual(rc, 143)
+        self.assertEqual(out, sshtsf.TERMINAL_RESET.encode() + b"back:1")

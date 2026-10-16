@@ -929,6 +929,36 @@ def tab_title_restore(konsole_format: str | None) -> str:
     return "\x1b[23;0t"
 
 
+# What tmux turns off on its way out, as it detaches, and cannot when the
+# connection drops under it: left on, the local shell gets every mouse move,
+# click and focus change as escape-sequence garbage at its prompt. Only the
+# input modes and what is invisible either way -- not the alternate screen,
+# whose exit also restores a saved cursor, and would throw the prompt back
+# over earlier output after a connection that failed before tmux ever ran.
+TERMINAL_RESET = (
+    "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l"  # mouse
+    "\x1b[?1004l"   # focus events
+    "\x1b[?2004l"   # bracketed paste; the shell's line editor turns it back on
+    "\x1b[>4m"      # modifyOtherKeys, tmux's extended keys
+    "\x1b[?1l\x1b>"  # cursor keys and keypad
+    "\x1b[?25h"     # the cursor shown
+    "\x1b[m")       # colours and attributes
+
+
+def dropped(rc: int) -> bool:
+    """Whether a session ended without tmux putting the terminal back: ssh
+    exits 255 when the connection fails, and a signal stops it outright."""
+    return rc == 255 or rc < 0
+
+
+def reset_after(rc: int) -> None:
+    """Undo tmux's terminal modes when the session that ended with rc
+    dropped."""
+    if dropped(rc):
+        sys.stdout.write(TERMINAL_RESET)
+        sys.stdout.flush()
+
+
 def run_titled(argv: list[str], title: str) -> int:
     """Run argv with the tab named title, and give the tab its name back
     when argv ends. argv's exit status is returned."""
@@ -947,7 +977,62 @@ def run_titled(argv: list[str], title: str) -> int:
         signal.signal(signal.SIGINT, previous)
         sys.stdout.write(tab_title_restore(konsole_format))
         sys.stdout.flush()
+    reset_after(rc)
     # Killed by a signal: the status a shell would report.
+    return 128 - rc if rc < 0 else rc
+
+
+def foreground_tty() -> int | None:
+    """stdin's terminal when this process is its foreground job, the one
+    run_foreground can hand on; else None."""
+    try:
+        fd = sys.stdin.fileno()
+        return fd if os.isatty(fd) and os.tcgetpgrp(fd) == os.getpgrp() else None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def run_foreground(argv: list[str], tty: int) -> int:
+    """Run argv as tty's foreground job, and put the terminal back in order
+    when the connection drops. argv's exit status is returned.
+
+    In a process group of its own, handed the terminal, the way a shell runs
+    a job: Konsole names a tab after the leader of the terminal's foreground
+    group, and knows an ssh session only when that leader is ssh -- which an
+    exec gave for free, and which a child in this process's group would lose
+    to python. Stopped (ssh's ~^Z escape), it stops this process too, so the
+    shell's `fg` comes back here to hand the terminal on again.
+    """
+    def give(pgid: int) -> None:
+        # tcsetpgrp from a group not in the foreground stops the caller
+        # with SIGTTOU unless that is ignored; restored for argv to inherit.
+        previous = signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+        try:
+            os.tcsetpgrp(tty, pgid)
+        finally:
+            signal.signal(signal.SIGTTOU, previous)
+
+    def own_group() -> None:
+        os.setpgid(0, 0)
+        give(os.getpid())
+
+    # Popen returns once argv has exec'd, so the terminal is argv's by then.
+    try:
+        proc = subprocess.Popen(argv, preexec_fn=own_group)
+    except OSError as exc:
+        give(os.getpgrp())
+        sys.exit(f"sshtsf: cannot run {argv[0]}: {exc}")
+    while True:
+        _, status = os.waitpid(proc.pid, os.WUNTRACED)
+        if not os.WIFSTOPPED(status):
+            break
+        give(os.getpgrp())
+        os.kill(os.getpid(), signal.SIGTSTP)
+        give(proc.pid)
+        os.killpg(proc.pid, signal.SIGCONT)
+    give(os.getpgrp())
+    rc = proc.returncode = os.waitstatus_to_exitcode(status)
+    reset_after(rc)
     return 128 - rc if rc < 0 else rc
 
 
@@ -1394,7 +1479,7 @@ def waypipe_opts(via: str, host_bin: str = "", xwls: bool = False) -> list[str]:
 def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
             over: Overrides = NO_OVERRIDES) -> int:
     """Connect to session on host, or with dry_run print how: the forwards
-    that can go ahead, the script, the command line, then exec.
+    that can go ahead, the script, the command line, then run it.
 
     A forward that cannot be set up is a warning, never a refusal, whether
     it was asked for by flag or by config: the session is the point, and a
@@ -1431,9 +1516,12 @@ def connect(cfg: dict, host: str, session: str, dry_run: bool = False,
         # Konsole names a tab after its foreground process and only knows an
         # ssh session when that process is ssh itself. Behind waypipe it sees
         # waypipe, so name the tab here, and stay to put the name back after.
-        # A plain session is exec'd and left to the terminal: ssh has to be
-        # the foreground process for Konsole to see it.
+        # A plain session is left to the terminal: ssh has to be the
+        # foreground process for Konsole to see it.
         return run_titled(argv, f"{host}:{session}")
+    tty = foreground_tty()
+    if tty is not None and sys.stdout.isatty():
+        return run_foreground(argv, tty)
     try:
         os.execvp(argv[0], argv)
     except OSError as exc:
