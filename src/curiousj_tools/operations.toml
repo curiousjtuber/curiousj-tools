@@ -48,10 +48,11 @@ command = "sudo dnf upgrade"
 logins = "fedora"
 serial = true
 
-[operations.flatpak-update]             # asks to proceed, and a system install may ask polkit
-command = "flatpak update"              # for a password: one login at a time
-logins = "flatpak"
-serial = true
+[operations.flatpak-update]             # asks to proceed, and sudo may ask: one login at a time.
+command = "sudo flatpak update --system; flatpak update --user"
+logins = "flatpak"                      # Root skips polkit, which over ssh asks the password once
+serial = true                           # per ref updated; a --user installation asks nothing,
+                                        # so it runs as the user
 
 [operations.distrobox-upgrade]          # every container of the host, each through its own
 command = "distrobox upgrade --all"     # package manager; sudo may ask, so one login at a time
